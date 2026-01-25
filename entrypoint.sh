@@ -14,15 +14,16 @@ fi
 
 : "${HAPI_HOST:=0.0.0.0}"
 : "${HAPI_PORT:=80}"
-: "${CLI_API_TOKEN}"
-: "${HAPI_API_URL}"
+: "${CLI_API_TOKEN:=}"
+: "${HAPI_API_URL:=}"
+: "${HAPI_DAEMON_ENABLED:=false}"
 : "${ROOT_PASSWORD:=}"
 
 HAPI_USER="${HAPI_USER:-hapi}"
 HAPI_USER_HOME="/home/${HAPI_USER}"
-: "${HAPI_HOME:=${HAPI_USER_HOME}}"
+: "${HAPI_HOME:=${HAPI_USER_HOME}/.hapi}"
 
-echo "Starting hapi codex against ${HAPI_API_URL}..."
+echo "Starting clihost container..."
 
 # Setup sshd (started as main process via CMD in Dockerfile)
 mkdir -p /var/run/sshd
@@ -79,20 +80,34 @@ TTYD_PASSWORD="${TTYD_PASSWORD}" \
 PASSWORD_SECRET="${PASSWORD_SECRET}" \
 python3 /app/ttyd_proxy.py &
 
-# Start hapi daemon in background as hapi user
-echo "Starting hapi daemon: HAPI_HOST=${HAPI_HOST} HAPI_PORT=${HAPI_PORT} HAPI_API_URL=${HAPI_API_URL}"
-if ! runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOST=\"${HAPI_HOST}\" HAPI_PORT=\"${HAPI_PORT}\" HAPI_API_URL=\"${HAPI_API_URL}\" CLI_API_TOKEN=\"${CLI_API_TOKEN}\" HAPI_HOME=\"${HAPI_HOME}\" hapi daemon start 2>&1"; then
-  echo '=== DAEMON START FAILED ===' >&2
-fi
+# Start hapi server with relay in background (logs to file, force TCP relay)
+HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
+mkdir -p "${HAPI_HOME}"
+chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_HOME}"
+echo "Starting hapi server --relay in background (logs: ${HAPI_SERVER_LOG})..."
+runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" HAPI_RELAY_FORCE_TCP=true hapi server --relay 2>&1 | tee \"${HAPI_SERVER_LOG}\"" &
+HAPI_SERVER_PID=$!
+echo "Hapi server started with PID: ${HAPI_SERVER_PID}"
 
-# Verify daemon is running, run diagnostics if not
-echo "Checking hapi daemon status..."
-if ! runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOST=\"${HAPI_HOST}\" HAPI_PORT=\"${HAPI_PORT}\" CLI_API_TOKEN=\"${CLI_API_TOKEN}\" HAPI_API_URL=\"${HAPI_API_URL}\" HAPI_HOME=\"${HAPI_HOME}\" hapi daemon status 2>&1"; then
-  echo '=== DAEMON NOT RUNNING ===' >&2
-  echo 'Running hapi doctor for diagnostics:' >&2
-  runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOST=\"${HAPI_HOST}\" HAPI_PORT=\"${HAPI_PORT}\" CLI_API_TOKEN=\"${CLI_API_TOKEN}\" HAPI_API_URL=\"${HAPI_API_URL}\" HAPI_HOME=\"${HAPI_HOME}\" hapi doctor 2>&1"
+# Start hapi daemon if enabled (reads config from volume)
+if [ "${HAPI_DAEMON_ENABLED}" = "true" ]; then
+  echo "Starting hapi daemon..."
+  if ! runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" hapi daemon start 2>&1"; then
+    echo '=== DAEMON START FAILED ===' >&2
+  fi
+
+  # Verify daemon is running
+  echo "Checking hapi daemon status..."
+  if ! runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" hapi daemon status 2>&1"; then
+    echo '=== DAEMON NOT RUNNING ===' >&2
+    echo 'Running hapi doctor for diagnostics:' >&2
+    runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" hapi doctor 2>&1" || true
+  fi
+  echo "Hapi daemon startup complete"
+else
+  echo "Hapi daemon disabled (set HAPI_DAEMON_ENABLED=true to enable)"
+  echo "Config created by 'hapi server --relay' - run 'hapi daemon start' manually if needed"
 fi
-echo "Hapi daemon startup complete"
 
 # sshd is now the main process (via CMD in Dockerfile)
 # Container stays alive as long as sshd runs

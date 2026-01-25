@@ -523,23 +523,29 @@ class TTYDProxyHandler(BaseHandler):
 def main():
     """Start the TTYD proxy server."""
     server_address = ("0.0.0.0", PORT)
-    httpd = HTTPServer(server_address, TTYDProxyHandler)
+    print(f"Starting TTYD HTTP proxy on {server_address}...", flush=True)
+
+    try:
+        httpd = HTTPServer(server_address, TTYDProxyHandler)
+    except OSError as e:
+        print(f"ERROR: Cannot bind to port {PORT}: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)
 
     # Setup signal handlers for graceful shutdown
     def signal_handler(signum, frame):
-        print(f"Received signal {signum}, shutting down gracefully...")
+        print(f"Received signal {signum}, shutting down gracefully...", flush=True)
         httpd.shutdown()
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    print(f"TTYD HTTP proxy listening on port {PORT}")
-    print(f"Proxying to TTYD on 127.0.0.1:{TTYD_TTYD_PORT}")
+    print(f"TTYD HTTP proxy listening on port {PORT}", flush=True)
+    print(f"Proxying to TTYD on 127.0.0.1:{TTYD_TTYD_PORT}", flush=True)
     try:
         httpd.serve_forever()
     except Exception as e:
-        print(f"HTTP Server error: {e}", file=sys.stderr)
+        print(f"HTTP Server error: {e}", file=sys.stderr, flush=True)
         raise
     finally:
         httpd.server_close()

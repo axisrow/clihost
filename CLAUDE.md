@@ -8,11 +8,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Build the container image
 docker build -t clihost .
 
-# Setup environment (fill in CLI_API_TOKEN and HAPI_API_URL)
-cp .env.example .env
+# Run container (basic - web terminal + SSH only)
+docker run -p 22:22 -p 8080:8080 clihost
 
-# Run container with persistent volume
-docker run --env-file .env -p 22:22 -p 8080:8080 -v "$(pwd)/volume/hapi:/home/hapi" clihost
+# Run with hapi daemon enabled
+docker run -p 22:22 -p 8080:8080 \
+  -e HAPI_DAEMON_ENABLED=true \
+  -e CLI_API_TOKEN=your_token \
+  -e HAPI_API_URL=your_server_url \
+  -v "$(pwd)/volume/hapi:/home/hapi" \
+  clihost
 
 # Health check
 curl http://localhost:8080/health
@@ -30,12 +35,12 @@ Docker container running hapi CLI daemon alongside OpenSSH server, bundling AI C
 2. Cleans old hapi daemon state files
 3. Starts TTYD process on 127.0.0.1:7681 (as hapi user via tmux-wrapper)
 4. Starts TTYD HTTP proxy server (Python, port 8080 by default)
-5. Starts hapi daemon in background (as hapi user)
+5. Starts hapi daemon in background if HAPI_DAEMON_ENABLED=true
 6. Runs sshd as main process (keeps container alive)
 
 **Multi-process architecture:**
 - `sshd` (port 22) - SSH access, main process
-- `hapi daemon` (HAPI_PORT, default 80) - CLI tool daemon
+- `hapi daemon` (HAPI_PORT, default 80) - CLI tool daemon (optional, requires HAPI_DAEMON_ENABLED=true)
 - `ttyd` (127.0.0.1:7681) - Web terminal process
 - `ttyd_proxy.py` (PORT, default 8080) - HTTP/WebSocket reverse proxy
 
@@ -61,14 +66,7 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Daemon
 
 **bin/tmux-wrapper.sh** - tmux session persistence wrapper (auto-attach or create new session)
 
-### Required Environment Variables
-
-**Hapi daemon:**
-- `CLI_API_TOKEN` - authentication token for hapi server
-- `HAPI_API_URL` - hapi server endpoint
-- `HAPI_HOST` - bind address (default: 0.0.0.0)
-- `HAPI_PORT` - port where hapi client connects (default: 80)
-- `HAPI_USER` - user to run hapi daemon as (default: hapi)
+### Environment Variables
 
 **TTYD web terminal:**
 - `PORT` - HTTP proxy port (default: 8080)
@@ -76,6 +74,14 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Daemon
 - `TTYD_PASSWORD` - optional global password (if not set, uses system passwords)
 - `PASSWORD_SECRET` - secret for HMAC session signatures (CHANGE IN PRODUCTION)
 - `ROOT_PASSWORD` - optional root SSH password
+
+**Hapi daemon (optional):**
+- `HAPI_DAEMON_ENABLED` - enable hapi daemon (default: false)
+- `CLI_API_TOKEN` - authentication token (required if daemon enabled)
+- `HAPI_API_URL` - hapi server endpoint (required if daemon enabled)
+- `HAPI_HOST` - bind address (default: 0.0.0.0)
+- `HAPI_PORT` - port where hapi client connects (default: 80)
+- `HAPI_USER` - user to run hapi daemon as (default: hapi)
 
 ## Coding Conventions
 
