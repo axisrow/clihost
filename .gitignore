@@ -1,0 +1,6 @@
+.env
+volume/*
+
+# Python cache
+__pycache__/
+*.pyc
