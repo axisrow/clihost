@@ -204,8 +204,11 @@ class TTYDProxyHandler(BaseHandler):
         parsed = urlparse(self.path)
 
         if parsed.path == "/":
-            # Root - open TTYD terminal
-            self.handle_ttyd()
+            # Root - show main menu (after auth)
+            self.handle_menu()
+        elif parsed.path == "/login":
+            # Login page
+            self.handle_login_page()
         elif parsed.path == "/health":
             self.handle_health()
         elif parsed.path == "/ttyd":
@@ -223,6 +226,11 @@ class TTYDProxyHandler(BaseHandler):
             self.handle_login()
         else:
             self.send_json(404, {"error": "Not found"})
+
+    def handle_login_page(self):
+        """Show login form."""
+        html = load_template('login.html')
+        self.send_html(200, html)
 
     def handle_health(self):
         """Health check endpoint."""
@@ -300,12 +308,58 @@ class TTYDProxyHandler(BaseHandler):
         # Use Lax by default for same-origin requests
         # Only set Secure flag if we're confident it's HTTPS (configured by admin)
         self.send_response(302)
-        self.send_header("Location", "/ttyd")
+        self.send_header("Location", "/")
         self.send_header(
             "Set-Cookie",
             f"ttyd_session={session_token}; Path=/; HttpOnly; SameSite=Lax",
         )
         self.end_headers()
+
+    def handle_menu(self):
+        """Return HTML page with main menu (after authentication)."""
+        cookies = self.parse_cookie_header(self.headers.get("Cookie", ""))
+        token = cookies.get("ttyd_session")
+        username, port = parse_ttyd_session(token)
+
+        if not username or not port:
+            # Redirect to login page
+            self.send_response(302)
+            self.send_header("Location", "/login")
+            self.end_headers()
+            return
+
+        # Validate username from session token
+        if not is_valid_username(username):
+            self.send_json(403, {"error": "Invalid session"})
+            return
+
+        # Verify user still exists
+        try:
+            pwd.getpwnam(username)
+        except KeyError:
+            self.send_json(403, {"error": "Invalid session"})
+            return
+
+        # Read tunnel URL from file
+        hapi_url = None
+        hapi_url_file = "/home/hapi/url"
+        try:
+            with open(hapi_url_file, 'r', encoding='utf-8') as f:
+                hapi_url = f.read().strip()
+        except (FileNotFoundError, IOError):
+            pass
+
+        # Load and render menu template
+        html = load_template('index.html')
+        html = html.replace('{{USERNAME}}', username)
+
+        if hapi_url:
+            hapi_link = f'<a href="{hapi_url}" target="_blank" class="menu-link">HAPI Server</a>'
+        else:
+            hapi_link = '<span class="menu-link disabled">HAPI Server (not available)</span>'
+
+        html = html.replace('{{HAPI_LINK}}', hapi_link)
+        self.send_html(200, html)
 
     def handle_ttyd(self):
         """Return HTML page with login form or terminal iframe."""
@@ -314,9 +368,10 @@ class TTYDProxyHandler(BaseHandler):
         username, port = parse_ttyd_session(token)
 
         if not username or not port:
-            # Show login form
-            html = load_template('index.html')
-            self.send_html(200, html)
+            # Redirect to login page
+            self.send_response(302)
+            self.send_header("Location", "/login")
+            self.end_headers()
             return
 
         # Validate username from session token

@@ -66,9 +66,7 @@ RUN npm install -g @twsxtd/hapi && chown -R hapi:hapi /usr/local/lib/node_module
 # Create app directory for TTYD proxy
 RUN mkdir -p /app /bin
 
-COPY app/server.py /app/
-COPY app/ttyd_proxy.py /app/
-COPY app/index.html /app/
+COPY app/ /app/
 COPY bin/tmux-wrapper.sh /bin/tmux-wrapper.sh
 RUN chmod +x /bin/tmux-wrapper.sh
 

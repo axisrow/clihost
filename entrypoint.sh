@@ -89,6 +89,23 @@ runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAP
 HAPI_SERVER_PID=$!
 echo "Hapi server started with PID: ${HAPI_SERVER_PID}"
 
+# Extract tunnel URL from hapi server log and save to file
+HAPI_URL_FILE="${HAPI_USER_HOME}/url"
+(
+  for i in $(seq 1 60); do
+    if [ -f "${HAPI_SERVER_LOG}" ]; then
+      URL=$(grep -oE 'https://app\.hapi\.run/\S+' "${HAPI_SERVER_LOG}" | head -1)
+      if [ -n "$URL" ]; then
+        echo "$URL" > "${HAPI_URL_FILE}"
+        chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_URL_FILE}"
+        echo "Extracted tunnel URL: ${URL}"
+        break
+      fi
+    fi
+    sleep 1
+  done
+) &
+
 # Start hapi daemon if enabled (reads config from volume)
 if [ "${HAPI_DAEMON_ENABLED}" = "true" ]; then
   echo "Starting hapi daemon..."
