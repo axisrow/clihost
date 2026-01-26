@@ -85,20 +85,28 @@ HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
 mkdir -p "${HAPI_HOME}"
 chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_HOME}"
 echo "Starting hapi server --relay in background (logs: ${HAPI_SERVER_LOG})..."
-runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" HAPI_RELAY_FORCE_TCP=true hapi server --relay 2>&1 | tee \"${HAPI_SERVER_LOG}\"" &
+runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay 2>&1 | tee \"${HAPI_SERVER_LOG}\"" &
 HAPI_SERVER_PID=$!
 echo "Hapi server started with PID: ${HAPI_SERVER_PID}"
 
-# Extract tunnel URL from hapi server log and save to file
+# Extract tunnel URL and token, build full connection URL
 HAPI_URL_FILE="${HAPI_USER_HOME}/url"
+HAPI_SETTINGS_FILE="${HAPI_HOME}/settings.json"
 (
   for i in $(seq 1 60); do
-    if [ -f "${HAPI_SERVER_LOG}" ]; then
-      URL=$(grep -oE 'https://app\.hapi\.run/\S+' "${HAPI_SERVER_LOG}" | head -1)
-      if [ -n "$URL" ]; then
-        echo "$URL" > "${HAPI_URL_FILE}"
+    if [ -f "${HAPI_SERVER_LOG}" ] && [ -f "${HAPI_SETTINGS_FILE}" ]; then
+      # Extract relay URL from log: https://xxx.relay.hapi.run
+      RELAY_URL=$(grep -oE 'https://[a-z0-9]+\.relay\.hapi\.run' "${HAPI_SERVER_LOG}" 2>/dev/null | head -1 || true)
+      # Extract token from settings.json
+      TOKEN=$(grep -oE '"cliApiToken":\s*"[^"]+"' "${HAPI_SETTINGS_FILE}" 2>/dev/null | sed 's/.*"cliApiToken":\s*"\([^"]*\)".*/\1/' || true)
+      if [ -n "$RELAY_URL" ] && [ -n "$TOKEN" ]; then
+        # URL-encode the relay URL (replace : with %3A, / with %2F)
+        ENCODED_URL=$(echo "$RELAY_URL" | sed 's/:/%3A/g; s/\//%2F/g')
+        # Build full connection URL
+        FULL_URL="https://app.hapi.run/?server=${ENCODED_URL}&token=${TOKEN}"
+        echo "$FULL_URL" > "${HAPI_URL_FILE}"
         chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_URL_FILE}"
-        echo "Extracted tunnel URL: ${URL}"
+        echo "Hapi connection URL: ${FULL_URL}"
         break
       fi
     fi

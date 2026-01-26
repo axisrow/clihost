@@ -12,5 +12,5 @@ SESSION_NAME="ttyd-$(whoami)"
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     exec tmux attach-session -t "$SESSION_NAME"
 else
-    exec tmux new-session -s "$SESSION_NAME"
+    exec tmux new-session -s "$SESSION_NAME" -c "$HOME"
 fi
