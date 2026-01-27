@@ -16,7 +16,7 @@ fi
 : "${HAPI_PORT:=80}"
 : "${CLI_API_TOKEN:=}"
 : "${HAPI_API_URL:=}"
-: "${HAPI_DAEMON_ENABLED:=false}"
+: "${HAPI_RUNNER_ENABLED:=false}"
 : "${ROOT_PASSWORD:=}"
 
 HAPI_USER="${HAPI_USER:-hapi}"
@@ -37,12 +37,12 @@ if [ -n "${ROOT_PASSWORD}" ]; then
   echo "Root SSH access enabled"
 fi
 
-# Clean old daemon state before starting (force re-registration on each deploy)
-rm -f "${HAPI_USER_HOME}/.hapi/daemon.state.json" 2>/dev/null || true
-rm -f "${HAPI_USER_HOME}/daemon.state.json" 2>/dev/null || true
-# Clean stale lock files (prevents "another daemon is running" error after container restart)
-rm -f "${HAPI_USER_HOME}/.hapi/daemon.state.json.lock" 2>/dev/null || true
-rm -f "${HAPI_USER_HOME}/daemon.state.json.lock" 2>/dev/null || true
+# Clean old runner state before starting (force re-registration on each deploy)
+rm -f "${HAPI_USER_HOME}/.hapi/runner.state.json" 2>/dev/null || true
+rm -f "${HAPI_USER_HOME}/runner.state.json" 2>/dev/null || true
+# Clean stale lock files (prevents "another runner is running" error after container restart)
+rm -f "${HAPI_USER_HOME}/.hapi/runner.state.json.lock" 2>/dev/null || true
+rm -f "${HAPI_USER_HOME}/runner.state.json.lock" 2>/dev/null || true
 # Clean machineId settings to force re-registration on each deploy
 rm -f "${HAPI_USER_HOME}/.hapi/settings.json" 2>/dev/null || true
 rm -f "${HAPI_USER_HOME}/settings.json" 2>/dev/null || true
@@ -114,24 +114,24 @@ HAPI_SETTINGS_FILE="${HAPI_HOME}/settings.json"
   done
 ) &
 
-# Start hapi daemon if enabled (reads config from volume)
-if [ "${HAPI_DAEMON_ENABLED}" = "true" ]; then
-  echo "Starting hapi daemon..."
-  if ! runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" hapi daemon start 2>&1"; then
-    echo '=== DAEMON START FAILED ===' >&2
+# Start hapi runner if enabled (reads config from volume)
+if [ "${HAPI_RUNNER_ENABLED}" = "true" ]; then
+  echo "Starting hapi runner..."
+  if ! runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" hapi runner start 2>&1"; then
+    echo '=== RUNNER START FAILED ===' >&2
   fi
 
-  # Verify daemon is running
-  echo "Checking hapi daemon status..."
-  if ! runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" hapi daemon status 2>&1"; then
-    echo '=== DAEMON NOT RUNNING ===' >&2
+  # Verify runner is running
+  echo "Checking hapi runner status..."
+  if ! runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" hapi runner status 2>&1"; then
+    echo '=== RUNNER NOT RUNNING ===' >&2
     echo 'Running hapi doctor for diagnostics:' >&2
     runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" hapi doctor 2>&1" || true
   fi
-  echo "Hapi daemon startup complete"
+  echo "Hapi runner startup complete"
 else
-  echo "Hapi daemon disabled (set HAPI_DAEMON_ENABLED=true to enable)"
-  echo "Config created by 'hapi server --relay' - run 'hapi daemon start' manually if needed"
+  echo "Hapi runner disabled (set HAPI_RUNNER_ENABLED=true to enable)"
+  echo "Config created by 'hapi server --relay' - run 'hapi runner start' manually if needed"
 fi
 
 # sshd is now the main process (via CMD in Dockerfile)

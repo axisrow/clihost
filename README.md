@@ -29,15 +29,15 @@ Open http://localhost:8080 for web terminal access.
 | `PASSWORD_SECRET` | auto | Secret for session signatures (auto-generated if not set) |
 | `ROOT_PASSWORD` | - | Enable root SSH access with this password |
 
-### Hapi Daemon (Optional)
+### Hapi Runner (Optional)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HAPI_DAEMON_ENABLED` | false | Enable hapi daemon |
-| `CLI_API_TOKEN` | - | Auth token (required if daemon enabled) |
-| `HAPI_API_URL` | - | Server URL (required if daemon enabled) |
-| `HAPI_HOST` | 0.0.0.0 | Daemon bind address |
-| `HAPI_PORT` | 80 | Daemon port |
+| `HAPI_RUNNER_ENABLED` | false | Enable hapi runner |
+| `CLI_API_TOKEN` | - | Auth token (required if runner enabled) |
+| `HAPI_API_URL` | - | Server URL (required if runner enabled) |
+| `HAPI_HOST` | 0.0.0.0 | Runner bind address |
+| `HAPI_PORT` | 80 | Runner port |
 
 ## Examples
 
@@ -55,11 +55,11 @@ docker run -p 22:22 -p 8080:8080 \
   clihost
 ```
 
-With hapi daemon:
+With hapi runner:
 
 ```bash
 docker run -p 22:22 -p 8080:8080 \
-  -e HAPI_DAEMON_ENABLED=true \
+  -e HAPI_RUNNER_ENABLED=true \
   -e CLI_API_TOKEN=your_token \
   -e HAPI_API_URL=https://your-server.com \
   clihost

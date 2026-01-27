@@ -11,9 +11,9 @@ docker build -t clihost .
 # Run container (basic - web terminal + SSH only)
 docker run -p 22:22 -p 8080:8080 clihost
 
-# Run with hapi daemon enabled
+# Run with hapi runner enabled
 docker run -p 22:22 -p 8080:8080 \
-  -e HAPI_DAEMON_ENABLED=true \
+  -e HAPI_RUNNER_ENABLED=true \
   -e CLI_API_TOKEN=your_token \
   -e HAPI_API_URL=your_server_url \
   -v "$(pwd)/volume/hapi:/home/hapi" \
@@ -26,21 +26,21 @@ curl http://localhost:8080/health
 
 ## Architecture
 
-Docker container running hapi CLI daemon alongside OpenSSH server, bundling AI CLI tools (Claude Code, Codex, Gemini CLI), with an integrated web terminal (TTYD).
+Docker container running hapi CLI runner alongside OpenSSH server, bundling AI CLI tools (Claude Code, Codex, Gemini CLI), with an integrated web terminal (TTYD).
 
 ### Container Structure
 
 **Entry point flow** (entrypoint.sh):
 1. Configures SSH server (optionally enables root access if ROOT_PASSWORD set)
-2. Cleans old hapi daemon state files
+2. Cleans old hapi runner state files
 3. Starts TTYD process on 127.0.0.1:7681 (as hapi user via tmux-wrapper)
 4. Starts TTYD HTTP proxy server (Python, port 8080 by default)
-5. Starts hapi daemon in background if HAPI_DAEMON_ENABLED=true
+5. Starts hapi runner in background if HAPI_RUNNER_ENABLED=true
 6. Runs sshd as main process (keeps container alive)
 
 **Multi-process architecture:**
 - `sshd` (port 22) - SSH access, main process
-- `hapi daemon` (HAPI_PORT, default 80) - CLI tool daemon (optional, requires HAPI_DAEMON_ENABLED=true)
+- `hapi runner` (HAPI_PORT, default 80) - CLI tool runner (optional, requires HAPI_RUNNER_ENABLED=true)
 - `ttyd` (127.0.0.1:7681) - Web terminal process
 - `ttyd_proxy.py` (PORT, default 8080) - HTTP/WebSocket reverse proxy
 
@@ -48,11 +48,11 @@ Docker container running hapi CLI daemon alongside OpenSSH server, bundling AI C
 ```
 Browser → WebSocket → HTTP Proxy (8080) → TTYD (127.0.0.1:7681) → tmux-wrapper → Shell
 SSH Client → SSHD (22) → Shell Access
-hapi Client → HTTP API (HAPI_PORT) → hapi Daemon
+hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 ```
 
 **Volume mount:**
-- `/home/hapi`: Persistent daemon state, logs, runtime files
+- `/home/hapi`: Persistent runner state, logs, runtime files
 
 ### Key Components
 
@@ -75,13 +75,13 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Daemon
 - `PASSWORD_SECRET` - secret for HMAC session signatures (CHANGE IN PRODUCTION)
 - `ROOT_PASSWORD` - optional root SSH password
 
-**Hapi daemon (optional):**
-- `HAPI_DAEMON_ENABLED` - enable hapi daemon (default: false)
-- `CLI_API_TOKEN` - authentication token (required if daemon enabled)
-- `HAPI_API_URL` - hapi server endpoint (required if daemon enabled)
+**Hapi runner (optional):**
+- `HAPI_RUNNER_ENABLED` - enable hapi runner (default: false)
+- `CLI_API_TOKEN` - authentication token (required if runner enabled)
+- `HAPI_API_URL` - hapi server endpoint (required if runner enabled)
 - `HAPI_HOST` - bind address (default: 0.0.0.0)
 - `HAPI_PORT` - port where hapi client connects (default: 80)
-- `HAPI_USER` - user to run hapi daemon as (default: hapi)
+- `HAPI_USER` - user to run hapi runner as (default: hapi)
 
 ## Coding Conventions
 
@@ -105,7 +105,7 @@ Reference: `TTYD_MODULE.md` in repository root (in Russian) for comprehensive do
 
 ## Testing
 
-Manual smoke test: build image, run container, verify logs show "Hapi daemon started successfully" (or fallback message) and sshd stays running.
+Manual smoke test: build image, run container, verify logs show "Hapi runner startup complete" (or fallback message) and sshd stays running.
 
 Web terminal test: Open http://localhost:8080 in browser, login with system credentials.
 
@@ -118,8 +118,8 @@ docker logs <container_id>
 # Enter running container for debugging
 docker exec -it <container_id> bash
 
-# Check hapi daemon status
-docker exec <container_id> hapi daemon status
+# Check hapi runner status
+docker exec <container_id> hapi runner status
 
 # Run hapi diagnostics
 docker exec <container_id> hapi doctor

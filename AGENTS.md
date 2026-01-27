@@ -1,13 +1,13 @@
 # Repository Guidelines
 
 ## Project Overview
-This repository builds a Docker image that runs the `hapi` CLI daemon alongside `sshd`, and bundles common AI CLI tools (Codex, Claude Code, Gemini). Configuration is provided via environment variables.
+This repository builds a Docker image that runs the `hapi` CLI runner alongside `sshd`, and bundles common AI CLI tools (Codex, Claude Code, Gemini). Configuration is provided via environment variables.
 
 ## Project Structure & Module Organization
 - `Dockerfile`: Image build with Node.js, CLI tools, `hapi`, and OpenSSH.
-- `entrypoint.sh`: Container startup; launches `hapi daemon` and keeps `sshd` in the foreground.
+- `entrypoint.sh`: Container startup; launches `hapi runner` and keeps `sshd` in the foreground.
 - `.env.example`: Template for required environment variables.
-- `volume/hapi/`: Sample/persistent runtime data (daemon state, logs, runtime files).
+- `volume/hapi/`: Sample/persistent runtime data (runner state, logs, runtime files).
 
 ## Build, Test, and Development Commands
 - `docker build -t clihost .`
@@ -25,7 +25,7 @@ This repository builds a Docker image that runs the `hapi` CLI daemon alongside 
 ## Testing Guidelines
 No automated tests are present. Use a manual smoke check:
 - Build and run the image.
-- Confirm `hapi daemon start` appears in logs and `sshd` stays running.
+- Confirm `hapi runner start` appears in logs and `sshd` stays running.
 
 ## Commit & Pull Request Guidelines
 Observed commit history uses short, imperative subjects (often "add ..." or Russian verbs), with no issue IDs. Follow the same style.
