@@ -412,14 +412,18 @@ class TTYDProxyHandler(BaseHandler):
   <script>
     (function() {
       var iframe = document.getElementById('terminal');
+      console.log('[Tab Handler] Initialized, iframe:', iframe);
 
       document.addEventListener('keydown', function(e) {
         if (e.key !== 'Tab') return;
+        console.log('[Tab Handler] Tab pressed');
 
         try {
           var doc = iframe.contentWindow && iframe.contentWindow.document;
+          console.log('[Tab Handler] iframe doc:', !!doc);
           if (!doc) return;
           var textarea = doc.querySelector('.xterm-helper-textarea');
+          console.log('[Tab Handler] textarea:', !!textarea);
           if (!textarea) return;
 
           e.preventDefault();
@@ -440,7 +444,10 @@ class TTYDProxyHandler(BaseHandler):
           };
           textarea.dispatchEvent(new KeyboardEvent('keydown', opts));
           textarea.dispatchEvent(new KeyboardEvent('keyup', opts));
-        } catch (err) {}
+          console.log('[Tab Handler] Event dispatched');
+        } catch (err) {
+          console.log('[Tab Handler] Error:', err);
+        }
       });
     })();
   </script>'''
