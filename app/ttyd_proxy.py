@@ -34,7 +34,18 @@ TTYD_PASSWORD = os.environ.get("TTYD_PASSWORD", "")
 PASSWORD_SECRET = os.environ.get("PASSWORD_SECRET", "default-secret-change-me")
 TTYD_TTYD_PORT = 7681  # Hardcoded internal TTYD port
 SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "86400"))  # 24 hours default
-VIRTUAL_KEYBOARD = os.environ.get("VIRTUAL_KEYBOARD", "true").lower() == "true"
+def env_bool(value, default=False):
+    """Parse common boolean env var values."""
+    if value is None:
+        return default
+    value = str(value).strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return default
+
+VIRTUAL_KEYBOARD = env_bool(os.environ.get("VIRTUAL_KEYBOARD"), default=True)
 
 # Load templates
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
@@ -364,6 +375,7 @@ class TTYDProxyHandler(BaseHandler):
 
     def handle_ttyd(self):
         """Return HTML page with login form or terminal iframe."""
+        parsed = urlparse(self.path)
         cookies = self.parse_cookie_header(self.headers.get("Cookie", ""))
         token = cookies.get("ttyd_session")
         username, port = parse_ttyd_session(token)
@@ -389,9 +401,13 @@ class TTYDProxyHandler(BaseHandler):
 
         # Return terminal iframe page with optional virtual keyboard
         ttyd_url = "/ttyd/"
+        vkbd_enabled = VIRTUAL_KEYBOARD
+        query = parse_qs(parsed.query)
+        if "vkbd" in query:
+            vkbd_enabled = env_bool(query.get("vkbd", [""])[0], default=vkbd_enabled)
 
         # Virtual keyboard HTML (only included if VIRTUAL_KEYBOARD=true)
-        if VIRTUAL_KEYBOARD:
+        if vkbd_enabled:
             vkbd_style = '''
     .vkbd { display: none; background: #1a1a2e; padding: 8px; gap: 6px; flex-wrap: wrap; justify-content: center; }
     .vkbd button {
