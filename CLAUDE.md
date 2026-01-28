@@ -74,6 +74,7 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 - `TTYD_PASSWORD` - optional global password (if not set, uses system passwords)
 - `PASSWORD_SECRET` - secret for HMAC session signatures (CHANGE IN PRODUCTION)
 - `ROOT_PASSWORD` - optional root SSH password
+- `VIRTUAL_KEYBOARD` - enable virtual keyboard for mobile devices (default: true)
 
 **Hapi runner (optional):**
 - `HAPI_RUNNER_ENABLED` - enable hapi runner (default: false)

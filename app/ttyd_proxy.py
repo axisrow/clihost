@@ -34,6 +34,7 @@ TTYD_PASSWORD = os.environ.get("TTYD_PASSWORD", "")
 PASSWORD_SECRET = os.environ.get("PASSWORD_SECRET", "default-secret-change-me")
 TTYD_TTYD_PORT = 7681  # Hardcoded internal TTYD port
 SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "86400"))  # 24 hours default
+VIRTUAL_KEYBOARD = os.environ.get("VIRTUAL_KEYBOARD", "true").lower() == "true"
 
 # Load templates
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
@@ -386,22 +387,133 @@ class TTYDProxyHandler(BaseHandler):
             self.send_json(403, {"error": "Invalid session"})
             return
 
-        # Return terminal iframe page
+        # Return terminal iframe page with optional virtual keyboard
         ttyd_url = "/ttyd/"
+
+        # Virtual keyboard HTML (only included if VIRTUAL_KEYBOARD=true)
+        if VIRTUAL_KEYBOARD:
+            vkbd_style = '''
+    .vkbd { display: none; background: #1a1a2e; padding: 8px; gap: 6px; flex-wrap: wrap; justify-content: center; }
+    .vkbd button {
+      background: #16213e; color: #e8e8e8; border: 1px solid #0f3460;
+      padding: 12px 16px; font-size: 14px; font-family: monospace;
+      border-radius: 4px; min-width: 44px; touch-action: manipulation;
+    }
+    .vkbd button:active { background: #0f3460; }
+    @media (max-width: 768px) {
+      .vkbd { display: flex; }
+      body { height: calc(100vh - 60px); }
+    }'''
+            vkbd_html = '''
+  <div class="vkbd" id="vkbd">
+    <button data-key="esc">ESC</button>
+    <button data-key="tab">Tab</button>
+    <button data-key="ctrl-c">Ctrl+C</button>
+    <button data-key="ctrl-b">Ctrl+B</button>
+    <button data-key="up">&#8593;</button>
+    <button data-key="left">&#8592;</button>
+    <button data-key="down">&#8595;</button>
+    <button data-key="right">&#8594;</button>
+  </div>
+  <script>
+    (function() {
+      var iframe = document.getElementById('terminal');
+
+      function getTermTextarea() {
+        try {
+          var doc = iframe.contentWindow && iframe.contentWindow.document;
+          if (!doc) return null;
+          return doc.querySelector('.xterm-helper-textarea');
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function focusTerminal() {
+        try {
+          if (iframe.contentWindow) iframe.contentWindow.focus();
+          var textarea = getTermTextarea();
+          if (textarea) textarea.focus();
+        } catch (e) {
+          // Ignore focus errors.
+        }
+      }
+
+      function dispatchKey(target, eventType, opts) {
+        var ev = new KeyboardEvent(eventType, Object.assign({
+          bubbles: true,
+          cancelable: true,
+          composed: true
+        }, opts));
+        target.dispatchEvent(ev);
+      }
+
+      function sendKey(key) {
+        var textarea = getTermTextarea();
+        if (!textarea) return;
+        focusTerminal();
+
+        var def = null;
+        switch (key) {
+          case 'esc':
+            def = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27 };
+            break;
+          case 'tab':
+            def = { key: 'Tab', code: 'Tab', keyCode: 9, which: 9 };
+            break;
+          case 'ctrl-c':
+            def = { key: 'c', code: 'KeyC', keyCode: 67, which: 67, ctrlKey: true };
+            break;
+          case 'ctrl-b':
+            def = { key: 'b', code: 'KeyB', keyCode: 66, which: 66, ctrlKey: true };
+            break;
+          case 'up':
+            def = { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38, which: 38 };
+            break;
+          case 'left':
+            def = { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37, which: 37 };
+            break;
+          case 'down':
+            def = { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40 };
+            break;
+          case 'right':
+            def = { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, which: 39 };
+            break;
+        }
+        if (!def) return;
+
+        dispatchKey(textarea, 'keydown', def);
+        dispatchKey(textarea, 'keyup', def);
+      }
+
+      document.getElementById('vkbd').addEventListener('click', function(e) {
+        if (e.target.tagName === 'BUTTON') {
+          sendKey(e.target.dataset.key);
+        }
+      });
+      iframe.addEventListener('load', function() {
+        focusTerminal();
+      });
+    })();
+  </script>'''
+        else:
+            vkbd_style = ''
+            vkbd_html = ''
+
         html = f'''<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
   <title>Terminal - {username}</title>
   <style>
     * {{ box-sizing: border-box; }}
-    body {{ margin: 0; padding: 0; height: 100vh; background: #0f131a; }}
-    #terminal {{ width: 100%; height: 100%; border: none; }}
+    body {{ margin: 0; padding: 0; height: 100vh; background: #0f131a; display: flex; flex-direction: column; }}
+    #terminal {{ flex: 1; width: 100%; border: none; }}{vkbd_style}
   </style>
 </head>
 <body>
-  <iframe id="terminal" src="{ttyd_url}" allow="clipboard-write; clipboard-read"></iframe>
+  <iframe id="terminal" src="{ttyd_url}" allow="clipboard-write; clipboard-read"></iframe>{vkbd_html}
 </body>
 </html>'''
 
