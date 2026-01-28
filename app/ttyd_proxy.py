@@ -406,6 +406,45 @@ class TTYDProxyHandler(BaseHandler):
         if "vkbd" in query:
             vkbd_enabled = env_bool(query.get("vkbd", [""])[0], default=vkbd_enabled)
 
+        # Tab key handler - always included (independent of VIRTUAL_KEYBOARD)
+        # Intercepts physical Tab key to prevent browser focus navigation
+        tab_handler_script = '''
+  <script>
+    (function() {
+      var iframe = document.getElementById('terminal');
+
+      document.addEventListener('keydown', function(e) {
+        if (e.key !== 'Tab') return;
+
+        try {
+          var doc = iframe.contentWindow && iframe.contentWindow.document;
+          if (!doc) return;
+          var textarea = doc.querySelector('.xterm-helper-textarea');
+          if (!textarea) return;
+
+          e.preventDefault();
+          e.stopPropagation();
+
+          if (iframe.contentWindow) iframe.contentWindow.focus();
+          textarea.focus();
+
+          var opts = {
+            key: 'Tab',
+            code: 'Tab',
+            keyCode: 9,
+            which: 9,
+            shiftKey: e.shiftKey,
+            bubbles: true,
+            cancelable: true,
+            composed: true
+          };
+          textarea.dispatchEvent(new KeyboardEvent('keydown', opts));
+          textarea.dispatchEvent(new KeyboardEvent('keyup', opts));
+        } catch (err) {}
+      });
+    })();
+  </script>'''
+
         # Virtual keyboard HTML (only included if VIRTUAL_KEYBOARD=true)
         if vkbd_enabled:
             vkbd_style = '''
@@ -529,7 +568,8 @@ class TTYDProxyHandler(BaseHandler):
   </style>
 </head>
 <body>
-  <iframe id="terminal" src="{ttyd_url}" allow="clipboard-write; clipboard-read"></iframe>{vkbd_html}
+  <iframe id="terminal" src="{ttyd_url}" allow="clipboard-write; clipboard-read"></iframe>
+  {tab_handler_script}{vkbd_html}
 </body>
 </html>'''
 
