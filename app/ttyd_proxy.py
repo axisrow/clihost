@@ -412,43 +412,57 @@ class TTYDProxyHandler(BaseHandler):
   <script>
     (function() {
       var iframe = document.getElementById('terminal');
-      console.log('[Tab Handler] Initialized, iframe:', iframe);
 
-      document.addEventListener('keydown', function(e) {
-        if (e.key !== 'Tab') return;
-        console.log('[Tab Handler] Tab pressed');
-
+      function getTermTextarea() {
         try {
           var doc = iframe.contentWindow && iframe.contentWindow.document;
-          console.log('[Tab Handler] iframe doc:', !!doc);
-          if (!doc) return;
-          var textarea = doc.querySelector('.xterm-helper-textarea');
-          console.log('[Tab Handler] textarea:', !!textarea);
-          if (!textarea) return;
-
-          e.preventDefault();
-          e.stopPropagation();
-
-          if (iframe.contentWindow) iframe.contentWindow.focus();
-          textarea.focus();
-
-          var opts = {
-            key: 'Tab',
-            code: 'Tab',
-            keyCode: 9,
-            which: 9,
-            shiftKey: e.shiftKey,
-            bubbles: true,
-            cancelable: true,
-            composed: true
-          };
-          textarea.dispatchEvent(new KeyboardEvent('keydown', opts));
-          textarea.dispatchEvent(new KeyboardEvent('keyup', opts));
-          console.log('[Tab Handler] Event dispatched');
-        } catch (err) {
-          console.log('[Tab Handler] Error:', err);
+          if (!doc) return null;
+          return doc.querySelector('.xterm-helper-textarea');
+        } catch (e) {
+          return null;
         }
-      });
+      }
+
+      function dispatchTab(textarea, shiftKey) {
+        var opts = {
+          key: 'Tab',
+          code: 'Tab',
+          keyCode: 9,
+          which: 9,
+          shiftKey: !!shiftKey,
+          bubbles: true,
+          cancelable: true,
+          composed: true
+        };
+        textarea.dispatchEvent(new KeyboardEvent('keydown', opts));
+        textarea.dispatchEvent(new KeyboardEvent('keyup', opts));
+      }
+
+      function handleTab(e) {
+        if (e.key !== 'Tab') return;
+        var textarea = getTermTextarea();
+        if (!textarea) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        if (iframe.contentWindow) iframe.contentWindow.focus();
+        textarea.focus();
+        dispatchTab(textarea, e.shiftKey);
+      }
+
+      function attachIframeListener() {
+        try {
+          var doc = iframe.contentWindow && iframe.contentWindow.document;
+          if (!doc) return;
+          doc.addEventListener('keydown', handleTab, true);
+        } catch (e) {
+          // Ignore iframe access errors.
+        }
+      }
+
+      document.addEventListener('keydown', handleTab, true);
+      iframe.addEventListener('load', attachIframeListener);
+      attachIframeListener();
     })();
   </script>'''
 
