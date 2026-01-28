@@ -68,7 +68,8 @@ RUN mkdir -p /app /bin
 
 COPY app/ /app/
 COPY bin/tmux-wrapper.sh /bin/tmux-wrapper.sh
-RUN chmod +x /bin/tmux-wrapper.sh
+COPY bin/glm /bin/glm
+RUN chmod +x /bin/tmux-wrapper.sh /bin/glm
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
