@@ -423,13 +423,14 @@ class TTYDProxyHandler(BaseHandler):
         }
       }
 
-      function dispatchTab(textarea, shiftKey) {
+      function dispatchTab(textarea) {
+        // Always send plain Tab (shiftKey=false) since bash doesn't handle Shift+Tab
         var opts = {
           key: 'Tab',
           code: 'Tab',
           keyCode: 9,
           which: 9,
-          shiftKey: !!shiftKey,
+          shiftKey: false,
           bubbles: true,
           cancelable: true,
           composed: true
@@ -447,7 +448,7 @@ class TTYDProxyHandler(BaseHandler):
         e.stopPropagation();
         if (iframe.contentWindow) iframe.contentWindow.focus();
         textarea.focus();
-        dispatchTab(textarea, e.shiftKey);
+        dispatchTab(textarea);
       }
 
       function attachIframeListener() {
@@ -484,6 +485,7 @@ class TTYDProxyHandler(BaseHandler):
   <div class="vkbd" id="vkbd">
     <button data-key="esc">ESC</button>
     <button data-key="tab">Tab</button>
+    <button data-key="shift-tab">Shift+Tab</button>
     <button data-key="ctrl-c">Ctrl+C</button>
     <button data-key="ctrl-b">Ctrl+B</button>
     <button data-key="up">&#8593;</button>
@@ -535,6 +537,7 @@ class TTYDProxyHandler(BaseHandler):
             def = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27 };
             break;
           case 'tab':
+          case 'shift-tab':
             def = { key: 'Tab', code: 'Tab', keyCode: 9, which: 9 };
             break;
           case 'ctrl-c':
