@@ -16,12 +16,14 @@ import signal
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs as parse_form_qs
 from collections import defaultdict
 import pwd
 import spwd
 import crypt
 import subprocess
 import re
+import secrets
 
 # Import base HTTP server
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -46,6 +48,8 @@ def env_bool(value, default=False):
     return default
 
 VIRTUAL_KEYBOARD = env_bool(os.environ.get("VIRTUAL_KEYBOARD"), default=True)
+CSRF_TOKEN_TTL = int(os.environ.get("CSRF_TOKEN_TTL", "600"))  # 10 minutes default
+SECURE_COOKIES = env_bool(os.environ.get("SECURE_COOKIES"), default=False)
 
 # Load templates
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
@@ -84,6 +88,7 @@ class RateLimiter:
 
 # Global rate limiter instance
 login_rate_limiter = RateLimiter(max_attempts=5, window_seconds=60)
+account_rate_limiter = RateLimiter(max_attempts=5, window_seconds=300)
 
 
 def is_valid_username(username):
@@ -155,6 +160,50 @@ def parse_ttyd_session(token):
     if not hmac.compare_digest(signature, expected):
         return None, None
     return username, port
+
+
+def build_csrf_token():
+    """Create a signed CSRF token with timestamp."""
+    nonce = secrets.token_urlsafe(24)
+    issued_at = int(time.time())
+    payload = f"{nonce}:{issued_at}"
+    signature = hmac.new(
+        PASSWORD_SECRET.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    token = f"{payload}:{signature}"
+    encoded = base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
+    return encoded.rstrip("=")
+
+
+def parse_csrf_token(token):
+    """Parse and validate CSRF token. Returns True if valid and not expired."""
+    if not token:
+        return False
+    token = token.strip()
+    padding = "=" * (-len(token) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(token + padding).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    parts = decoded.rsplit(":", 2)
+    if len(parts) != 3:
+        return False
+    nonce, issued_at_str, signature = parts
+    try:
+        issued_at = int(issued_at_str)
+    except ValueError:
+        return False
+    if int(time.time()) - issued_at > CSRF_TOKEN_TTL:
+        return False
+    payload = f"{nonce}:{issued_at}"
+    expected = hmac.new(
+        PASSWORD_SECRET.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
 
 
 def verify_pam_password(username, password):
@@ -241,8 +290,32 @@ class TTYDProxyHandler(BaseHandler):
 
     def handle_login_page(self):
         """Show login form."""
+        csrf_token = build_csrf_token()
         html = load_template('login.html')
-        self.send_html(200, html)
+        html = html.replace('{{CSRF_TOKEN}}', csrf_token)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "base-uri 'none'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none'; "
+            "object-src 'none'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'",
+        )
+        secure_flag = " Secure;" if SECURE_COOKIES else ""
+        self.send_header(
+            "Set-Cookie",
+            f"csrf_token={csrf_token}; Path=/; SameSite=Lax;{secure_flag}",
+        )
+        self.end_headers()
+        self.wfile.write(html.encode("utf-8"))
 
     def handle_health(self):
         """Health check endpoint."""
@@ -273,18 +346,48 @@ class TTYDProxyHandler(BaseHandler):
             return
 
         post_data = self.rfile.read(content_length).decode("utf-8")
+        content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
 
-        try:
-            import json
-            data = json.loads(post_data)
-            username = data.get("username", "").strip()
-            password = data.get("password", "")
-        except json.JSONDecodeError:
-            self.send_json(400, {"error": "Invalid JSON"})
+        username = ""
+        password = ""
+        csrf_token = ""
+
+        if content_type == "application/json":
+            try:
+                import json
+                data = json.loads(post_data)
+                username = data.get("username", "").strip()
+                password = data.get("password", "")
+                csrf_token = data.get("csrf_token", "")
+            except json.JSONDecodeError:
+                self.send_json(400, {"error": "Invalid JSON"})
+                return
+        elif content_type == "application/x-www-form-urlencoded":
+            form = parse_form_qs(post_data, keep_blank_values=True)
+            username = (form.get("username", [""])[0]).strip()
+            password = form.get("password", [""])[0]
+            csrf_token = form.get("csrf_token", [""])[0]
+        else:
+            self.send_json(415, {"error": "Unsupported content type"})
+            return
+
+        # CSRF protection (double-submit token)
+        csrf_header = self.headers.get("X-CSRF-Token", "")
+        csrf_cookie = self.parse_cookie_header(self.headers.get("Cookie", "")).get("csrf_token", "")
+        provided_token = (csrf_header or csrf_token).strip()
+        if not provided_token or not csrf_cookie:
+            self.send_json(403, {"error": "CSRF token missing"})
+            return
+        if provided_token != csrf_cookie or not parse_csrf_token(provided_token):
+            self.send_json(403, {"error": "Invalid CSRF token"})
             return
 
         if not username:
             self.send_json(400, {"error": "Username required"})
+            return
+
+        if not account_rate_limiter.is_allowed(f"{client_ip}:{username}"):
+            self.send_json(429, {"error": "Too many login attempts. Please try again later."})
             return
 
         # Validate username to prevent command injection
@@ -294,6 +397,7 @@ class TTYDProxyHandler(BaseHandler):
 
         # Check optional global password
         if TTYD_PASSWORD and password != TTYD_PASSWORD:
+            time.sleep(0.5)
             self.send_json(401, {"error": "Invalid password"})
             return
 
@@ -301,6 +405,7 @@ class TTYDProxyHandler(BaseHandler):
         try:
             pwd.getpwnam(username)
         except KeyError:
+            time.sleep(0.5)
             self.send_json(401, {"error": "Invalid credentials"})
             return
 
@@ -310,6 +415,7 @@ class TTYDProxyHandler(BaseHandler):
                 self.send_json(400, {"error": "Password required"})
                 return
             if not verify_pam_password(username, password):
+                time.sleep(0.5)
                 self.send_json(401, {"error": "Invalid credentials"})
                 return
 
@@ -321,9 +427,10 @@ class TTYDProxyHandler(BaseHandler):
         # Only set Secure flag if we're confident it's HTTPS (configured by admin)
         self.send_response(302)
         self.send_header("Location", "/")
+        secure_flag = " Secure;" if SECURE_COOKIES else ""
         self.send_header(
             "Set-Cookie",
-            f"ttyd_session={session_token}; Path=/; HttpOnly; SameSite=Lax",
+            f"ttyd_session={session_token}; Path=/; HttpOnly; SameSite=Lax;{secure_flag}",
         )
         self.end_headers()
 
@@ -407,63 +514,50 @@ class TTYDProxyHandler(BaseHandler):
             vkbd_enabled = env_bool(query.get("vkbd", [""])[0], default=vkbd_enabled)
 
         # Tab key handler - always included (independent of VIRTUAL_KEYBOARD)
-        # Intercepts physical Tab key to prevent browser focus navigation
+        # Intercepts physical Tab key and sends it via xterm.js term.input() API
         tab_handler_script = '''
   <script>
     (function() {
       var iframe = document.getElementById('terminal');
 
-      function getTermTextarea() {
+      function sendTab() {
         try {
-          var doc = iframe.contentWindow && iframe.contentWindow.document;
-          if (!doc) return null;
-          return doc.querySelector('.xterm-helper-textarea');
-        } catch (e) {
-          return null;
-        }
-      }
-
-      function dispatchTab(textarea) {
-        // Always send plain Tab (shiftKey=false) since bash doesn't handle Shift+Tab
-        var opts = {
-          key: 'Tab',
-          code: 'Tab',
-          keyCode: 9,
-          which: 9,
-          shiftKey: false,
-          bubbles: true,
-          cancelable: true,
-          composed: true
-        };
-        textarea.dispatchEvent(new KeyboardEvent('keydown', opts));
-        textarea.dispatchEvent(new KeyboardEvent('keyup', opts));
+          var term = iframe.contentWindow && iframe.contentWindow.term;
+          if (term && term.input) {
+            term.input('\\t');
+            return true;
+          }
+        } catch (e) {}
+        return false;
       }
 
       function handleTab(e) {
         if (e.key !== 'Tab') return;
-        var textarea = getTermTextarea();
-        if (!textarea) return;
-
-        e.preventDefault();
-        e.stopPropagation();
-        if (iframe.contentWindow) iframe.contentWindow.focus();
-        textarea.focus();
-        dispatchTab(textarea);
-      }
-
-      function attachIframeListener() {
-        try {
-          var doc = iframe.contentWindow && iframe.contentWindow.document;
-          if (!doc) return;
-          doc.addEventListener('keydown', handleTab, true);
-        } catch (e) {
-          // Ignore iframe access errors.
+        if (sendTab()) {
+          e.preventDefault();
+          e.stopPropagation();
         }
       }
 
-      document.addEventListener('keydown', handleTab, true);
-      iframe.addEventListener('load', attachIframeListener);
-      attachIframeListener();
+      function bindDoc(doc) {
+        if (!doc || doc.__tabHandlerInstalled) return;
+        doc.__tabHandlerInstalled = true;
+        doc.addEventListener('keydown', handleTab, true);
+      }
+
+      function bindIframe() {
+        try {
+          if (iframe && iframe.contentWindow && iframe.contentWindow.document) {
+            bindDoc(iframe.contentWindow.document);
+          }
+        } catch (e) {}
+      }
+
+      bindDoc(document);
+      if (iframe) {
+        iframe.addEventListener('load', bindIframe);
+        bindIframe();
+      }
     })();
   </script>'''
 

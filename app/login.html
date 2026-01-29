@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{CSRF_TOKEN}}">
   <title>TTYD Login</title>
   <style>
     * { box-sizing: border-box; }
@@ -78,15 +79,16 @@
 <body>
   <div class="login-container">
     <h1>Terminal Access</h1>
-    <form id="loginForm">
+    <form id="loginForm" method="POST" action="/login">
       <div class="form-group">
         <label for="username">Username</label>
-        <input type="text" id="username" name="username" required autofocus>
+        <input type="text" id="username" name="username" required autofocus autocomplete="username" spellcheck="false">
       </div>
       <div class="form-group">
         <label for="password">Password</label>
-        <input type="password" id="password" name="password" required>
+        <input type="password" id="password" name="password" required autocomplete="current-password">
       </div>
+      <input type="hidden" id="csrf_token" name="csrf_token" value="{{CSRF_TOKEN}}">
       <button type="submit">Login</button>
       <div id="error" class="error" style="display:none"></div>
     </form>
@@ -94,6 +96,8 @@
   <script>
     const form = document.getElementById('loginForm');
     const errorDiv = document.getElementById('error');
+    const csrfMeta = document.querySelector('meta[name="csrf-token"]');
+    const csrfToken = csrfMeta ? csrfMeta.getAttribute('content') : '';
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -107,9 +111,10 @@
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken,
           },
           credentials: 'same-origin',
-          body: JSON.stringify({ username, password }),
+          body: JSON.stringify({ username, password, csrf_token: csrfToken }),
         });
 
         if (response.ok) {
