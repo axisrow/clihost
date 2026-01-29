@@ -245,6 +245,98 @@ def verify_pam_password(username, password):
             return False
 
 
+# Script injected into TTYD HTML to fix Tab key handling
+# Intercepts WebSocket creation to capture the connection, then sends Tab
+# character directly through WebSocket using TTYD protocol ('0' prefix = INPUT)
+TAB_FIX_SCRIPT = b'''
+<script>
+(function() {
+  // Intercept WebSocket creation to capture TTYD's socket
+  var _ttydSocket = null;
+  var OrigWebSocket = window.WebSocket;
+  window.WebSocket = function(url, protocols) {
+    var ws = protocols ? new OrigWebSocket(url, protocols) : new OrigWebSocket(url);
+    // TTYD creates WebSocket to ws:// or wss:// with /ws path
+    if (url && url.indexOf('/ws') !== -1) {
+      _ttydSocket = ws;
+    }
+    return ws;
+  };
+  window.WebSocket.prototype = OrigWebSocket.prototype;
+  window.WebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+  window.WebSocket.OPEN = OrigWebSocket.OPEN;
+  window.WebSocket.CLOSING = OrigWebSocket.CLOSING;
+  window.WebSocket.CLOSED = OrigWebSocket.CLOSED;
+
+  // Helper to get active socket
+  function getSocket() {
+    return _ttydSocket || window.socket || window.ws;
+  }
+
+  // Wait for terminal to be ready
+  function waitForTerm(cb) {
+    if (window.term) { cb(window.term); return; }
+    var i = setInterval(function() {
+      if (window.term) { clearInterval(i); cb(window.term); }
+    }, 50);
+  }
+
+  // Send data via WebSocket with TTYD protocol
+  // '0' prefix = Command.INPUT in TTYD protocol
+  function sendToTTYD(data) {
+    var socket = getSocket();
+    if (socket && socket.readyState === 1) {
+      socket.send('0' + data);
+      return true;
+    }
+    return false;
+  }
+
+  waitForTerm(function(term) {
+    // Intercept Tab before browser handles it
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        e.stopPropagation();
+
+        var data = e.shiftKey ? '\\x1b[Z' : '\\t';
+
+        // Method 1: Direct WebSocket send with TTYD protocol
+        if (sendToTTYD(data)) return;
+
+        // Method 2: Use xterm.js internal API
+        if (term._core && term._core.coreService) {
+          term._core.coreService.triggerDataEvent(data);
+          return;
+        }
+
+        // Method 3: Fallback to term.input()
+        if (term.input) {
+          term.input(data);
+        }
+      }
+    }, true);
+
+    // Expose sendTab function for virtual keyboard
+    window.sendTabKey = function(shift) {
+      var data = shift ? '\\x1b[Z' : '\\t';
+      if (sendToTTYD(data)) return true;
+      if (term._core && term._core.coreService) {
+        term._core.coreService.triggerDataEvent(data);
+        return true;
+      }
+      if (term.input) {
+        term.input(data);
+        return true;
+      }
+      return false;
+    };
+  });
+})();
+</script>
+'''
+
+
 class TTYDProxyHandler(BaseHandler):
     """HTTP request handler for TTYD proxy."""
 
@@ -513,50 +605,33 @@ class TTYDProxyHandler(BaseHandler):
         if "vkbd" in query:
             vkbd_enabled = env_bool(query.get("vkbd", [""])[0], default=vkbd_enabled)
 
-        # Tab key handler - always included (independent of VIRTUAL_KEYBOARD)
-        # Intercepts physical Tab key and sends it via xterm.js term.input() API
+        # Tab key handler for parent page - blocks browser Tab navigation
+        # when focus is in terminal iframe. The actual Tab handling is done
+        # by injected script inside TTYD iframe (TAB_FIX_SCRIPT).
         tab_handler_script = '''
   <script>
     (function() {
       var iframe = document.getElementById('terminal');
 
-      function sendTab() {
-        try {
-          var term = iframe.contentWindow && iframe.contentWindow.term;
-          if (term && term.input) {
-            term.input('\\t');
-            return true;
-          }
-        } catch (e) {}
-        return false;
-      }
-
-      function handleTab(e) {
+      // Block Tab at parent level to prevent browser focus navigation
+      document.addEventListener('keydown', function(e) {
         if (e.key !== 'Tab') return;
-        if (sendTab()) {
+
+        // If focus is in iframe or on iframe element - block browser navigation
+        if (document.activeElement === iframe ||
+            (iframe && iframe.contains && iframe.contains(document.activeElement))) {
           e.preventDefault();
           e.stopPropagation();
         }
-      }
+      }, true);
 
-      function bindDoc(doc) {
-        if (!doc || doc.__tabHandlerInstalled) return;
-        doc.__tabHandlerInstalled = true;
-        doc.addEventListener('keydown', handleTab, true);
-      }
-
-      function bindIframe() {
-        try {
-          if (iframe && iframe.contentWindow && iframe.contentWindow.document) {
-            bindDoc(iframe.contentWindow.document);
-          }
-        } catch (e) {}
-      }
-
-      bindDoc(document);
+      // Focus iframe content when iframe receives focus
       if (iframe) {
-        iframe.addEventListener('load', bindIframe);
-        bindIframe();
+        iframe.addEventListener('focus', function() {
+          try {
+            iframe.contentWindow.focus();
+          } catch(e) {}
+        });
       }
     })();
   </script>'''
@@ -591,72 +666,52 @@ class TTYDProxyHandler(BaseHandler):
     (function() {
       var iframe = document.getElementById('terminal');
 
-      function getTermTextarea() {
-        try {
-          var doc = iframe.contentWindow && iframe.contentWindow.document;
-          if (!doc) return null;
-          return doc.querySelector('.xterm-helper-textarea');
-        } catch (e) {
-          return null;
-        }
-      }
-
       function focusTerminal() {
         try {
           if (iframe.contentWindow) iframe.contentWindow.focus();
-          var textarea = getTermTextarea();
-          if (textarea) textarea.focus();
-        } catch (e) {
-          // Ignore focus errors.
-        }
-      }
-
-      function dispatchKey(target, eventType, opts) {
-        var ev = new KeyboardEvent(eventType, Object.assign({
-          bubbles: true,
-          cancelable: true,
-          composed: true
-        }, opts));
-        target.dispatchEvent(ev);
+          var doc = iframe.contentWindow && iframe.contentWindow.document;
+          if (doc) {
+            var textarea = doc.querySelector('.xterm-helper-textarea');
+            if (textarea) textarea.focus();
+          }
+        } catch (e) {}
       }
 
       function sendKey(key) {
-        var textarea = getTermTextarea();
-        if (!textarea) return;
         focusTerminal();
 
-        var def = null;
-        switch (key) {
-          case 'esc':
-            def = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27 };
-            break;
-          case 'tab':
-          case 'shift-tab':
-            def = { key: 'Tab', code: 'Tab', keyCode: 9, which: 9 };
-            break;
-          case 'ctrl-c':
-            def = { key: 'c', code: 'KeyC', keyCode: 67, which: 67, ctrlKey: true };
-            break;
-          case 'ctrl-b':
-            def = { key: 'b', code: 'KeyB', keyCode: 66, which: 66, ctrlKey: true };
-            break;
-          case 'up':
-            def = { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38, which: 38 };
-            break;
-          case 'left':
-            def = { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37, which: 37 };
-            break;
-          case 'down':
-            def = { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40 };
-            break;
-          case 'right':
-            def = { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, which: 39 };
-            break;
+        // For Tab keys, use the injected sendTabKey function
+        if (key === 'tab' || key === 'shift-tab') {
+          try {
+            var win = iframe.contentWindow;
+            if (win && win.sendTabKey) {
+              win.sendTabKey(key === 'shift-tab');
+              return;
+            }
+          } catch (e) {}
         }
-        if (!def) return;
 
-        dispatchKey(textarea, 'keydown', def);
-        dispatchKey(textarea, 'keyup', def);
+        // For other keys, use WebSocket directly via TTYD protocol
+        try {
+          var win = iframe.contentWindow;
+          var socket = win && (win.socket || win.ws);
+          if (socket && socket.readyState === 1) {
+            var data = null;
+            switch (key) {
+              case 'esc': data = '\\x1b'; break;
+              case 'ctrl-c': data = '\\x03'; break;
+              case 'ctrl-b': data = '\\x02'; break;
+              case 'up': data = '\\x1b[A'; break;
+              case 'down': data = '\\x1b[B'; break;
+              case 'right': data = '\\x1b[C'; break;
+              case 'left': data = '\\x1b[D'; break;
+            }
+            if (data) {
+              socket.send('0' + data);
+              return;
+            }
+          }
+        } catch (e) {}
       }
 
       document.getElementById('vkbd').addEventListener('click', function(e) {
@@ -819,6 +874,42 @@ class TTYDProxyHandler(BaseHandler):
             pass
         # Note: cleanup is handled by caller (proxy_ttyd_websocket)
 
+    def inject_tab_fix_script(self, data):
+        """Inject Tab fix script into TTYD HTML response.
+
+        IMPORTANT: Script MUST be injected at the START of <head> to intercept
+        WebSocket creation BEFORE TTYD's main script runs. If injected at the
+        end, the WebSocket is already created and cannot be intercepted.
+
+        Injection priority:
+        1. After <head> - intercepts WebSocket before TTYD loads
+        2. After <html> - fallback, still early enough
+        3. Prepend to start - last resort
+        """
+        try:
+            html = data.decode('utf-8')
+            script = TAB_FIX_SCRIPT.decode('utf-8')
+
+            # Inject at the START of head to run before TTYD scripts
+            if '<head>' in html:
+                html = html.replace('<head>', '<head>' + script, 1)
+            elif '<head ' in html:
+                # Handle <head with attributes
+                idx = html.find('<head ')
+                end_idx = html.find('>', idx)
+                if end_idx != -1:
+                    html = html[:end_idx+1] + script + html[end_idx+1:]
+            elif '<html>' in html:
+                html = html.replace('<html>', '<html>' + script, 1)
+            elif html.strip():
+                # Fallback: prepend to start
+                html = script + html
+
+            return html.encode('utf-8')
+        except Exception:
+            pass
+        return data
+
     def proxy_ttyd_http(self, upstream_path, port):
         """Proxy HTTP request to TTYD process."""
         body = None
@@ -838,7 +929,26 @@ class TTYDProxyHandler(BaseHandler):
             resp = conn.getresponse()
             data = resp.read()
 
+            # Check content type for HTML injection
+            content_type = ''
+            for key, value in resp.getheaders():
+                if key.lower() == 'content-type':
+                    content_type = value
+                    break
+
+            # Inject Tab fix script into HTML responses
+            if 'text/html' in content_type and data:
+                data = self.inject_tab_fix_script(data)
+
             self.send_response(resp.status, resp.reason)
+
+            # Add cache control headers for HTML to prevent browser caching
+            # This ensures the Tab fix script is always loaded fresh
+            if 'text/html' in content_type:
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+
             for key, value in resp.getheaders():
                 key_lower = key.lower()
                 if key_lower in {
