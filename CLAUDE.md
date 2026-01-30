@@ -102,6 +102,15 @@ The TTYD module provides secure web terminal access. Key implementation details:
 - **Authentication flow**: POST /login → Set ttyd_session cookie → Redirect to /ttyd
 - **Security**: TTYD bound to localhost only, proxy enforces authentication
 
+### Tab Key Fix
+
+The proxy injects a JavaScript fix into TTYD HTML to enable Tab key for shell completion. Technical notes:
+
+- **Gzip handling**: TTYD returns gzip-compressed HTML. The `inject_tab_fix_script()` function decompresses before injection and re-compresses after.
+- **WebSocket capture**: The injected script intercepts `window.WebSocket` constructor to capture the TTYD socket. The socket reference must be stored in `window._ttydSocket` (global), not as a local variable inside IIFE.
+- **Tab sending**: Uses TTYD protocol prefix `'0'` (INPUT command) + tab character (`\t`) via WebSocket.
+- **Shell requirement**: Tab completion only works in shells that support it (bash). Default `/bin/sh` (dash) does not have completion.
+
 Reference: `TTYD_MODULE.md` in repository root (in Russian) for comprehensive documentation.
 
 ## Testing

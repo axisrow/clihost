@@ -252,13 +252,14 @@ TAB_FIX_SCRIPT = b'''
 <script>
 (function() {
   // Intercept WebSocket creation to capture TTYD's socket
-  var _ttydSocket = null;
+  // Store in window for global access
+  window._ttydSocket = null;
   var OrigWebSocket = window.WebSocket;
   window.WebSocket = function(url, protocols) {
     var ws = protocols ? new OrigWebSocket(url, protocols) : new OrigWebSocket(url);
     // TTYD creates WebSocket to ws:// or wss:// with /ws path
     if (url && url.indexOf('/ws') !== -1) {
-      _ttydSocket = ws;
+      window._ttydSocket = ws;
     }
     return ws;
   };
@@ -270,7 +271,7 @@ TAB_FIX_SCRIPT = b'''
 
   // Helper to get active socket
   function getSocket() {
-    return _ttydSocket || window.socket || window.ws;
+    return window._ttydSocket || window.socket || window.ws;
   }
 
   // Wait for terminal to be ready
@@ -874,7 +875,7 @@ class TTYDProxyHandler(BaseHandler):
             pass
         # Note: cleanup is handled by caller (proxy_ttyd_websocket)
 
-    def inject_tab_fix_script(self, data):
+    def inject_tab_fix_script(self, data, is_gzipped=False):
         """Inject Tab fix script into TTYD HTML response.
 
         IMPORTANT: Script MUST be injected at the START of <head> to intercept
@@ -886,7 +887,16 @@ class TTYDProxyHandler(BaseHandler):
         2. After <html> - fallback, still early enough
         3. Prepend to start - last resort
         """
+        import gzip
         try:
+            # Handle gzip-compressed content
+            if is_gzipped or (len(data) >= 2 and data[0:2] == b'\x1f\x8b'):
+                try:
+                    data = gzip.decompress(data)
+                    is_gzipped = True
+                except Exception:
+                    return data
+
             html = data.decode('utf-8')
             script = TAB_FIX_SCRIPT.decode('utf-8')
 
@@ -905,7 +915,13 @@ class TTYDProxyHandler(BaseHandler):
                 # Fallback: prepend to start
                 html = script + html
 
-            return html.encode('utf-8')
+            result = html.encode('utf-8')
+
+            # Re-compress if originally gzipped
+            if is_gzipped:
+                result = gzip.compress(result)
+
+            return result
         except Exception:
             pass
         return data

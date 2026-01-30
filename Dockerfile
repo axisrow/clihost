@@ -55,7 +55,7 @@ RUN for i in 1 2 3 4 5; do npm install -g @openai/codex && break || sleep 10; do
 RUN for i in 1 2 3 4 5; do npm install -g @google/gemini-cli && break || sleep 10; done
 
 # Create user and group for running hapi
-RUN groupadd -r hapi && useradd -r -g hapi hapi && mkdir -p /home/hapi && chown -R hapi:hapi /home/hapi
+RUN groupadd -r hapi && useradd -r -g hapi -s /bin/bash hapi && mkdir -p /home/hapi && chown -R hapi:hapi /home/hapi
 RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
     echo 'export LANG=en_US.UTF-8' >> /home/hapi/.bashrc && \
     echo 'export LC_ALL=en_US.UTF-8' >> /home/hapi/.bashrc
