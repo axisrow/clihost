@@ -111,7 +111,7 @@ HAPI_SETTINGS_FILE="${HAPI_HOME}/settings.json"
         # URL-encode the relay URL (replace : with %3A, / with %2F)
         ENCODED_URL=$(echo "$RELAY_URL" | sed 's/:/%3A/g; s/\//%2F/g')
         # Build full connection URL
-        FULL_URL="https://app.hapi.run/?server=${ENCODED_URL}&token=${TOKEN}"
+        FULL_URL="https://app.hapi.run/?hub=${ENCODED_URL}&token=${TOKEN}"
         echo "$FULL_URL" > "${HAPI_URL_FILE}"
         chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_URL_FILE}"
         echo "Hapi connection URL: ${FULL_URL}"
