@@ -699,7 +699,7 @@ class TTYDProxyHandler(BaseHandler):
             if (text) {
               try {
                 var win = iframe.contentWindow;
-                var socket = win && (win.socket || win.ws);
+                var socket = win && (win._ttydSocket || win.socket || win.ws);
                 if (socket && socket.readyState === 1) {
                   socket.send('0' + text);
                 }
@@ -714,17 +714,18 @@ class TTYDProxyHandler(BaseHandler):
         // For other keys, use WebSocket directly via TTYD protocol
         try {
           var win = iframe.contentWindow;
-          var socket = win && (win.socket || win.ws);
+          var socket = win && (win._ttydSocket || win.socket || win.ws);
           if (socket && socket.readyState === 1) {
             var data = null;
+            var ESC = String.fromCharCode(27);
             switch (key) {
-              case 'esc': data = '\\x1b'; break;
-              case 'ctrl-c': data = '\\x03'; break;
-              case 'ctrl-b': data = '\\x02'; break;
-              case 'up': data = '\\x1b[A'; break;
-              case 'down': data = '\\x1b[B'; break;
-              case 'right': data = '\\x1b[C'; break;
-              case 'left': data = '\\x1b[D'; break;
+              case 'esc': data = ESC; break;
+              case 'ctrl-c': data = String.fromCharCode(3); break;
+              case 'ctrl-b': data = String.fromCharCode(2); break;
+              case 'up': data = ESC + '[A'; break;
+              case 'down': data = ESC + '[B'; break;
+              case 'right': data = ESC + '[C'; break;
+              case 'left': data = ESC + '[D'; break;
             }
             if (data) {
               socket.send('0' + data);
