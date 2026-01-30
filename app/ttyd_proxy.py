@@ -662,6 +662,7 @@ class TTYDProxyHandler(BaseHandler):
     <button data-key="left">&#8592;</button>
     <button data-key="down">&#8595;</button>
     <button data-key="right">&#8594;</button>
+    <button data-key="ctrl-v">Ctrl+V</button>
   </div>
   <script>
     (function() {
@@ -690,6 +691,24 @@ class TTYDProxyHandler(BaseHandler):
               return;
             }
           } catch (e) {}
+        }
+
+        // Special handling for Ctrl+V (paste from clipboard)
+        if (key === 'ctrl-v') {
+          navigator.clipboard.readText().then(function(text) {
+            if (text) {
+              try {
+                var win = iframe.contentWindow;
+                var socket = win && (win.socket || win.ws);
+                if (socket && socket.readyState === 1) {
+                  socket.send('0' + text);
+                }
+              } catch (e) {}
+            }
+          }).catch(function(err) {
+            console.log('Clipboard read failed:', err);
+          });
+          return;
         }
 
         // For other keys, use WebSocket directly via TTYD protocol

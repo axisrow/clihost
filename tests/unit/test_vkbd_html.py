@@ -44,12 +44,14 @@ class TestVirtualKeyboardHTML(unittest.TestCase):
   <div class="vkbd" id="vkbd">
     <button data-key="esc">ESC</button>
     <button data-key="tab">Tab</button>
+    <button data-key="shift-tab">Shift+Tab</button>
     <button data-key="ctrl-c">Ctrl+C</button>
     <button data-key="ctrl-b">Ctrl+B</button>
     <button data-key="up">&#8593;</button>
     <button data-key="left">&#8592;</button>
     <button data-key="down">&#8595;</button>
     <button data-key="right">&#8594;</button>
+    <button data-key="ctrl-v">Ctrl+V</button>
   </div>
   <script>
     (function() {
@@ -176,6 +178,12 @@ class TestVKBDEnabled(TestVirtualKeyboardHTML):
         self.assertIn('data-key="tab"', html)
         self.assertIn('>Tab</button>', html)
 
+    def test_vkbd_contains_shift_tab_button(self):
+        """Test Shift+Tab button presence."""
+        html = self._generate_html(vkbd_enabled=True)
+        self.assertIn('data-key="shift-tab"', html)
+        self.assertIn('>Shift+Tab</button>', html)
+
     def test_vkbd_contains_ctrl_c_button(self):
         """Test Ctrl+C button presence."""
         html = self._generate_html(vkbd_enabled=True)
@@ -208,11 +216,17 @@ class TestVKBDEnabled(TestVirtualKeyboardHTML):
         html = self._generate_html(vkbd_enabled=True)
         self.assertIn('data-key="right"', html)
 
-    def test_vkbd_has_8_buttons(self):
-        """Test that exactly 8 buttons are present."""
+    def test_vkbd_contains_ctrl_v_button(self):
+        """Test Ctrl+V (paste) button presence."""
+        html = self._generate_html(vkbd_enabled=True)
+        self.assertIn('data-key="ctrl-v"', html)
+        self.assertIn('>Ctrl+V</button>', html)
+
+    def test_vkbd_has_10_buttons(self):
+        """Test that exactly 10 buttons are present."""
         html = self._generate_html(vkbd_enabled=True)
         button_count = html.count('data-key="')
-        self.assertEqual(button_count, 8)
+        self.assertEqual(button_count, 10)
 
 
 class TestVKBDCSS(TestVirtualKeyboardHTML):
