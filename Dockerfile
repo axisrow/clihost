@@ -31,7 +31,8 @@ RUN apt-get update && \
 ENV LANG=en_US.UTF-8 \
     LANGUAGE=en_US:en \
     LC_ALL=en_US.UTF-8 \
-    LC_CTYPE=en_US.UTF-8
+    LC_CTYPE=en_US.UTF-8 \
+    CLAUDE_CONFIG_DIR=/home/hapi/.claude
 
 # Update npm to latest version with retry
 RUN for i in 1 2 3 4 5; do npm install -g npm@latest && break || sleep 10; done

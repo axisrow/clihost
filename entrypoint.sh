@@ -25,6 +25,14 @@ HAPI_USER_HOME="/home/${HAPI_USER}"
 
 echo "Starting clihost container..."
 
+# Ensure gh CLI config directory exists for persistence on volume
+mkdir -p "${HAPI_USER_HOME}/.config/gh"
+chown -R "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}/.config"
+
+# Ensure Claude CLI config directory exists for persistence on volume
+mkdir -p "${HAPI_USER_HOME}/.claude"
+chown -R "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}/.claude"
+
 # Setup sshd (started as main process via CMD in Dockerfile)
 mkdir -p /var/run/sshd
 ssh-keygen -A >/dev/null 2>&1 || true
