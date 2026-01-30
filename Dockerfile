@@ -46,13 +46,13 @@ RUN TTYD_VERSION="1.7.7" && \
     chmod +x /usr/local/bin/ttyd
 
 # Install Claude Code via npm with retry
-RUN for i in 1 2 3 4 5; do npm install -g @anthropic-ai/claude-code && break || sleep 10; done
+RUN for i in 1 2 3 4 5; do npm install -g @anthropic-ai/claude-code@latest && break || sleep 10; done
 
 # Install OpenAI Codex CLI (global via npm) with retry
-RUN for i in 1 2 3 4 5; do npm install -g @openai/codex && break || sleep 10; done
+RUN for i in 1 2 3 4 5; do npm install -g @openai/codex@latest && break || sleep 10; done
 
 # Install Google Gemini CLI (global via npm) with retry
-RUN for i in 1 2 3 4 5; do npm install -g @google/gemini-cli && break || sleep 10; done
+RUN for i in 1 2 3 4 5; do npm install -g @google/gemini-cli@latest && break || sleep 10; done
 
 # Create user and group for running hapi
 RUN groupadd -r hapi && useradd -r -g hapi -s /bin/bash hapi && mkdir -p /home/hapi && chown -R hapi:hapi /home/hapi
@@ -61,7 +61,7 @@ RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
     echo 'export LC_ALL=en_US.UTF-8' >> /home/hapi/.bashrc
 
 # Install hapi CLI (global via npm) https://github.com/tiann/hapi
-RUN npm install -g @twsxtd/hapi && chown -R hapi:hapi /usr/local/lib/node_modules
+RUN npm install -g @twsxtd/hapi@latest && chown -R hapi:hapi /usr/local/lib/node_modules
 
 # Create app directory for TTYD proxy
 RUN mkdir -p /app /bin
