@@ -35,7 +35,7 @@ TTYD_USER = os.environ.get("TTYD_USER", "hapi")
 TTYD_PASSWORD = os.environ.get("TTYD_PASSWORD", "")
 PASSWORD_SECRET = os.environ.get("PASSWORD_SECRET", "default-secret-change-me")
 TTYD_TTYD_PORT = 7681  # Hardcoded internal TTYD port
-SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "86400"))  # 24 hours default
+SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "604800"))  # 1 week (168 hours) default
 def env_bool(value, default=False):
     """Parse common boolean env var values."""
     if value is None:
