@@ -46,6 +46,9 @@ RUN TTYD_VERSION="1.7.7" && \
     -o /usr/local/bin/ttyd && \
     chmod +x /usr/local/bin/ttyd
 
+# Invalidate cache when npm package versions change
+ARG NPM_VERSIONS_HASH=default
+
 # Install Claude Code via npm with retry
 RUN for i in 1 2 3 4 5; do npm install -g @anthropic-ai/claude-code@latest && break || sleep 10; done
 
