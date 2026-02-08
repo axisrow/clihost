@@ -5,7 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run Commands
 
 ```bash
-# Build the container image
+# Build with auto-detection of new npm package versions (recommended)
+./build.sh
+
+# Build without checking for updates (uses Docker cache)
 docker build -t clihost .
 
 # Run container (basic - web terminal + SSH only)
