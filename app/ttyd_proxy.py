@@ -24,6 +24,7 @@ import crypt
 import subprocess
 import re
 import secrets
+import html as html_module
 
 # Import base HTTP server
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -561,12 +562,19 @@ class TTYDProxyHandler(BaseHandler):
         except (FileNotFoundError, IOError):
             pass
 
+        # Validate URL scheme - only allow http:// and https://
+        if hapi_url:
+            parsed_url = urlparse(hapi_url)
+            if parsed_url.scheme not in ('http', 'https'):
+                hapi_url = None
+
         # Load and render menu template
         html = load_template('index.html')
-        html = html.replace('{{USERNAME}}', username)
+        html = html.replace('{{USERNAME}}', html_module.escape(username))
 
         if hapi_url:
-            hapi_link = f'<a href="{hapi_url}" target="_blank" class="menu-link">HAPI Server</a>'
+            escaped_url = html_module.escape(hapi_url, quote=True)
+            hapi_link = f'<a href="{escaped_url}" target="_blank" class="menu-link">HAPI Server</a>'
         else:
             hapi_link = '<span class="menu-link disabled">HAPI Server (not available)</span>'
 
