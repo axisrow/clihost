@@ -25,6 +25,14 @@ HAPI_USER_HOME="/home/${HAPI_USER}"
 
 echo "Starting clihost container..."
 
+# Fix permissions for hapi home directory (Railway volume mount overwrites permissions)
+if [ -d "${HAPI_USER_HOME}" ]; then
+    echo "Fixing permissions for ${HAPI_USER_HOME}..."
+    # Ensure hapi user owns the home directory
+    chown -R "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}" 2>/dev/null || true
+    chmod 755 "${HAPI_USER_HOME}" 2>/dev/null || true
+fi
+
 # Ensure gh CLI config directory exists for persistence on volume
 mkdir -p "${HAPI_USER_HOME}/.config/gh"
 chown -R "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}/.config"
