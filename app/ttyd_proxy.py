@@ -67,11 +67,25 @@ class RateLimiter:
         self.window_seconds = window_seconds
         self.attempts = defaultdict(list)
         self.lock = threading.Lock()
+        self._call_count = 0
+        self._cleanup_interval = 100
 
     def is_allowed(self, key):
         """Check if the request is allowed for the given key."""
         with self.lock:
             current_time = int(time.time())
+
+            # Periodically purge stale keys to prevent memory leak
+            self._call_count += 1
+            if self._call_count >= self._cleanup_interval:
+                self._call_count = 0
+                stale_keys = [
+                    k for k, timestamps in self.attempts.items()
+                    if all(current_time - t >= self.window_seconds for t in timestamps)
+                ]
+                for k in stale_keys:
+                    del self.attempts[k]
+
             # Remove old attempts outside the time window
             self.attempts[key] = [
                 attempt_time for attempt_time in self.attempts[key]
@@ -439,7 +453,11 @@ class TTYDProxyHandler(BaseHandler):
             self.send_json(413, {"error": "Request too large"})
             return
 
-        post_data = self.rfile.read(content_length).decode("utf-8")
+        try:
+            post_data = self.rfile.read(content_length).decode("utf-8")
+        except UnicodeDecodeError:
+            self.send_json(400, {"error": "Invalid encoding"})
+            return
         content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
 
         username = ""
@@ -845,7 +863,8 @@ class TTYDProxyHandler(BaseHandler):
         try:
             upstream = socket.create_connection(("127.0.0.1", port), timeout=10)
         except OSError as exc:
-            self.send_json(502, {"error": "TTYD unavailable", "detail": str(exc)})
+            print(f"TTYD proxy error: {exc}", file=sys.stderr, flush=True)
+            self.send_json(502, {"error": "TTYD unavailable"})
             return
 
         try:
@@ -1007,7 +1026,8 @@ class TTYDProxyHandler(BaseHandler):
             if data:
                 self.wfile.write(data)
         except OSError as exc:
-            self.send_json(502, {"error": "TTYD unavailable", "detail": str(exc)})
+            print(f"TTYD proxy error: {exc}", file=sys.stderr, flush=True)
+            self.send_json(502, {"error": "TTYD unavailable"})
         finally:
             try:
                 conn.close()
