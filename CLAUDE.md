@@ -34,15 +34,19 @@ Docker container running hapi CLI runner alongside OpenSSH server, bundling AI C
 ### Container Structure
 
 **Entry point flow** (entrypoint.sh):
-1. Configures SSH server (optionally enables root access if ROOT_PASSWORD set)
-2. Cleans old hapi runner state files
-3. Starts TTYD process on 127.0.0.1:7681 (as hapi user via tmux-wrapper)
-4. Starts TTYD HTTP proxy server (Python, port 8080 by default)
-5. Starts hapi runner in background if HAPI_RUNNER_ENABLED=true
-6. Runs sshd as main process (keeps container alive)
+1. Fixes permissions for hapi home directory (Railway volume mount overwrites permissions)
+2. Creates config directories (.config/gh, .claude) for persistence on volume
+3. Configures SSH server (optionally enables root access if ROOT_PASSWORD set)
+4. Cleans old hapi runner state files and lock files
+5. Starts TTYD process on 127.0.0.1:7681 (as hapi user via tmux-wrapper)
+6. Starts TTYD HTTP proxy server (Python, port 8080 by default)
+7. Starts hapi server with relay in background (extracts tunnel URL and token)
+8. Starts hapi runner in background if HAPI_RUNNER_ENABLED=true
+9. Runs sshd as main process (keeps container alive)
 
 **Multi-process architecture:**
 - `sshd` (port 22) - SSH access, main process
+- `hapi server --relay` - relay server (always starts, provides tunnel URL)
 - `hapi runner` (HAPI_PORT, default 80) - CLI tool runner (optional, requires HAPI_RUNNER_ENABLED=true)
 - `ttyd` (127.0.0.1:7681) - Web terminal process
 - `ttyd_proxy.py` (PORT, default 8080) - HTTP/WebSocket reverse proxy
@@ -65,9 +69,14 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 - Cookie-based HMAC-signed session authentication
 - PAM/shadow password verification (or global password via TTYD_PASSWORD)
 - WebSocket tunneling to TTYD process
-- Login form at `/`, terminal at `/ttyd`
+- Rate limiting (5 attempts per 60s per IP, 5 per 300s per account)
+- CSRF double-submit token protection
+- Username validation (alphanumeric, max 32 chars) and command injection prevention
+- Routes: `/` (dashboard/menu), `/login` (login form), `/health` (health check), `/ttyd` (terminal), `/ttyd/*` (WebSocket proxy)
 
 **bin/tmux-wrapper.sh** - tmux session persistence wrapper (auto-attach or create new session)
+
+**bin/glm** - Anthropic API wrapper that routes through z.ai proxy, requires `ZAI_TOKEN` env var
 
 ### Environment Variables
 
@@ -78,6 +87,9 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 - `PASSWORD_SECRET` - secret for HMAC session signatures (CHANGE IN PRODUCTION)
 - `ROOT_PASSWORD` - optional root SSH password
 - `VIRTUAL_KEYBOARD` - enable virtual keyboard for mobile devices (default: true)
+- `SESSION_TIMEOUT` - session token lifetime in seconds (default: 604800 = 1 week)
+- `CSRF_TOKEN_TTL` - CSRF token time-to-live in seconds (default: 600 = 10 min)
+- `SECURE_COOKIES` - set Secure flag on cookies for HTTPS (default: false)
 
 **Hapi runner (optional):**
 - `HAPI_RUNNER_ENABLED` - enable hapi runner (default: false)
@@ -103,7 +115,7 @@ The TTYD module provides secure web terminal access. Key implementation details:
 - **Session tokens**: HMAC-SHA256 signed, base64url-encoded (username:port:signature)
 - **WebSocket proxying**: Bidirectional socket tunneling using non-blocking I/O + select
 - **Authentication flow**: POST /login → Set ttyd_session cookie → Redirect to /ttyd
-- **Security**: TTYD bound to localhost only, proxy enforces authentication
+- **Security**: TTYD bound to localhost only, proxy enforces authentication, rate limiting, CSRF protection
 
 ### Tab Key Fix
 
@@ -118,9 +130,29 @@ Reference: `TTYD_MODULE.md` in repository root (in Russian) for comprehensive do
 
 ## Testing
 
-Manual smoke test: build image, run container, verify logs show "Hapi runner startup complete" (or fallback message) and sshd stays running.
+```bash
+# Run all tests
+python -m pytest tests/
 
-Web terminal test: Open http://localhost:8080 in browser, login with system credentials.
+# Run unit tests only
+python -m pytest tests/unit/
+
+# Run a single test file
+python -m pytest tests/unit/test_env_bool.py
+```
+
+Note: `conftest.py` adds `app/` to `sys.path` for imports.
+
+**Manual smoke test:** build image, run container, verify logs show "Hapi runner startup complete" (or fallback message) and sshd stays running.
+
+**Web terminal test:** Open http://localhost:8080 in browser, login with system credentials.
+
+## Pull Request Guidelines
+
+PRs should include:
+- Summary of changes
+- New/changed environment variables (update `.env.example`)
+- Port or volume mapping changes and their rationale
 
 ## Debugging Commands
 

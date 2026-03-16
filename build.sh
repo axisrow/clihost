@@ -13,6 +13,7 @@ get_version() {
 VERSIONS=$(get_version @anthropic-ai/claude-code)
 VERSIONS+=" $(get_version @openai/codex)"
 VERSIONS+=" $(get_version @google/gemini-cli)"
+VERSIONS+=" $(get_version @github/copilot)"
 VERSIONS+=" $(get_version @twsxtd/hapi)"
 
 # Проверяем что хотя бы часть версий получена
