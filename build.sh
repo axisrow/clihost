@@ -15,6 +15,7 @@ VERSIONS+=" $(get_version @openai/codex)"
 VERSIONS+=" $(get_version @google/gemini-cli)"
 VERSIONS+=" $(get_version @github/copilot)"
 VERSIONS+=" $(get_version @twsxtd/hapi)"
+VERSIONS+=" $(get_version opencode-ai)"
 
 # Проверяем что хотя бы часть версий получена
 if [[ "$VERSIONS" =~ ^(unknown\ ){3}unknown$ ]]; then

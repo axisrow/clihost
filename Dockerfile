@@ -61,6 +61,9 @@ RUN for i in 1 2 3 4 5; do npm install -g @google/gemini-cli@latest && break || 
 # Install GitHub Copilot CLI (global via npm) with retry
 RUN for i in 1 2 3 4 5; do npm install -g @github/copilot@latest && break || sleep 10; done
 
+# Install OpenCode AI (global via npm) with retry
+RUN for i in 1 2 3 4 5; do npm install -g opencode-ai@latest && break || sleep 10; done
+
 # Create user and group for running hapi
 RUN groupadd -r hapi && useradd -r -g hapi -s /bin/bash hapi && mkdir -p /home/hapi && chown -R hapi:hapi /home/hapi
 RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
