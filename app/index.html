@@ -116,10 +116,22 @@
       return match ? match[1] : '';
     }
 
+    function handleAuthError(r) {
+      if (r.status === 401 || r.status === 403) {
+        window.location.href = '/login';
+        return true;
+      }
+      return false;
+    }
+
     function loadTerminals() {
       fetch('/terminals')
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+          if (handleAuthError(r)) return;
+          return r.json();
+        })
         .then(function(data) {
+          if (!data) return;
           var list = document.getElementById('terminals-list');
           list.innerHTML = '';
           var terminals = data.terminals || [];
@@ -154,26 +166,38 @@
       btn.disabled = true;
       btn.textContent = 'Creating...';
       fetch('/terminals', { method: 'POST', headers: { 'X-CSRF-Token': getCsrfToken() } })
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+          if (handleAuthError(r)) return;
+          return r.json();
+        })
         .then(function(data) {
+          if (!data) return;
+          if (data.error) {
+            btn.textContent = data.error;
+            setTimeout(function() { btn.textContent = '+ New terminal'; }, 3000);
+            return;
+          }
           if (data.id) {
             window.open('/ttyd' + data.id, '_blank');
           }
           loadTerminals();
         })
         .catch(function(err) {
-          console.log('Failed to create terminal:', err);
+          btn.textContent = 'Error — refresh page';
+          setTimeout(function() { btn.textContent = '+ New terminal'; }, 3000);
         })
         .finally(function() {
           btn.disabled = false;
-          btn.textContent = '+ New terminal';
         });
     }
 
     function deleteTerminal(id) {
       if (!confirm('Close terminal ttyd' + id + '?')) return;
       fetch('/terminals/' + id, { method: 'DELETE', headers: { 'X-CSRF-Token': getCsrfToken() } })
-        .then(function() { loadTerminals(); })
+        .then(function(r) {
+          if (handleAuthError(r)) return;
+          loadTerminals();
+        })
         .catch(function(err) {
           console.log('Failed to delete terminal:', err);
         });
