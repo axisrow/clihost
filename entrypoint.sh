@@ -55,32 +55,7 @@ rm -f "${HAPI_USER_HOME}/runner.state.json.lock" 2>/dev/null || true
 rm -f "${HAPI_USER_HOME}/.hapi/settings.json" 2>/dev/null || true
 rm -f "${HAPI_USER_HOME}/settings.json" 2>/dev/null || true
 
-# Start TTYD process (bind to localhost only, hardcoded port 7681)
-echo "Starting TTYD for user: ${TTYD_USER}"
-runuser -u "${TTYD_USER}" -- /usr/local/bin/ttyd \
-    -p 7681 \
-    -i 127.0.0.1 \
-    -W \
-    /bin/tmux-wrapper.sh &
-
-TTYD_PID=$!
-echo "TTYD started with PID: ${TTYD_PID}"
-
-# Wait for TTYD to be ready with health check
-echo "Waiting for TTYD to be ready..."
-for i in $(seq 1 30); do
-  if curl -sS http://127.0.0.1:7681 >/dev/null 2>&1; then
-    echo "TTYD is ready (after ${i}s)"
-    break
-  fi
-  if [ $i -eq 30 ]; then
-    echo "ERROR: TTYD failed to start within 30 seconds" >&2
-    exit 1
-  fi
-  sleep 1
-done
-
-# Start TTYD HTTP proxy
+# Start TTYD HTTP proxy (manages TTYD processes dynamically)
 echo "Starting TTYD HTTP proxy on port ${PORT}"
 PORT="${PORT}" \
 TTYD_USER="${TTYD_USER}" \

@@ -45,6 +45,7 @@
       font-size: 1rem;
       text-decoration: none;
       transition: background 0.2s;
+      cursor: pointer;
     }
     .menu-link:hover {
       background: #3a7bc8;
@@ -61,10 +62,41 @@
       cursor: not-allowed;
       pointer-events: none;
     }
+    .menu-link.new-terminal {
+      background: #2d6a4f;
+    }
+    .menu-link.new-terminal:hover {
+      background: #3a8963;
+    }
     .username {
       color: #b0b8c3;
       font-size: 0.875rem;
       margin-bottom: 1.5rem;
+    }
+    .terminal-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: stretch;
+    }
+    .terminal-row .menu-link {
+      flex: 1;
+    }
+    .delete-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 44px;
+      background: #4a3040;
+      color: #e06070;
+      border: none;
+      border-radius: 4px;
+      font-size: 1.2rem;
+      cursor: pointer;
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+    .delete-btn:hover {
+      background: #6a3040;
     }
   </style>
 </head>
@@ -72,10 +104,82 @@
   <div class="menu-container">
     <h1>HAPI Dashboard</h1>
     <div class="username">{{USERNAME}}</div>
-    <div class="menu-links">
+    <div class="menu-links" id="menu-links">
       {{HAPI_LINK}}
-      <a href="/ttyd" class="menu-link secondary">Terminal</a>
+      <div id="terminals-list"></div>
+      <button class="menu-link new-terminal" id="new-terminal-btn" onclick="createTerminal()">+ New terminal</button>
     </div>
   </div>
+  <script>
+    function getCsrfToken() {
+      var match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]*)/);
+      return match ? match[1] : '';
+    }
+
+    function loadTerminals() {
+      fetch('/terminals')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          var list = document.getElementById('terminals-list');
+          list.innerHTML = '';
+          var terminals = data.terminals || [];
+          terminals.forEach(function(t) {
+            var row = document.createElement('div');
+            row.className = 'terminal-row';
+            var link = document.createElement('a');
+            link.href = '/ttyd' + t.id;
+            link.target = '_blank';
+            link.className = 'menu-link secondary';
+            link.textContent = 'ttyd' + t.id;
+            row.appendChild(link);
+            var del = document.createElement('button');
+            del.className = 'delete-btn';
+            del.title = 'Close terminal';
+            del.textContent = '\u00d7';
+            del.onclick = function(e) {
+              e.preventDefault();
+              deleteTerminal(t.id);
+            };
+            row.appendChild(del);
+            list.appendChild(row);
+          });
+        })
+        .catch(function(err) {
+          console.log('Failed to load terminals:', err);
+        });
+    }
+
+    function createTerminal() {
+      var btn = document.getElementById('new-terminal-btn');
+      btn.disabled = true;
+      btn.textContent = 'Creating...';
+      fetch('/terminals', { method: 'POST', headers: { 'X-CSRF-Token': getCsrfToken() } })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.id) {
+            window.open('/ttyd' + data.id, '_blank');
+          }
+          loadTerminals();
+        })
+        .catch(function(err) {
+          console.log('Failed to create terminal:', err);
+        })
+        .finally(function() {
+          btn.disabled = false;
+          btn.textContent = '+ New terminal';
+        });
+    }
+
+    function deleteTerminal(id) {
+      if (!confirm('Close terminal ttyd' + id + '?')) return;
+      fetch('/terminals/' + id, { method: 'DELETE', headers: { 'X-CSRF-Token': getCsrfToken() } })
+        .then(function() { loadTerminals(); })
+        .catch(function(err) {
+          console.log('Failed to delete terminal:', err);
+        });
+    }
+
+    loadTerminals();
+  </script>
 </body>
 </html>

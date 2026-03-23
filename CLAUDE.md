@@ -63,7 +63,7 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 
 ### Key Components
 
-**app/server.py** - Base HTTP server with common utilities (JSON/HTML responses, silent logging)
+**app/server.py** - Base HTTP server with common utilities (JSON/HTML responses, silent logging, security headers)
 
 **app/ttyd_proxy.py** - TTYD reverse proxy with:
 - Cookie-based HMAC-signed session authentication
@@ -72,7 +72,10 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 - Rate limiting (5 attempts per 60s per IP, 5 per 300s per account)
 - CSRF double-submit token protection
 - Username validation (alphanumeric, max 32 chars) and command injection prevention
+- `env_bool()` utility for parsing boolean environment variables (used for feature toggles like VIRTUAL_KEYBOARD, SECURE_COOKIES)
 - Routes: `/` (dashboard/menu), `/login` (login form), `/health` (health check), `/ttyd` (terminal), `/ttyd/*` (WebSocket proxy)
+
+**app/index.html, app/login.html** - HTML templates with variable substitution (`{{USERNAME}}`, `{{CSRF_TOKEN}}`, `{{HAPI_LINK}}`). Values are escaped via `html.escape()` to prevent XSS.
 
 **bin/tmux-wrapper.sh** - tmux session persistence wrapper (auto-attach or create new session)
 
@@ -143,6 +146,10 @@ python -m pytest tests/unit/test_env_bool.py
 
 Note: `conftest.py` adds `app/` to `sys.path` for imports.
 
+**Test structure:**
+- `tests/unit/` - Pure function tests (`env_bool`, virtual keyboard HTML generation). Run without Linux-specific dependencies.
+- `tests/integration/` - TTYD handler tests. Simulate handler behavior without importing full ttyd_proxy.py (avoids Linux-only deps like `crypt`, PAM).
+
 **Manual smoke test:** build image, run container, verify logs show "Hapi runner startup complete" (or fallback message) and sshd stays running.
 
 **Web terminal test:** Open http://localhost:8080 in browser, login with system credentials.
@@ -153,6 +160,11 @@ PRs should include:
 - Summary of changes
 - New/changed environment variables (update `.env.example`)
 - Port or volume mapping changes and their rationale
+
+## CI/CD
+
+- `.github/workflows/claude.yml` - Claude Code action, triggers on @claude mentions in issues/PR comments
+- `.github/workflows/claude-code-review.yml` - Automatic code review on PR open/synchronize
 
 ## Debugging Commands
 

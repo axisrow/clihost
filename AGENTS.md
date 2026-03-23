@@ -23,9 +23,13 @@ This repository builds a Docker image that runs the `hapi` CLI runner alongside 
 - Keep Dockerfile changes grouped by purpose (base OS, tools, user setup).
 
 ## Testing Guidelines
-No automated tests are present. Use a manual smoke check:
-- Build and run the image.
-- Confirm `hapi runner start` appears in logs and `sshd` stays running.
+```bash
+python -m pytest tests/          # all tests
+python -m pytest tests/unit/     # unit tests only
+```
+Tests are in `tests/unit/` (pure functions) and `tests/integration/` (handler simulation). `conftest.py` adds `app/` to `sys.path`.
+
+Manual smoke check: build and run the image, confirm `hapi runner start` appears in logs and `sshd` stays running.
 
 ## Commit & Pull Request Guidelines
 Observed commit history uses short, imperative subjects (often "add ..." or Russian verbs), with no issue IDs. Follow the same style.
