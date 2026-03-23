@@ -92,7 +92,34 @@ class TTYDManager:
                     pass
             except OSError:
                 pass
+
+        # Kill tmux session
+        tmux_session = f"ttyd-{terminal_id}"
+        try:
+            subprocess.run(
+                ["runuser", "-u", self.ttyd_user, "--", "tmux", "kill-session", "-t", tmux_session],
+                capture_output=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
         return True
+
+    def _cleanup_dead(self, terminal_id, info):
+        """Clean up a dead terminal: reap zombie, kill tmux session."""
+        process = info.get("process")
+        if process:
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        tmux_session = f"ttyd-{terminal_id}"
+        try:
+            subprocess.run(
+                ["runuser", "-u", self.ttyd_user, "--", "tmux", "kill-session", "-t", tmux_session],
+                capture_output=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
     def list_terminals(self):
         """Return list of active terminals sorted by id."""
@@ -109,6 +136,11 @@ class TTYDManager:
                 [{"id": t["id"], "port": t["port"]} for t in self.terminals.values()],
                 key=lambda x: x["id"],
             )
+
+        # Clean up dead terminals outside the lock
+        for tid, info in dead:
+            self._cleanup_dead(tid, info)
+
         return result
 
     def get_terminal(self, terminal_id):
@@ -123,6 +155,11 @@ class TTYDManager:
                     info = None
                 else:
                     return {"id": info["id"], "port": info["port"]}
+
+        # Clean up dead terminal outside the lock
+        if dead_info:
+            self._cleanup_dead(terminal_id, dead_info)
+
         return None
 
     def _wait_for_ready(self, port, timeout=15):
@@ -197,8 +234,9 @@ class TestCreateTerminal(unittest.TestCase):
 class TestDeleteTerminal(unittest.TestCase):
     """Tests for TTYDManager.delete_terminal()."""
 
+    @patch("subprocess.run")
     @patch("subprocess.Popen")
-    def test_delete_terminal_success(self, mock_popen):
+    def test_delete_terminal_success(self, mock_popen, mock_run):
         mock_proc = MagicMock()
         mock_proc.pid = 100
         mock_popen.return_value = mock_proc
@@ -218,11 +256,13 @@ class TestDeleteTerminal(unittest.TestCase):
         result = mgr.delete_terminal(999)
         self.assertFalse(result)
 
+    @patch("subprocess.run")
     @patch("subprocess.Popen")
-    def test_delete_terminal_kill_on_timeout(self, mock_popen):
+    def test_delete_terminal_kill_on_timeout(self, mock_popen, mock_run):
         mock_proc = MagicMock()
         mock_proc.pid = 100
-        mock_proc.wait.side_effect = subprocess.TimeoutExpired("ttyd", 5)
+        # First wait (after terminate) times out, second wait (after kill) succeeds
+        mock_proc.wait.side_effect = [subprocess.TimeoutExpired("ttyd", 5), None]
         mock_popen.return_value = mock_proc
 
         mgr = TTYDManager(base_port=9000)
@@ -232,6 +272,25 @@ class TestDeleteTerminal(unittest.TestCase):
         self.assertTrue(result)
         mock_proc.terminate.assert_called_once()
         mock_proc.kill.assert_called_once()
+        self.assertEqual(mock_proc.wait.call_count, 2)
+
+    @patch("subprocess.run")
+    @patch("subprocess.Popen")
+    def test_delete_terminal_kills_tmux_session(self, mock_popen, mock_run):
+        mock_proc = MagicMock()
+        mock_proc.pid = 100
+        mock_popen.return_value = mock_proc
+
+        mgr = TTYDManager(base_port=9000)
+        mgr.create_terminal()
+        mgr.delete_terminal(1)
+
+        # Verify tmux kill-session was called with correct session name
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        self.assertIn("tmux", call_args)
+        self.assertIn("kill-session", call_args)
+        self.assertIn("ttyd-1", call_args)
 
 
 class TestListTerminals(unittest.TestCase):
@@ -258,8 +317,9 @@ class TestListTerminals(unittest.TestCase):
         self.assertEqual(result[0]["id"], 1)
         self.assertEqual(result[1]["id"], 2)
 
+    @patch("subprocess.run")
     @patch("subprocess.Popen")
-    def test_list_filters_dead_processes(self, mock_popen):
+    def test_list_filters_dead_processes(self, mock_popen, mock_run):
         mock_proc_alive = MagicMock()
         mock_proc_alive.pid = 100
         mock_proc_alive.poll.return_value = None  # alive
@@ -300,8 +360,9 @@ class TestGetTerminal(unittest.TestCase):
         mgr = TTYDManager(base_port=9000)
         self.assertIsNone(mgr.get_terminal(999))
 
+    @patch("subprocess.run")
     @patch("subprocess.Popen")
-    def test_get_dead_process_returns_none(self, mock_popen):
+    def test_get_dead_process_returns_none(self, mock_popen, mock_run):
         mock_proc = MagicMock()
         mock_proc.pid = 100
         mock_proc.poll.return_value = 1  # dead
@@ -322,8 +383,9 @@ class TestAllocatePort(unittest.TestCase):
         mgr = TTYDManager(base_port=9000)
         self.assertEqual(mgr._allocate_port(), 9000)
 
+    @patch("subprocess.run")
     @patch("subprocess.Popen")
-    def test_port_reuse_after_delete(self, mock_popen):
+    def test_port_reuse_after_delete(self, mock_popen, mock_run):
         mock_proc = MagicMock()
         mock_proc.pid = 100
         mock_popen.return_value = mock_proc
