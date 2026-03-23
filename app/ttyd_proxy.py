@@ -608,7 +608,7 @@ class TTYDProxyHandler(BaseHandler):
             "form-action 'self'; "
             "frame-ancestors 'none'; "
             "object-src 'none'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+            "script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'",
         )
         secure_flag = " Secure;" if SECURE_COOKIES else ""
@@ -1272,15 +1272,30 @@ class TTYDProxyHandler(BaseHandler):
                 self.send_header("Pragma", "no-cache")
                 self.send_header("Expires", "0")
 
+            # Headers to skip from upstream (hop-by-hop + CSP override for HTML)
+            skip_headers = {
+                "connection", "keep-alive", "proxy-authenticate",
+                "proxy-authorization", "te", "trailer", "trailers",
+                "transfer-encoding", "upgrade", "content-length",
+            }
+            if 'text/html' in content_type:
+                skip_headers.add("content-security-policy")
+
             for key, value in resp.getheaders():
-                key_lower = key.lower()
-                if key_lower in {
-                    "connection", "keep-alive", "proxy-authenticate",
-                    "proxy-authorization", "te", "trailer", "trailers",
-                    "transfer-encoding", "upgrade", "content-length",
-                }:
+                if key.lower() in skip_headers:
                     continue
                 self.send_header(key, value)
+
+            # Override CSP for TTYD HTML — needs unsafe-eval for TTYD's JS
+            if 'text/html' in content_type:
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'self'; "
+                    "base-uri 'none'; "
+                    "object-src 'none'; "
+                    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+                    "style-src 'self' 'unsafe-inline'",
+                )
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             if data:

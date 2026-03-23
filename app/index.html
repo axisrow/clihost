@@ -111,6 +111,9 @@
     </div>
   </div>
   <script>
+    var DEBUG = true;
+    function log() { if (DEBUG) console.log.apply(console, arguments); }
+
     function getCsrfToken() {
       var match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]*)/);
       return match ? match[1] : '';
@@ -131,16 +134,16 @@
     }
 
     function loadTerminals() {
-      console.log('[ttyd] Loading terminals...');
+      log('[ttyd] Loading terminals...');
       fetch('/terminals')
         .then(function(r) {
-          console.log('[ttyd] GET /terminals status:', r.status);
+          log('[ttyd] GET /terminals status:', r.status);
           if (handleAuthError(r)) return;
           return r.json();
         })
         .then(function(data) {
           if (!data) return;
-          console.log('[ttyd] Terminals:', JSON.stringify(data.terminals));
+          log('[ttyd] Terminals:', JSON.stringify(data.terminals));
           var list = document.getElementById('terminals-list');
           list.innerHTML = '';
           var terminals = data.terminals || [];
@@ -166,7 +169,7 @@
           });
         })
         .catch(function(err) {
-          console.log('Failed to load terminals:', err);
+          log('[ttyd] Failed to load terminals:', err);
         });
     }
 
@@ -174,30 +177,30 @@
       var btn = document.getElementById('new-terminal-btn');
       btn.disabled = true;
       btn.textContent = 'Creating...';
-      console.log('[ttyd] POST /terminals csrf:', getCsrfToken() ? 'present' : 'MISSING');
+      log('[ttyd] POST /terminals csrf:', getCsrfToken() ? 'present' : 'MISSING');
       fetch('/terminals', { method: 'POST', headers: { 'X-CSRF-Token': getCsrfToken() } })
         .then(function(r) {
-          console.log('[ttyd] POST /terminals status:', r.status);
+          log('[ttyd] POST /terminals status:', r.status);
           if (handleAuthError(r)) return;
           return r.json();
         })
         .then(function(data) {
-          if (!data) { console.log('[ttyd] No data (auth redirect?)'); return; }
-          console.log('[ttyd] Response:', JSON.stringify(data));
+          if (!data) { log('[ttyd] No data (auth redirect?)'); return; }
+          log('[ttyd] Response:', JSON.stringify(data));
           if (data.error) {
-            console.log('[ttyd] Error:', data.error);
+            log('[ttyd] Error:', data.error);
             btn.textContent = data.error;
             setTimeout(function() { btn.textContent = '+ New terminal'; }, 3000);
             return;
           }
           if (data.id) {
-            console.log('[ttyd] Opening /ttyd' + data.id);
+            log('[ttyd] Opening /ttyd' + data.id);
             window.open('/ttyd' + data.id, '_blank');
           }
           loadTerminals();
         })
         .catch(function(err) {
-          console.log('[ttyd] Fetch error:', err);
+          log('[ttyd] Fetch error:', err);
           btn.textContent = 'Error — refresh page';
           setTimeout(function() { btn.textContent = '+ New terminal'; }, 3000);
         })
@@ -211,15 +214,15 @@
 
     function deleteTerminal(id) {
       if (!confirm('Close terminal ttyd' + id + '?')) return;
-      console.log('[ttyd] DELETE /terminals/' + id);
+      log('[ttyd] DELETE /terminals/' + id);
       fetch('/terminals/' + id, { method: 'DELETE', headers: { 'X-CSRF-Token': getCsrfToken() } })
         .then(function(r) {
-          console.log('[ttyd] DELETE status:', r.status);
+          log('[ttyd] DELETE status:', r.status);
           if (handleAuthError(r)) return;
           loadTerminals();
         })
         .catch(function(err) {
-          console.log('Failed to delete terminal:', err);
+          log('[ttyd] Failed to delete terminal:', err);
         });
     }
 
