@@ -41,7 +41,7 @@ class BaseHTTPHandler(BaseHTTPRequestHandler):
             "form-action 'self'; "
             "frame-ancestors 'none'; "
             "object-src 'none'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+            "script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'",
         )
         self.end_headers()

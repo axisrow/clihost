@@ -876,7 +876,7 @@ class TTYDProxyHandler(BaseHandler):
             "form-action 'self'; "
             "frame-ancestors 'none'; "
             "object-src 'none'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+            "script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'",
         )
         self.send_header(
@@ -1292,6 +1292,7 @@ class TTYDProxyHandler(BaseHandler):
                     "Content-Security-Policy",
                     "default-src 'self'; "
                     "base-uri 'none'; "
+                    "frame-ancestors 'self'; "
                     "object-src 'none'; "
                     "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
                     "style-src 'self' 'unsafe-inline'",
