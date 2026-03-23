@@ -117,6 +117,10 @@
     }
 
     function handleAuthError(r) {
+      if (r.status === 419) {
+        window.location.reload();
+        return true;
+      }
       if (r.status === 401 || r.status === 403) {
         window.location.href = '/login';
         return true;

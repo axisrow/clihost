@@ -664,10 +664,10 @@ class TTYDProxyHandler(BaseHandler):
         csrf_header = self.headers.get("X-CSRF-Token", "")
         csrf_cookie = self.parse_cookie_header(self.headers.get("Cookie", "")).get("csrf_token", "")
         if not csrf_header or not csrf_cookie:
-            self.send_json(403, {"error": "CSRF token missing"})
+            self.send_json(419, {"error": "CSRF token missing — please refresh the page"})
             return False
         if csrf_header != csrf_cookie or not parse_csrf_token(csrf_header):
-            self.send_json(403, {"error": "Invalid CSRF token"})
+            self.send_json(419, {"error": "CSRF token expired — please refresh the page"})
             return False
         return True
 
