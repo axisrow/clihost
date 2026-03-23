@@ -7,7 +7,7 @@ export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 export LC_CTYPE=en_US.UTF-8
 
-SESSION_NAME="ttyd-$(whoami)"
+SESSION_NAME="${1:-ttyd-$(whoami)}"
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     exec tmux attach-session -t "$SESSION_NAME"

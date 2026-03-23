@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 TTYD HTTP Proxy Server
-Proxies HTTP/WebSocket traffic to TTYD process on 127.0.0.1:7681
+Proxies HTTP/WebSocket traffic to multiple TTYD processes on 127.0.0.1
 """
 import os
 import sys
@@ -35,7 +35,8 @@ PORT = int(os.environ.get("PORT", "8080"))
 TTYD_USER = os.environ.get("TTYD_USER", "hapi")
 TTYD_PASSWORD = os.environ.get("TTYD_PASSWORD", "")
 PASSWORD_SECRET = os.environ.get("PASSWORD_SECRET", "default-secret-change-me")
-TTYD_TTYD_PORT = 7681  # Hardcoded internal TTYD port
+TTYD_BASE_PORT = 7681  # Starting port for TTYD instances
+MAX_TERMINALS = int(os.environ.get("MAX_TERMINALS", "100"))
 SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "604800"))  # 1 week (168 hours) default
 def env_bool(value, default=False):
     """Parse common boolean env var values."""
@@ -58,6 +59,180 @@ TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
 # Username validation pattern - only alphanumeric, underscore, hyphen, dot
 # Max length 32 chars per Linux username limits
 USERNAME_PATTERN = re.compile(r'^[a-zA-Z0-9_.-]{1,32}$')
+
+# Route pattern for multi-terminal endpoints: /ttyd1, /ttyd1/, /ttyd1/ws
+TTYD_ROUTE_PATTERN = re.compile(r'^/ttyd(\d+)(/.*)?$')
+
+
+class TTYDManager:
+    """Manages multiple TTYD process instances."""
+
+    def __init__(self):
+        self.terminals = {}  # {terminal_id: {"port": int, "pid": int, "process": Popen}}
+        self.next_id = 1
+        self.lock = threading.Lock()
+
+    def _allocate_port(self):
+        """Find next available port, reusing freed ports. Returns port or None."""
+        used_ports = {t["port"] for t in self.terminals.values()}
+        max_port = TTYD_BASE_PORT + MAX_TERMINALS
+        port = TTYD_BASE_PORT
+        while port in used_ports:
+            port += 1
+            if port >= max_port:
+                return None
+        return port
+
+    def create_terminal(self, wait=False):
+        """Spawn a new TTYD process. Returns terminal info dict, "limit", or None."""
+        with self.lock:
+            if len(self.terminals) >= MAX_TERMINALS:
+                return "limit"
+            terminal_id = self.next_id
+            port = self._allocate_port()
+            if port is None:
+                return "limit"
+
+            tmux_session = f"ttyd-{terminal_id}"
+            try:
+                process = subprocess.Popen(
+                    [
+                        "runuser", "-u", TTYD_USER, "--",
+                        "/usr/local/bin/ttyd",
+                        "-p", str(port),
+                        "-i", "127.0.0.1",
+                        "-W",
+                        "/bin/tmux-wrapper.sh", tmux_session,
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError as e:
+                print(f"Failed to start TTYD on port {port}: {e}", file=sys.stderr, flush=True)
+                return None
+
+            # Register immediately to prevent race conditions on ID/port
+            info = {"id": terminal_id, "port": port, "pid": process.pid, "process": process}
+            self.terminals[terminal_id] = info
+            self.next_id += 1
+
+        if wait:
+            if not self._wait_for_ready(port):
+                self.delete_terminal(terminal_id)
+                return None
+
+        print(f"Started terminal ttyd{terminal_id} on port {port} (PID {process.pid})", flush=True)
+        return {"id": terminal_id, "port": port}
+
+    def delete_terminal(self, terminal_id):
+        """Kill a TTYD process and its tmux session. Returns True if deleted."""
+        with self.lock:
+            info = self.terminals.pop(terminal_id, None)
+        if not info:
+            return False
+
+        # Kill TTYD process
+        process = info.get("process")
+        if process:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                    process.wait(timeout=3)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+            except OSError:
+                pass
+
+        # Kill tmux session
+        tmux_session = f"ttyd-{terminal_id}"
+        try:
+            subprocess.run(
+                ["runuser", "-u", TTYD_USER, "--", "tmux", "kill-session", "-t", tmux_session],
+                capture_output=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+        print(f"Deleted terminal ttyd{terminal_id}", flush=True)
+        return True
+
+    def _cleanup_dead(self, terminal_id, info):
+        """Clean up a dead terminal: reap zombie, kill tmux session."""
+        process = info.get("process")
+        if process:
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        tmux_session = f"ttyd-{terminal_id}"
+        try:
+            subprocess.run(
+                ["runuser", "-u", TTYD_USER, "--", "tmux", "kill-session", "-t", tmux_session],
+                capture_output=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        print(f"Terminal ttyd{terminal_id} died, cleaned up", flush=True)
+
+    def list_terminals(self):
+        """Return list of active terminals sorted by id."""
+        dead = []
+        with self.lock:
+            for tid, info in self.terminals.items():
+                process = info.get("process")
+                if process and process.poll() is not None:
+                    dead.append((tid, info))
+            for tid, _info in dead:
+                del self.terminals[tid]
+
+            result = sorted(
+                [{"id": t["id"], "port": t["port"]} for t in self.terminals.values()],
+                key=lambda x: x["id"],
+            )
+
+        # Clean up dead terminals outside the lock
+        for tid, info in dead:
+            self._cleanup_dead(tid, info)
+
+        return result
+
+    def get_terminal(self, terminal_id):
+        """Get terminal info by id, or None."""
+        dead_info = None
+        with self.lock:
+            info = self.terminals.get(terminal_id)
+            if info:
+                process = info.get("process")
+                if process and process.poll() is not None:
+                    dead_info = self.terminals.pop(terminal_id)
+                    info = None
+                else:
+                    return {"id": info["id"], "port": info["port"]}
+
+        # Clean up dead terminal outside the lock
+        if dead_info:
+            self._cleanup_dead(terminal_id, dead_info)
+
+        return None
+
+    def _wait_for_ready(self, port, timeout=15):
+        """Wait until TTYD is responding on the given port."""
+        for _ in range(timeout):
+            try:
+                sock = socket.create_connection(("127.0.0.1", port), timeout=1)
+                sock.close()
+                return True
+            except OSError:
+                time.sleep(1)
+        print(f"TTYD on port {port} failed to start within {timeout}s", file=sys.stderr, flush=True)
+        return False
+
+
+# Global TTYD manager instance
+ttyd_manager = TTYDManager()
 
 
 class RateLimiter:
@@ -373,19 +548,25 @@ class TTYDProxyHandler(BaseHandler):
         parsed = urlparse(self.path)
 
         if parsed.path == "/":
-            # Root - show main menu (after auth)
             self.handle_menu()
         elif parsed.path == "/login":
-            # Login page
             self.handle_login_page()
         elif parsed.path == "/health":
             self.handle_health()
-        elif parsed.path == "/ttyd":
-            self.handle_ttyd()
-        elif parsed.path.startswith("/ttyd/"):
-            self.handle_ttyd_proxy()
+        elif parsed.path == "/terminals":
+            self.handle_terminals_list()
         else:
-            self.send_json(404, {"error": "Not found"})
+            # Match /ttyd<N> or /ttyd<N>/...
+            match = TTYD_ROUTE_PATTERN.match(parsed.path)
+            if match:
+                terminal_id = int(match.group(1))
+                sub_path = match.group(2)
+                if sub_path:
+                    self.handle_ttyd_proxy(terminal_id)
+                else:
+                    self.handle_ttyd(terminal_id)
+            else:
+                self.send_json(404, {"error": "Not found"})
 
     def do_POST(self):
         """Handle POST requests."""
@@ -393,6 +574,19 @@ class TTYDProxyHandler(BaseHandler):
 
         if parsed.path == "/login":
             self.handle_login()
+        elif parsed.path == "/terminals":
+            self.handle_terminals_create()
+        else:
+            self.send_json(404, {"error": "Not found"})
+
+    def do_DELETE(self):
+        """Handle DELETE requests."""
+        parsed = urlparse(self.path)
+
+        match = re.match(r'^/terminals/(\d+)$', parsed.path)
+        if match:
+            terminal_id = int(match.group(1))
+            self.handle_terminals_delete(terminal_id)
         else:
             self.send_json(404, {"error": "Not found"})
 
@@ -427,15 +621,83 @@ class TTYDProxyHandler(BaseHandler):
 
     def handle_health(self):
         """Health check endpoint."""
-        # Check if TTYD process is accessible
-        try:
-            sock = socket.create_connection(("127.0.0.1", TTYD_TTYD_PORT), timeout=1)
-            sock.close()
-            ttyd_status = "running"
-        except OSError:
-            ttyd_status = "unavailable"
+        terminals = ttyd_manager.list_terminals()
+        self.send_json(200, {
+            "status": "ok",
+            "ttyd": "running" if terminals else "no terminals",
+            "terminals": len(terminals),
+        })
 
-        self.send_json(200, {"status": "ok", "ttyd": ttyd_status})
+    def _check_auth(self, redirect=False):
+        """Check session auth. Returns username or None (sends error/redirect response)."""
+        cookies = self.parse_cookie_header(self.headers.get("Cookie", ""))
+        token = cookies.get("ttyd_session")
+        username, port = parse_ttyd_session(token)
+        if not username or not port:
+            if redirect:
+                self.send_response(302)
+                self.send_header("Location", "/login")
+                self.end_headers()
+            else:
+                self.send_json(401, {"error": "Authentication required"})
+            return None
+        if not is_valid_username(username):
+            self.send_json(403, {"error": "Invalid session"})
+            return None
+        try:
+            pwd.getpwnam(username)
+        except KeyError:
+            self.send_json(403, {"error": "Invalid session"})
+            return None
+        return username
+
+    def handle_terminals_list(self):
+        """GET /terminals - list active terminals."""
+        username = self._check_auth()
+        if not username:
+            return
+        terminals = ttyd_manager.list_terminals()
+        self.send_json(200, {"terminals": terminals})
+
+    def _check_csrf(self):
+        """Validate CSRF token from request header against cookie. Returns True if valid."""
+        csrf_header = self.headers.get("X-CSRF-Token", "")
+        csrf_cookie = self.parse_cookie_header(self.headers.get("Cookie", "")).get("csrf_token", "")
+        if not csrf_header or not csrf_cookie:
+            self.send_json(419, {"error": "CSRF token missing — please refresh the page"})
+            return False
+        if csrf_header != csrf_cookie or not parse_csrf_token(csrf_header):
+            self.send_json(419, {"error": "CSRF token expired — please refresh the page"})
+            return False
+        return True
+
+    def handle_terminals_create(self):
+        """POST /terminals - create a new terminal."""
+        username = self._check_auth()
+        if not username:
+            return
+        if not self._check_csrf():
+            return
+        result = ttyd_manager.create_terminal()
+        if result == "limit":
+            self.send_json(429, {"error": f"Terminal limit reached (max {MAX_TERMINALS})"})
+            return
+        if not result:
+            self.send_json(500, {"error": "Failed to create terminal"})
+            return
+        self.send_json(201, result)
+
+    def handle_terminals_delete(self, terminal_id):
+        """DELETE /terminals/<id> - delete a terminal."""
+        username = self._check_auth()
+        if not username:
+            return
+        if not self._check_csrf():
+            return
+        if ttyd_manager.delete_terminal(terminal_id):
+            self.send_json(200, {"deleted": terminal_id})
+        else:
+            self.send_json(404, {"error": f"Terminal {terminal_id} not found"})
 
     def handle_login(self):
         """Handle login POST request."""
@@ -532,7 +794,7 @@ class TTYDProxyHandler(BaseHandler):
                 return
 
         # Create session token
-        session_token = build_ttyd_session(username, TTYD_TTYD_PORT)
+        session_token = build_ttyd_session(username, TTYD_BASE_PORT)
 
         # Set secure cookie flags - don't trust X-Forwarded-* headers for security
         # Use Lax by default for same-origin requests
@@ -597,36 +859,48 @@ class TTYDProxyHandler(BaseHandler):
             hapi_link = '<span class="menu-link disabled">HAPI Server (not available)</span>'
 
         html = html.replace('{{HAPI_LINK}}', hapi_link)
-        self.send_html(200, html)
 
-    def handle_ttyd(self):
-        """Return HTML page with login form or terminal iframe."""
+        # Set CSRF cookie for terminal create/delete API calls
+        csrf_token = build_csrf_token()
+        secure_flag = " Secure;" if SECURE_COOKIES else ""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "base-uri 'none'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none'; "
+            "object-src 'none'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'",
+        )
+        self.send_header(
+            "Set-Cookie",
+            f"csrf_token={csrf_token}; Path=/; SameSite=Lax;{secure_flag}",
+        )
+        self.end_headers()
+        self.wfile.write(html.encode("utf-8"))
+
+    def handle_ttyd(self, terminal_id):
+        """Return HTML page with terminal iframe for given terminal_id."""
         parsed = urlparse(self.path)
-        cookies = self.parse_cookie_header(self.headers.get("Cookie", ""))
-        token = cookies.get("ttyd_session")
-        username, port = parse_ttyd_session(token)
-
-        if not username or not port:
-            # Redirect to login page
-            self.send_response(302)
-            self.send_header("Location", "/login")
-            self.end_headers()
+        username = self._check_auth(redirect=True)
+        if not username:
             return
 
-        # Validate username from session token
-        if not is_valid_username(username):
-            self.send_json(403, {"error": "Invalid session"})
-            return
-
-        # Verify user still exists
-        try:
-            pwd.getpwnam(username)
-        except KeyError:
-            self.send_json(403, {"error": "Invalid session"})
+        # Verify terminal exists
+        terminal = ttyd_manager.get_terminal(terminal_id)
+        if not terminal:
+            self.send_json(404, {"error": f"Terminal ttyd{terminal_id} not found"})
             return
 
         # Return terminal iframe page with optional virtual keyboard
-        ttyd_url = "/ttyd/"
+        ttyd_url = f"/ttyd{terminal_id}/"
         vkbd_enabled = VIRTUAL_KEYBOARD
         query = parse_qs(parsed.query)
         if "vkbd" in query:
@@ -780,7 +1054,7 @@ class TTYDProxyHandler(BaseHandler):
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-  <title>Terminal - {username}</title>
+  <title>ttyd{terminal_id} - {html_module.escape(username)}</title>
   <style>
     * {{ box-sizing: border-box; }}
     body {{ margin: 0; padding: 0; height: 100vh; background: #0f131a; display: flex; flex-direction: column; }}
@@ -795,38 +1069,24 @@ class TTYDProxyHandler(BaseHandler):
 
         self.send_html(200, html)
 
-    def handle_ttyd_proxy(self):
+    def handle_ttyd_proxy(self, terminal_id):
         """Reverse proxy for TTYD (HTTP + WebSocket)."""
-        # Get session from cookie
-        cookies = self.parse_cookie_header(self.headers.get("Cookie", ""))
-        token = cookies.get("ttyd_session")
-        username, port = parse_ttyd_session(token)
-
-        if not username or not port:
-            self.send_json(403, {"error": "Authentication required"})
+        username = self._check_auth()
+        if not username:
             return
 
-        # Validate username from session token
-        if not is_valid_username(username):
-            self.send_json(403, {"error": "Invalid session"})
+        # Look up terminal port
+        terminal = ttyd_manager.get_terminal(terminal_id)
+        if not terminal:
+            self.send_json(404, {"error": f"Terminal ttyd{terminal_id} not found"})
             return
+        port = terminal["port"]
 
-        # Verify user exists
-        try:
-            pwd.getpwnam(username)
-        except KeyError:
-            self.send_json(403, {"error": "Invalid session"})
-            return
-
-        # Verify port matches expected TTYD port
-        if port != TTYD_TTYD_PORT:
-            self.send_json(403, {"error": "Session expired"})
-            return
-
-        # Build upstream path
+        # Build upstream path - strip /ttyd<N> prefix
         parsed = urlparse(self.path)
-        if parsed.path.startswith("/ttyd/"):
-            upstream_path = parsed.path[len("/ttyd"):] + ("?" + parsed.query if parsed.query else "")
+        prefix = f"/ttyd{terminal_id}"
+        if parsed.path.startswith(prefix + "/"):
+            upstream_path = parsed.path[len(prefix):] + ("?" + parsed.query if parsed.query else "")
         else:
             upstream_path = "/"
 
@@ -1040,6 +1300,13 @@ def main():
     server_address = ("0.0.0.0", PORT)
     print(f"Starting TTYD HTTP proxy on {server_address}...", flush=True)
 
+    # Create first terminal automatically
+    info = ttyd_manager.create_terminal(wait=True)
+    if info:
+        print(f"Auto-created terminal ttyd{info['id']} on port {info['port']}", flush=True)
+    else:
+        print("WARNING: Failed to auto-create first terminal", file=sys.stderr, flush=True)
+
     try:
         httpd = HTTPServer(server_address, TTYDProxyHandler)
     except OSError as e:
@@ -1049,6 +1316,11 @@ def main():
     # Setup signal handlers for graceful shutdown
     def signal_handler(signum, frame):
         print(f"Received signal {signum}, shutting down gracefully...", flush=True)
+        # Kill all terminal processes
+        with ttyd_manager.lock:
+            tids = list(ttyd_manager.terminals.keys())
+        for tid in tids:
+            ttyd_manager.delete_terminal(tid)
         httpd.shutdown()
         sys.exit(0)
 
@@ -1056,7 +1328,6 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     print(f"TTYD HTTP proxy listening on port {PORT}", flush=True)
-    print(f"Proxying to TTYD on 127.0.0.1:{TTYD_TTYD_PORT}", flush=True)
     try:
         httpd.serve_forever()
     except Exception as e:
