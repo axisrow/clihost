@@ -118,7 +118,9 @@
 
     function handleAuthError(r) {
       if (r.status === 419) {
-        window.location.reload();
+        var btn = document.getElementById('new-terminal-btn');
+        if (btn) btn.textContent = 'Session expired, reloading...';
+        setTimeout(function() { window.location.reload(); }, 500);
         return true;
       }
       if (r.status === 401 || r.status === 403) {
@@ -192,6 +194,9 @@
         })
         .finally(function() {
           btn.disabled = false;
+          if (btn.textContent === 'Creating...') {
+            btn.textContent = '+ New terminal';
+          }
         });
     }
 
