@@ -93,6 +93,7 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 - `SESSION_TIMEOUT` - session token lifetime in seconds (default: 604800 = 1 week)
 - `CSRF_TOKEN_TTL` - CSRF token time-to-live in seconds (default: 600 = 10 min)
 - `SECURE_COOKIES` - set Secure flag on cookies for HTTPS (default: false)
+- `MAX_TERMINALS` - maximum number of concurrent terminal instances (default: 100)
 
 **Hapi runner (optional):**
 - `HAPI_RUNNER_ENABLED` - enable hapi runner (default: false)

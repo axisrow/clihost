@@ -36,6 +36,7 @@ TTYD_USER = os.environ.get("TTYD_USER", "hapi")
 TTYD_PASSWORD = os.environ.get("TTYD_PASSWORD", "")
 PASSWORD_SECRET = os.environ.get("PASSWORD_SECRET", "default-secret-change-me")
 TTYD_BASE_PORT = 7681  # Starting port for TTYD instances
+MAX_TERMINALS = int(os.environ.get("MAX_TERMINALS", "100"))
 SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "604800"))  # 1 week (168 hours) default
 def env_bool(value, default=False):
     """Parse common boolean env var values."""
@@ -72,46 +73,53 @@ class TTYDManager:
         self.lock = threading.Lock()
 
     def _allocate_port(self):
-        """Find next available port, reusing freed ports."""
+        """Find next available port, reusing freed ports. Returns port or None."""
         used_ports = {t["port"] for t in self.terminals.values()}
+        max_port = TTYD_BASE_PORT + MAX_TERMINALS
         port = TTYD_BASE_PORT
         while port in used_ports:
             port += 1
+            if port >= max_port:
+                return None
         return port
 
-    def create_terminal(self):
-        """Spawn a new TTYD process. Returns terminal info dict or None on failure."""
+    def create_terminal(self, wait=False):
+        """Spawn a new TTYD process. Returns terminal info dict, "limit", or None."""
         with self.lock:
+            if len(self.terminals) >= MAX_TERMINALS:
+                return "limit"
             terminal_id = self.next_id
             port = self._allocate_port()
+            if port is None:
+                return "limit"
 
-        tmux_session = f"ttyd-{terminal_id}"
-        try:
-            process = subprocess.Popen(
-                [
-                    "runuser", "-u", TTYD_USER, "--",
-                    "/usr/local/bin/ttyd",
-                    "-p", str(port),
-                    "-i", "127.0.0.1",
-                    "-W",
-                    "/bin/tmux-wrapper.sh", tmux_session,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError as e:
-            print(f"Failed to start TTYD on port {port}: {e}", file=sys.stderr, flush=True)
-            return None
+            tmux_session = f"ttyd-{terminal_id}"
+            try:
+                process = subprocess.Popen(
+                    [
+                        "runuser", "-u", TTYD_USER, "--",
+                        "/usr/local/bin/ttyd",
+                        "-p", str(port),
+                        "-i", "127.0.0.1",
+                        "-W",
+                        "/bin/tmux-wrapper.sh", tmux_session,
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError as e:
+                print(f"Failed to start TTYD on port {port}: {e}", file=sys.stderr, flush=True)
+                return None
 
-        # Wait for TTYD to be ready
-        if not self._wait_for_ready(port):
-            process.kill()
-            return None
-
-        info = {"id": terminal_id, "port": port, "pid": process.pid, "process": process}
-        with self.lock:
+            # Register immediately to prevent race conditions on ID/port
+            info = {"id": terminal_id, "port": port, "pid": process.pid, "process": process}
             self.terminals[terminal_id] = info
             self.next_id += 1
+
+        if wait:
+            if not self._wait_for_ready(port):
+                self.delete_terminal(terminal_id)
+                return None
 
         print(f"Started terminal ttyd{terminal_id} on port {port} (PID {process.pid})", flush=True)
         return {"id": terminal_id, "port": port}
@@ -148,18 +156,35 @@ class TTYDManager:
         print(f"Deleted terminal ttyd{terminal_id}", flush=True)
         return True
 
+    def _cleanup_dead(self, terminal_id, info):
+        """Clean up a dead terminal: reap zombie, kill tmux session."""
+        process = info.get("process")
+        if process:
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        tmux_session = f"ttyd-{terminal_id}"
+        try:
+            subprocess.run(
+                ["runuser", "-u", TTYD_USER, "--", "tmux", "kill-session", "-t", tmux_session],
+                capture_output=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        print(f"Terminal ttyd{terminal_id} died, cleaned up", flush=True)
+
     def list_terminals(self):
         """Return list of active terminals sorted by id."""
         with self.lock:
-            # Check if processes are still alive
             dead = []
             for tid, info in self.terminals.items():
                 process = info.get("process")
                 if process and process.poll() is not None:
-                    dead.append(tid)
-            for tid in dead:
+                    dead.append((tid, info))
+            for tid, info in dead:
                 del self.terminals[tid]
-                print(f"Terminal ttyd{tid} died, removed from list", flush=True)
+                self._cleanup_dead(tid, info)
 
             return sorted(
                 [{"id": t["id"], "port": t["port"]} for t in self.terminals.values()],
@@ -171,10 +196,10 @@ class TTYDManager:
         with self.lock:
             info = self.terminals.get(terminal_id)
             if info:
-                # Check process is alive
                 process = info.get("process")
                 if process and process.poll() is not None:
                     del self.terminals[terminal_id]
+                    self._cleanup_dead(terminal_id, info)
                     return None
                 return {"id": info["id"], "port": info["port"]}
             return None
@@ -639,11 +664,14 @@ class TTYDProxyHandler(BaseHandler):
             return
         if not self._check_csrf():
             return
-        info = ttyd_manager.create_terminal()
-        if not info:
+        result = ttyd_manager.create_terminal()
+        if result == "limit":
+            self.send_json(429, {"error": f"Terminal limit reached (max {MAX_TERMINALS})"})
+            return
+        if not result:
             self.send_json(500, {"error": "Failed to create terminal"})
             return
-        self.send_json(201, info)
+        self.send_json(201, result)
 
     def handle_terminals_delete(self, terminal_id):
         """DELETE /terminals/<id> - delete a terminal."""
@@ -824,6 +852,19 @@ class TTYDProxyHandler(BaseHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "base-uri 'none'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none'; "
+            "object-src 'none'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'",
+        )
         self.send_header(
             "Set-Cookie",
             f"csrf_token={csrf_token}; Path=/; SameSite=Lax;{secure_flag}",
@@ -1246,7 +1287,7 @@ def main():
     print(f"Starting TTYD HTTP proxy on {server_address}...", flush=True)
 
     # Create first terminal automatically
-    info = ttyd_manager.create_terminal()
+    info = ttyd_manager.create_terminal(wait=True)
     if info:
         print(f"Auto-created terminal ttyd{info['id']} on port {info['port']}", flush=True)
     else:
