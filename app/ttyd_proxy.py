@@ -137,11 +137,14 @@ class TTYDManager:
             try:
                 process.terminate()
                 process.wait(timeout=5)
-            except (subprocess.TimeoutExpired, OSError):
+            except subprocess.TimeoutExpired:
                 try:
                     process.kill()
-                except OSError:
+                    process.wait(timeout=3)
+                except (subprocess.TimeoutExpired, OSError):
                     pass
+            except OSError:
+                pass
 
         # Kill tmux session
         tmux_session = f"ttyd-{terminal_id}"
@@ -176,33 +179,44 @@ class TTYDManager:
 
     def list_terminals(self):
         """Return list of active terminals sorted by id."""
+        dead = []
         with self.lock:
-            dead = []
             for tid, info in self.terminals.items():
                 process = info.get("process")
                 if process and process.poll() is not None:
                     dead.append((tid, info))
-            for tid, info in dead:
+            for tid, _info in dead:
                 del self.terminals[tid]
-                self._cleanup_dead(tid, info)
 
-            return sorted(
+            result = sorted(
                 [{"id": t["id"], "port": t["port"]} for t in self.terminals.values()],
                 key=lambda x: x["id"],
             )
 
+        # Clean up dead terminals outside the lock
+        for tid, info in dead:
+            self._cleanup_dead(tid, info)
+
+        return result
+
     def get_terminal(self, terminal_id):
         """Get terminal info by id, or None."""
+        dead_info = None
         with self.lock:
             info = self.terminals.get(terminal_id)
             if info:
                 process = info.get("process")
                 if process and process.poll() is not None:
-                    del self.terminals[terminal_id]
-                    self._cleanup_dead(terminal_id, info)
-                    return None
-                return {"id": info["id"], "port": info["port"]}
-            return None
+                    dead_info = self.terminals.pop(terminal_id)
+                    info = None
+                else:
+                    return {"id": info["id"], "port": info["port"]}
+
+        # Clean up dead terminal outside the lock
+        if dead_info:
+            self._cleanup_dead(terminal_id, dead_info)
+
+        return None
 
     def _wait_for_ready(self, port, timeout=15):
         """Wait until TTYD is responding on the given port."""
