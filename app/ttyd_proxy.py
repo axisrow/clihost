@@ -678,7 +678,7 @@ class TTYDProxyHandler(BaseHandler):
             return
         if not self._check_csrf():
             return
-        result = ttyd_manager.create_terminal()
+        result = ttyd_manager.create_terminal(wait=True)
         if result == "limit":
             self.send_json(429, {"error": f"Terminal limit reached (max {MAX_TERMINALS})"})
             return
