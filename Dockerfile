@@ -12,7 +12,7 @@ RUN NODE_VERSION="22.14.0" && \
       exit 1; \
     fi && \
     apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates curl gh git openssh-server python3-pip python3-venv tmux util-linux vim nano xz-utils && \
+    apt-get install -y --no-install-recommends ca-certificates curl gh git openssh-server python3-pip python3-venv tmux util-linux xz-utils && \
     curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" && \
     tar -xJf "node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -C /usr/local --strip-components=1 --no-same-owner && \
     rm "node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" && \
@@ -49,20 +49,18 @@ RUN TTYD_VERSION="1.7.7" && \
 # Invalidate cache when npm package versions change
 ARG NPM_VERSIONS_HASH=default
 
-# Install Claude Code via npm with retry
-RUN for i in 1 2 3 4 5; do npm install -g @anthropic-ai/claude-code@latest && break || sleep 10; done
-
-# Install OpenAI Codex CLI (global via npm) with retry
-RUN for i in 1 2 3 4 5; do npm install -g @openai/codex@latest && break || sleep 10; done
-
-# Install Google Gemini CLI (global via npm) with retry
-RUN for i in 1 2 3 4 5; do npm install -g @google/gemini-cli@latest && break || sleep 10; done
-
-# Install GitHub Copilot CLI (global via npm) with retry
-RUN for i in 1 2 3 4 5; do npm install -g @github/copilot@latest && break || sleep 10; done
-
-# Install OpenCode AI (global via npm) with retry
-RUN for i in 1 2 3 4 5; do npm install -g opencode-ai@latest && break || sleep 10; done
+# Install all AI CLI tools in one layer with retry, then clean up
+RUN for i in 1 2 3 4 5; do \
+      npm install -g \
+        @anthropic-ai/claude-code@latest \
+        @openai/codex@latest \
+        @google/gemini-cli@latest \
+        @github/copilot@latest \
+        opencode-ai@latest \
+      && break || sleep 10; \
+    done && \
+    npm cache clean --force && \
+    rm -rf /tmp/*
 
 # Create user and group for running hapi
 RUN groupadd -r hapi && useradd -r -g hapi -s /bin/bash hapi && mkdir -p /home/hapi && chown -R hapi:hapi /home/hapi
@@ -71,7 +69,10 @@ RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
     echo 'export LC_ALL=en_US.UTF-8' >> /home/hapi/.bashrc
 
 # Install hapi CLI (global via npm) https://github.com/tiann/hapi
-RUN npm install -g @twsxtd/hapi@latest && chown -R hapi:hapi /usr/local/lib/node_modules
+RUN npm install -g @twsxtd/hapi@latest && \
+    npm cache clean --force && \
+    rm -rf /tmp/* && \
+    chown -R hapi:hapi /usr/local/lib/node_modules
 
 # Create app directory for TTYD proxy
 RUN mkdir -p /app /bin
