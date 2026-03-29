@@ -1325,6 +1325,7 @@ def main():
 
     try:
         httpd = ThreadingHTTPServer(server_address, TTYDProxyHandler)
+        httpd.daemon_threads = True  # don't block shutdown on open WebSocket threads
     except OSError as e:
         print(f"ERROR: Cannot bind to port {PORT}: {e}", file=sys.stderr, flush=True)
         sys.exit(1)

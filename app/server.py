@@ -60,6 +60,7 @@ class BaseJSONServer:
         """Start the HTTP server."""
         server_address = ("0.0.0.0", self.port)
         self.httpd = ThreadingHTTPServer(server_address, self.handler_class)
+        self.httpd.daemon_threads = True  # don't block shutdown on open connections
         print(f"HTTP server listening on port {self.port}")
         self.httpd.serve_forever()
 
