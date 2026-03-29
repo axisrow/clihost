@@ -1,6 +1,6 @@
 # clihost
 
-Docker container with web terminal (TTYD) and AI CLI tools (Claude Code, Codex, Gemini CLI).
+Docker container with web terminal (TTYD) and AI CLI tools (Claude Code, Codex, Gemini CLI). The web terminal proxy uses a multithreaded HTTP server — concurrent connections do not block each other.
 
 ## Quick Start
 
@@ -13,6 +13,30 @@ docker run -p 22:22 -p 8080:8080 clihost
 ```
 
 Open http://localhost:8080 for web terminal access.
+
+## Архитектура
+
+```
+Browser → HTTP/WebSocket → ttyd_proxy.py (8080) → TTYD (127.0.0.1:768x) → tmux → Shell
+SSH Client                → sshd (22)            → Shell
+hapi Client               → hapi runner (80)     → CLI tools
+```
+
+**Процессы внутри контейнера:**
+
+| Процесс | Порт | Описание |
+|---------|------|----------|
+| `sshd` | 22 | SSH-доступ, main-процесс контейнера |
+| `ttyd_proxy.py` | 8080 | Multithreaded HTTP/WS прокси с аутентификацией |
+| `ttyd` | 127.0.0.1:768x | Web-терминал (по одному на сессию, только localhost) |
+| `hapi runner` | `HAPI_PORT` (default 80) | Запуск CLI-инструментов по API (опционально) |
+| `hapi server --relay` | — | Туннель для внешнего доступа |
+
+> **Railway:** платформа проксирует внешний трафик (порт 80/443) на внутренний порт **8080** контейнера. `ttyd_proxy.py` остаётся на 8080, hapi runner — на 80. Конфликта нет: Railway форвардит только на 8080, а hapi runner доступен снаружи исключительно через relay-туннель.
+
+**Поток аутентификации:** `POST /login` → HMAC-подписанная cookie `ttyd_session` → редирект на `/`.
+
+**Мультитерминальность:** каждый терминал — отдельный процесс `ttyd` на своём порту (7681, 7682, …). Управление через `GET/POST/DELETE /terminals`.
 
 ## Ports
 

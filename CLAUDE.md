@@ -65,7 +65,7 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 
 **app/server.py** - Base HTTP server with common utilities (JSON/HTML responses, silent logging, security headers)
 
-**app/ttyd_proxy.py** - TTYD reverse proxy with:
+**app/ttyd_proxy.py** - TTYD reverse proxy (`ThreadingHTTPServer`) with:
 - Cookie-based HMAC-signed session authentication
 - PAM/shadow password verification (or global password via TTYD_PASSWORD)
 - WebSocket tunneling to TTYD process
@@ -76,6 +76,12 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 - Routes: `/` (dashboard/menu), `/login` (login form), `/health` (health check), `/ttyd` (terminal), `/ttyd/*` (WebSocket proxy)
 
 **app/index.html, app/login.html** - HTML templates with variable substitution (`{{USERNAME}}`, `{{CSRF_TOKEN}}`, `{{HAPI_LINK}}`). Values are escaped via `html.escape()` to prevent XSS.
+
+**Dashboard UI (app/index.html)** - Terminal list and controls are built dynamically in JavaScript (not static HTML), so searching for button text in HTML will not find them. Key UI elements:
+- **Terminal row** (`terminal-row` class): each active ttyd instance gets a row with an open link + close button
+- **Close terminal button** (`delete-btn` class, red ×): closes a terminal session — calls `deleteTerminal(id)` → `DELETE /terminals/{id}`. This is what users refer to as "кнопка закрытия сессии" (session close button). It is **not** a logout button.
+- **New terminal button** (`new-terminal` class): calls `createTerminal()` → `POST /terminals`
+- **No logout button exists** — there is no route or UI element to invalidate the login session cookie
 
 **bin/tmux-wrapper.sh** - tmux session persistence wrapper (auto-attach or create new session)
 
@@ -91,7 +97,7 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 - `ROOT_PASSWORD` - optional root SSH password
 - `VIRTUAL_KEYBOARD` - enable virtual keyboard for mobile devices (default: true)
 - `SESSION_TIMEOUT` - session token lifetime in seconds (default: 604800 = 1 week)
-- `CSRF_TOKEN_TTL` - CSRF token time-to-live in seconds (default: 600 = 10 min)
+- `CSRF_TOKEN_TTL` - CSRF token time-to-live in seconds (default: 604800 = 7 days)
 - `SECURE_COOKIES` - set Secure flag on cookies for HTTPS (default: false)
 - `MAX_TERMINALS` - maximum number of concurrent terminal instances (default: 100)
 
@@ -109,6 +115,7 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 - Environment variables are UPPERCASE with defaults via `${VAR:=default}`
 - Dockerfile changes grouped by purpose (base OS, tools, user setup)
 - Python uses standard library only (http.server, hmac, crypt, etc.)
+- HTTP server uses `ThreadingHTTPServer` (not `HTTPServer`) — один поток на запрос, чтобы медленные/долгие соединения не блокировали остальных
 - Commits: short imperative subjects (e.g., "Add feature", "Fix bug")
 - Retry logic for network operations: use `for i in 1 2 3 4 5; do ... && break || sleep 10; done` pattern
 
@@ -148,7 +155,8 @@ python -m pytest tests/unit/test_env_bool.py
 Note: `conftest.py` adds `app/` to `sys.path` for imports.
 
 **Test structure:**
-- `tests/unit/` - Pure function tests (`env_bool`, virtual keyboard HTML generation). Run without Linux-specific dependencies.
+- `tests/unit/` - Pure function tests (`env_bool`, virtual keyboard HTML generation, threading). Run without Linux-specific dependencies.
+  - `test_threading.py` — проверяет, что `ThreadingHTTPServer` обрабатывает конкурентные запросы параллельно (3 запроса по 0.3s должны завершиться за ~0.3s, не за 0.9s)
 - `tests/integration/` - TTYD handler tests. Simulate handler behavior without importing full ttyd_proxy.py (avoids Linux-only deps like `crypt`, PAM).
 
 **Manual smoke test:** build image, run container, verify logs show "Hapi runner startup complete" (or fallback message) and sshd stays running.
