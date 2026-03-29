@@ -16,7 +16,7 @@ Open http://localhost:8080 for web terminal access.
 
 ## Deploy on Railway
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https://github.com/axisrow/clihost)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/qpCUGO)
 
 ### Environment Variables for Railway
 
