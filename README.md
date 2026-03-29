@@ -14,6 +14,28 @@ docker run -p 22:22 -p 8080:8080 clihost
 
 Open http://localhost:8080 for web terminal access.
 
+## Deploy on Railway
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https://github.com/axisrow/clihost)
+
+### Environment Variables for Railway
+
+| Variable | Required | Notes |
+|----------|----------|-------|
+| `TTYD_PASSWORD` | **Required** | Password for web terminal access |
+| `PASSWORD_SECRET` | Recommended | Session persistence across restarts |
+| `SECURE_COOKIES` | Set to `true` | Railway serves HTTPS automatically |
+| `PORT` | Auto | Injected by Railway, do not set manually |
+
+### Volume
+
+Add persistent volume at `/home/hapi` via Railway dashboard → Service → Volumes.
+
+### Notes
+
+- SSH (port 22) is not accessible externally on Railway — web terminal only
+- `PORT` is injected automatically by Railway, `ttyd_proxy.py` reads it via `os.environ`
+
 ## Архитектура
 
 ```
