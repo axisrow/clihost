@@ -5,7 +5,7 @@ Provides common HTTP server functionality
 """
 import os
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 
 class BaseHTTPHandler(BaseHTTPRequestHandler):
@@ -59,7 +59,8 @@ class BaseJSONServer:
     def start(self):
         """Start the HTTP server."""
         server_address = ("0.0.0.0", self.port)
-        self.httpd = HTTPServer(server_address, self.handler_class)
+        self.httpd = ThreadingHTTPServer(server_address, self.handler_class)
+        self.httpd.daemon_threads = True  # don't block shutdown on open connections
         print(f"HTTP server listening on port {self.port}")
         self.httpd.serve_forever()
 

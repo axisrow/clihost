@@ -14,7 +14,7 @@ import http.client
 import time
 import signal
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from urllib.parse import parse_qs as parse_form_qs
 from collections import defaultdict
@@ -50,7 +50,7 @@ def env_bool(value, default=False):
     return default
 
 VIRTUAL_KEYBOARD = env_bool(os.environ.get("VIRTUAL_KEYBOARD"), default=True)
-CSRF_TOKEN_TTL = int(os.environ.get("CSRF_TOKEN_TTL", "600"))  # 10 minutes default
+CSRF_TOKEN_TTL = int(os.environ.get("CSRF_TOKEN_TTL", "604800"))  # 7 days default
 SECURE_COOKIES = env_bool(os.environ.get("SECURE_COOKIES"), default=False)
 
 # Load templates
@@ -1324,7 +1324,8 @@ def main():
         print("WARNING: Failed to auto-create first terminal", file=sys.stderr, flush=True)
 
     try:
-        httpd = HTTPServer(server_address, TTYDProxyHandler)
+        httpd = ThreadingHTTPServer(server_address, TTYDProxyHandler)
+        httpd.daemon_threads = True  # don't block shutdown on open WebSocket threads
     except OSError as e:
         print(f"ERROR: Cannot bind to port {PORT}: {e}", file=sys.stderr, flush=True)
         sys.exit(1)
