@@ -49,7 +49,13 @@ RUN TTYD_VERSION="1.7.7" && \
 # Invalidate cache when npm package versions change
 ARG NPM_VERSIONS_HASH=default
 
-# Install all AI CLI tools in one layer with retry, then clean up
+# Create user and group for running hapi
+RUN groupadd -r hapi && useradd -r -g hapi -s /bin/bash hapi && mkdir -p /home/hapi && chown -R hapi:hapi /home/hapi
+RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
+    echo 'export LANG=en_US.UTF-8' >> /home/hapi/.bashrc && \
+    echo 'export LC_ALL=en_US.UTF-8' >> /home/hapi/.bashrc
+
+# Install all CLI tools in one layer, then fix permissions and clean up
 RUN for i in 1 2 3 4 5; do \
       npm install -g \
         @anthropic-ai/claude-code@latest \
@@ -57,22 +63,12 @@ RUN for i in 1 2 3 4 5; do \
         @google/gemini-cli@latest \
         @github/copilot@latest \
         opencode-ai@latest \
+        @twsxtd/hapi@latest \
       && break || sleep 10; \
     done && \
+    chown -R hapi:hapi /usr/local/lib/node_modules && \
     npm cache clean --force && \
     rm -rf /tmp/*
-
-# Create user and group for running hapi
-RUN groupadd -r hapi && useradd -r -g hapi -s /bin/bash hapi && mkdir -p /home/hapi && chown -R hapi:hapi /home/hapi
-RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
-    echo 'export LANG=en_US.UTF-8' >> /home/hapi/.bashrc && \
-    echo 'export LC_ALL=en_US.UTF-8' >> /home/hapi/.bashrc
-
-# Install hapi CLI (global via npm) https://github.com/tiann/hapi
-RUN npm install -g @twsxtd/hapi@latest && \
-    npm cache clean --force && \
-    rm -rf /tmp/* && \
-    chown -R hapi:hapi /usr/local/lib/node_modules
 
 # Create app directory for TTYD proxy
 RUN mkdir -p /app /bin
