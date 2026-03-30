@@ -804,7 +804,7 @@ class TTYDProxyHandler(BaseHandler):
         secure_flag = " Secure;" if SECURE_COOKIES else ""
         self.send_header(
             "Set-Cookie",
-            f"ttyd_session={session_token}; Path=/; HttpOnly; SameSite=Lax;{secure_flag}",
+            f"ttyd_session={session_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TIMEOUT};{secure_flag}",
         )
         self.end_headers()
 
