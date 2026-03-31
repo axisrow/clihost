@@ -533,6 +533,8 @@ TAB_FIX_SCRIPT = b'''
       var lines;
       if (e.deltaMode === 1) {
         lines = e.deltaY; // DOM_DELTA_LINE: already in lines
+      } else if (e.deltaMode === 2) {
+        lines = e.deltaY > 0 ? term.rows : -term.rows; // DOM_DELTA_PAGE: scroll one viewport
       } else {
         lines = Math.round(e.deltaY / 40); // DOM_DELTA_PIXEL: ~40px per line
       }
@@ -670,7 +672,7 @@ class TTYDProxyHandler(BaseHandler):
         terminals = ttyd_manager.list_terminals()
         uptime = int(time.time() - _SERVER_START_TIME)
         terminal_list = [
-            {"id": t["id"], "port": t["port"], "pid": t["pid"], "alive": True}
+            {"id": t["id"], "alive": True}
             for t in terminals
         ]
         response = {
