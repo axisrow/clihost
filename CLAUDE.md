@@ -24,7 +24,7 @@ docker run -p 22:22 -p 8080:8080 \
 
 # Health check
 curl http://localhost:8080/health
-# Expected: {"status": "ok", "ttyd": "running"}
+# Expected: {"status": "ok", "uptime": N, "ttyd": "running", "terminal_count": N, "terminals": [...], "memory_mb": N}
 ```
 
 ## Architecture
@@ -115,7 +115,7 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 - Environment variables are UPPERCASE with defaults via `${VAR:=default}`
 - Dockerfile changes grouped by purpose (base OS, tools, user setup)
 - Python uses standard library only (http.server, hmac, crypt, etc.)
-- HTTP server uses `ThreadingHTTPServer` (not `HTTPServer`) — один поток на запрос, чтобы медленные/долгие соединения не блокировали остальных
+- HTTP server uses `ThreadingHTTPServer` (not `HTTPServer`) — one thread per request so slow/long-lived connections don't block others
 - Commits: short imperative subjects (e.g., "Add feature", "Fix bug")
 - Retry logic for network operations: use `for i in 1 2 3 4 5; do ... && break || sleep 10; done` pattern
 
@@ -137,7 +137,15 @@ The proxy injects a JavaScript fix into TTYD HTML to enable Tab key for shell co
 - **Tab sending**: Uses TTYD protocol prefix `'0'` (INPUT command) + tab character (`\t`) via WebSocket.
 - **Shell requirement**: Tab completion only works in shells that support it (bash). Default `/bin/sh` (dash) does not have completion.
 
-Reference: `TTYD_MODULE.md` in repository root (in Russian) for comprehensive documentation.
+### Mouse Wheel Scroll Fix
+
+The same injected script also fixes mouse wheel scroll (added alongside the Tab fix in `TAB_FIX_SCRIPT`):
+
+- **Normal screen** (bash/zsh): intercepts `wheel` events with `capture: true, passive: false`, calls `term.scrollLines(n)` and prevents xterm.js default (which sends ArrowUp/ArrowDown).
+- **Alternate screen** (vim/less/htop): detected via `term.buffer.active.type === 'alternate'`; event passes through untouched.
+- **deltaMode handling**: `1` = lines (use as-is), `2` = page (use `term.rows`), `0` = pixels (divide by 40).
+
+Reference: `TTYD_MODULE.md` in repository root for comprehensive documentation.
 
 ## Testing
 
@@ -150,13 +158,16 @@ python -m pytest tests/unit/
 
 # Run a single test file
 python -m pytest tests/unit/test_env_bool.py
+
+# Run a single test by name
+python -m pytest tests/ -k "test_truthy_1"
 ```
 
 Note: `conftest.py` adds `app/` to `sys.path` for imports.
 
 **Test structure:**
 - `tests/unit/` - Pure function tests (`env_bool`, virtual keyboard HTML generation, threading). Run without Linux-specific dependencies.
-  - `test_threading.py` — проверяет, что `ThreadingHTTPServer` обрабатывает конкурентные запросы параллельно (3 запроса по 0.3s должны завершиться за ~0.3s, не за 0.9s)
+  - `test_threading.py` — verifies `ThreadingHTTPServer` handles concurrent requests in parallel (3 × 0.3s requests must finish in ~0.3s total, not 0.9s)
 - `tests/integration/` - TTYD handler tests. Simulate handler behavior without importing full ttyd_proxy.py (avoids Linux-only deps like `crypt`, PAM).
 
 **Manual smoke test:** build image, run container, verify logs show "Hapi runner startup complete" (or fallback message) and sshd stays running.
