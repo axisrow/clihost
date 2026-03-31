@@ -76,7 +76,10 @@ RUN mkdir -p /app /bin
 COPY app/ /app/
 COPY bin/tmux-wrapper.sh /bin/tmux-wrapper.sh
 COPY bin/glm /bin/glm
-RUN chmod +x /bin/tmux-wrapper.sh /bin/glm
+COPY config/.tmux.conf /home/hapi/.tmux.conf
+COPY config/.tmux.conf /etc/skel/.tmux.conf
+RUN chmod +x /bin/tmux-wrapper.sh /bin/glm && \
+    chown hapi:hapi /home/hapi/.tmux.conf
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

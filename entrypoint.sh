@@ -33,6 +33,13 @@ chown -R "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}/.config"
 mkdir -p "${HAPI_USER_HOME}/.claude"
 chown -R "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}/.claude"
 
+# Ensure tmux config exists (volume mount may overwrite it)
+if [ ! -f "${HAPI_USER_HOME}/.tmux.conf" ]; then
+  cp /etc/skel/.tmux.conf "${HAPI_USER_HOME}/.tmux.conf" 2>/dev/null || \
+    echo "set -g mouse on" > "${HAPI_USER_HOME}/.tmux.conf"
+  chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}/.tmux.conf"
+fi
+
 # Setup sshd (started as main process via CMD in Dockerfile)
 mkdir -p /var/run/sshd
 ssh-keygen -A >/dev/null 2>&1 || true
