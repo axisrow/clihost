@@ -65,9 +65,11 @@ hapi Client               → hapi runner (80)     → CLI tools
 После рефакторинга точка входа `app/ttyd_proxy.py` остаётся совместимой оболочкой, а основная логика разложена по модульному пакету `app/ttydproxy/`:
 
 - `config.py` — env-конфигурация и route-константы
+- `assets.py` — загрузка статических terminal HTML/JS/CSS-ассетов
 - `security.py` — cookies, signed tokens, CSRF, username validation
 - `manager.py` — lifecycle ttyd/tmux процессов
 - `proxy.py` — HTTP/WebSocket proxy и HTML injection
+- `ratelimit.py` — in-memory rate limiting helpers
 - `views.py` — рендер login/menu/terminal страниц
 - `app.py` — wiring handler'а и запуск сервера
 
