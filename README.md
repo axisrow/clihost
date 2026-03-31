@@ -60,6 +60,21 @@ hapi Client               → hapi runner (80)     → CLI tools
 
 **Мультитерминальность:** каждый терминал — отдельный процесс `ttyd` на своём порту (7681, 7682, …). Управление через `GET/POST/DELETE /terminals`.
 
+### Внутренняя структура ttyd proxy
+
+После рефакторинга точка входа `app/ttyd_proxy.py` остаётся совместимой оболочкой, а основная логика разложена по модульному пакету `app/ttydproxy/`:
+
+- `config.py` — env-конфигурация и route-константы
+- `assets.py` — загрузка статических terminal HTML/JS/CSS-ассетов
+- `security.py` — cookies, signed tokens, CSRF, username validation
+- `manager.py` — lifecycle ttyd/tmux процессов
+- `proxy.py` — HTTP/WebSocket proxy и HTML injection
+- `ratelimit.py` — in-memory rate limiting helpers
+- `views.py` — рендер login/menu/terminal страниц
+- `app.py` — wiring handler'а и запуск сервера
+
+Terminal iframe page и связанные JS/CSS-ассеты лежат в `app/terminal.html` и `app/assets/`.
+
 ## Ports
 
 - **22** - SSH access
