@@ -1,0 +1,91 @@
+<div class="vkbd" id="vkbd">
+  <button data-key="esc">ESC</button>
+  <button data-key="tab">Tab</button>
+  <button data-key="shift-tab">Shift+Tab</button>
+  <button data-key="ctrl-c">Ctrl+C</button>
+  <button data-key="ctrl-b">Ctrl+B</button>
+  <button data-key="up">&#8593;</button>
+  <button data-key="left">&#8592;</button>
+  <button data-key="down">&#8595;</button>
+  <button data-key="right">&#8594;</button>
+  <button data-key="ctrl-v">Ctrl+V</button>
+</div>
+<script>
+  (function() {
+    var iframe = document.getElementById('terminal');
+
+    function focusTerminal() {
+      try {
+        if (iframe.contentWindow) iframe.contentWindow.focus();
+        var doc = iframe.contentWindow && iframe.contentWindow.document;
+        if (doc) {
+          var textarea = doc.querySelector('.xterm-helper-textarea');
+          if (textarea) textarea.focus();
+        }
+      } catch (e) {}
+    }
+
+    function sendKey(key) {
+      focusTerminal();
+
+      if (key === 'tab' || key === 'shift-tab') {
+        try {
+          var win = iframe.contentWindow;
+          if (win && win.sendTabKey) {
+            win.sendTabKey(key === 'shift-tab');
+            return;
+          }
+        } catch (e) {}
+      }
+
+      if (key === 'ctrl-v') {
+        navigator.clipboard.readText().then(function(text) {
+          if (text) {
+            try {
+              var win = iframe.contentWindow;
+              var socket = win && (win._ttydSocket || win.socket || win.ws);
+              if (socket && socket.readyState === 1) {
+                socket.send('0' + text);
+              }
+            } catch (e) {}
+          }
+        }).catch(function(err) {
+          console.log('Clipboard read failed:', err);
+        });
+        return;
+      }
+
+      try {
+        var win = iframe.contentWindow;
+        var socket = win && (win._ttydSocket || win.socket || win.ws);
+        if (socket && socket.readyState === 1) {
+          var data = null;
+          var ESC = String.fromCharCode(27);
+          switch (key) {
+            case 'esc': data = ESC; break;
+            case 'ctrl-c': data = String.fromCharCode(3); break;
+            case 'ctrl-b': data = String.fromCharCode(2); break;
+            case 'up': data = ESC + '[A'; break;
+            case 'down': data = ESC + '[B'; break;
+            case 'right': data = ESC + '[C'; break;
+            case 'left': data = ESC + '[D'; break;
+          }
+          if (data) {
+            socket.send('0' + data);
+            return;
+          }
+        }
+      } catch (e) {}
+    }
+
+    document.getElementById('vkbd').addEventListener('click', function(e) {
+      if (e.target.tagName === 'BUTTON') {
+        sendKey(e.target.dataset.key);
+      }
+    });
+    iframe.addEventListener('load', function() {
+      focusTerminal();
+    });
+  })();
+</script>
+

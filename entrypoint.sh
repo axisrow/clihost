@@ -22,16 +22,38 @@ fi
 HAPI_USER="${HAPI_USER:-hapi}"
 HAPI_USER_HOME="/home/${HAPI_USER}"
 : "${HAPI_HOME:=${HAPI_USER_HOME}/.hapi}"
+HAPI_RUN_PATH="/usr/local/bin:/usr/bin:/bin"
 
 echo "Starting clihost container..."
 
-# Ensure gh CLI config directory exists for persistence on volume
-mkdir -p "${HAPI_USER_HOME}/.config/gh"
-chown -R "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}/.config"
+ensure_dir_owned() {
+  local path="$1"
+  mkdir -p "${path}"
+  chown -R "${HAPI_USER}:${HAPI_USER}" "${path}"
+}
 
-# Ensure Claude CLI config directory exists for persistence on volume
-mkdir -p "${HAPI_USER_HOME}/.claude"
-chown -R "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}/.claude"
+run_as_hapi() {
+  local command="$1"
+  runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"${HAPI_RUN_PATH}\" HAPI_HOME=\"${HAPI_HOME}\" ${command}"
+}
+
+cleanup_runner_state() {
+  local paths=(
+    "${HAPI_USER_HOME}/.hapi/runner.state.json"
+    "${HAPI_USER_HOME}/runner.state.json"
+    "${HAPI_USER_HOME}/.hapi/runner.state.json.lock"
+    "${HAPI_USER_HOME}/runner.state.json.lock"
+    "${HAPI_USER_HOME}/.hapi/settings.json"
+    "${HAPI_USER_HOME}/settings.json"
+  )
+  local path
+  for path in "${paths[@]}"; do
+    rm -f "${path}" 2>/dev/null || true
+  done
+}
+
+ensure_dir_owned "${HAPI_USER_HOME}/.config/gh"
+ensure_dir_owned "${HAPI_USER_HOME}/.claude"
 
 # Ensure tmux config exists (volume mount may overwrite it)
 if [ ! -f "${HAPI_USER_HOME}/.tmux.conf" ]; then
@@ -52,15 +74,7 @@ if [ -n "${ROOT_PASSWORD}" ]; then
   echo "Root SSH access enabled"
 fi
 
-# Clean old runner state before starting (force re-registration on each deploy)
-rm -f "${HAPI_USER_HOME}/.hapi/runner.state.json" 2>/dev/null || true
-rm -f "${HAPI_USER_HOME}/runner.state.json" 2>/dev/null || true
-# Clean stale lock files (prevents "another runner is running" error after container restart)
-rm -f "${HAPI_USER_HOME}/.hapi/runner.state.json.lock" 2>/dev/null || true
-rm -f "${HAPI_USER_HOME}/runner.state.json.lock" 2>/dev/null || true
-# Clean machineId settings to force re-registration on each deploy
-rm -f "${HAPI_USER_HOME}/.hapi/settings.json" 2>/dev/null || true
-rm -f "${HAPI_USER_HOME}/settings.json" 2>/dev/null || true
+cleanup_runner_state
 
 # Start TTYD HTTP proxy (manages TTYD processes dynamically)
 echo "Starting TTYD HTTP proxy on port ${PORT}"
@@ -72,10 +86,9 @@ python3 /app/ttyd_proxy.py &
 
 # Start hapi server with relay in background (logs to file, force TCP relay)
 HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
-mkdir -p "${HAPI_HOME}"
-chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_HOME}"
+ensure_dir_owned "${HAPI_HOME}"
 echo "Starting hapi server --relay in background (logs: ${HAPI_SERVER_LOG})..."
-runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay 2>&1 | tee \"${HAPI_SERVER_LOG}\"" &
+run_as_hapi "HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay 2>&1 | tee \"${HAPI_SERVER_LOG}\"" &
 HAPI_SERVER_PID=$!
 echo "Hapi server started with PID: ${HAPI_SERVER_PID}"
 
@@ -107,16 +120,16 @@ HAPI_SETTINGS_FILE="${HAPI_HOME}/settings.json"
 # Start hapi runner if enabled (reads config from volume)
 if [ "${HAPI_RUNNER_ENABLED}" = "true" ]; then
   echo "Starting hapi runner..."
-  if ! runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" hapi runner start 2>&1"; then
+  if ! run_as_hapi "hapi runner start 2>&1"; then
     echo '=== RUNNER START FAILED ===' >&2
   fi
 
   # Verify runner is running
   echo "Checking hapi runner status..."
-  if ! runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" hapi runner status 2>&1"; then
+  if ! run_as_hapi "hapi runner status 2>&1"; then
     echo '=== RUNNER NOT RUNNING ===' >&2
     echo 'Running hapi doctor for diagnostics:' >&2
-    runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"/usr/local/bin:/usr/bin:/bin\" HAPI_HOME=\"${HAPI_HOME}\" hapi doctor 2>&1" || true
+    run_as_hapi "hapi doctor 2>&1" || true
   fi
   echo "Hapi runner startup complete"
 else

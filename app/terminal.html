@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>{{TITLE}}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 0; height: 100vh; background: #0f131a; display: flex; flex-direction: column; }
+    #terminal { flex: 1; width: 100%; border: none; }
+    {{VKBD_STYLE}}
+  </style>
+</head>
+<body>
+  <iframe id="terminal" src="{{TTYD_URL}}" allow="clipboard-write; clipboard-read"></iframe>
+  {{TAB_HANDLER_SCRIPT}}
+  {{VKBD_HTML}}
+</body>
+</html>
+

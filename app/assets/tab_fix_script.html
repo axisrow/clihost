@@ -1,0 +1,105 @@
+<script>
+(function() {
+  window._ttydSocket = null;
+  var OrigWebSocket = window.WebSocket;
+  window.WebSocket = function(url, protocols) {
+    var ws = protocols ? new OrigWebSocket(url, protocols) : new OrigWebSocket(url);
+    if (url && url.indexOf('/ws') !== -1) {
+      window._ttydSocket = ws;
+    }
+    return ws;
+  };
+  window.WebSocket.prototype = OrigWebSocket.prototype;
+  window.WebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+  window.WebSocket.OPEN = OrigWebSocket.OPEN;
+  window.WebSocket.CLOSING = OrigWebSocket.CLOSING;
+  window.WebSocket.CLOSED = OrigWebSocket.CLOSED;
+
+  function getSocket() {
+    return window._ttydSocket || window.socket || window.ws;
+  }
+
+  function waitForTerm(cb) {
+    if (window.term) { cb(window.term); return; }
+    var i = setInterval(function() {
+      if (window.term) { clearInterval(i); cb(window.term); }
+    }, 50);
+  }
+
+  function sendToTTYD(data) {
+    var socket = getSocket();
+    if (socket && socket.readyState === 1) {
+      socket.send('0' + data);
+      return true;
+    }
+    return false;
+  }
+
+  waitForTerm(function(term) {
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        e.stopPropagation();
+
+        var data = e.shiftKey ? '\x1b[Z' : '\t';
+
+        if (sendToTTYD(data)) return;
+
+        if (term._core && term._core.coreService) {
+          term._core.coreService.triggerDataEvent(data);
+          return;
+        }
+
+        if (term.input) {
+          term.input(data);
+        }
+      }
+    }, true);
+
+    document.addEventListener('wheel', function(e) {
+      e.preventDefault();
+
+      var isAlt = false;
+      try {
+        if (term.buffer && term.buffer.active) {
+          isAlt = term.buffer.active.type === 'alternate';
+        }
+        if (!isAlt && term._core && term._core.buffer) {
+          isAlt = term._core.buffer.active === term._core.buffer.alternate;
+        }
+      } catch(err) {}
+
+      if (isAlt) return;
+
+      e.stopPropagation();
+
+      var lines;
+      if (e.deltaMode === 1) {
+        lines = e.deltaY;
+      } else if (e.deltaMode === 2) {
+        lines = e.deltaY > 0 ? term.rows : -term.rows;
+      } else {
+        lines = Math.round(e.deltaY / 40);
+      }
+      if (lines === 0) lines = e.deltaY > 0 ? 1 : -1;
+
+      term.scrollLines(lines);
+    }, { passive: false, capture: true });
+
+    window.sendTabKey = function(shift) {
+      var data = shift ? '\x1b[Z' : '\t';
+      if (sendToTTYD(data)) return true;
+      if (term._core && term._core.coreService) {
+        term._core.coreService.triggerDataEvent(data);
+        return true;
+      }
+      if (term.input) {
+        term.input(data);
+        return true;
+      }
+      return false;
+    };
+  });
+})();
+</script>
+

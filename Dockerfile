@@ -55,16 +55,11 @@ RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
     echo 'export LANG=en_US.UTF-8' >> /home/hapi/.bashrc && \
     echo 'export LC_ALL=en_US.UTF-8' >> /home/hapi/.bashrc
 
+COPY cli-packages.txt /tmp/cli-packages.txt
+
 # Install all CLI tools in one layer, then fix permissions and clean up
 RUN for i in 1 2 3 4 5; do \
-      npm install -g \
-        @anthropic-ai/claude-code@latest \
-        @openai/codex@latest \
-        @google/gemini-cli@latest \
-        @github/copilot@latest \
-        opencode-ai@latest \
-        @twsxtd/hapi@latest \
-      && break || sleep 10; \
+      xargs npm install -g < /tmp/cli-packages.txt && break || sleep 10; \
     done && \
     chown -R hapi:hapi /usr/local/lib/node_modules && \
     npm cache clean --force && \

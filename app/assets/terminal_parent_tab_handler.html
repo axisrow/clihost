@@ -1,0 +1,24 @@
+<script>
+  (function() {
+    var iframe = document.getElementById('terminal');
+
+    document.addEventListener('keydown', function(e) {
+      if (e.key !== 'Tab') return;
+
+      if (document.activeElement === iframe ||
+          (iframe && iframe.contains && iframe.contains(document.activeElement))) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }, true);
+
+    if (iframe) {
+      iframe.addEventListener('focus', function() {
+        try {
+          iframe.contentWindow.focus();
+        } catch(e) {}
+      });
+    }
+  })();
+</script>
+

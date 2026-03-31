@@ -1,0 +1,7 @@
+@anthropic-ai/claude-code@latest
+@openai/codex@latest
+@google/gemini-cli@latest
+@github/copilot@latest
+opencode-ai@latest
+@twsxtd/hapi@latest
+
