@@ -510,6 +510,37 @@ TAB_FIX_SCRIPT = b'''
       }
     }, true);
 
+    // Fix mouse wheel scroll: scroll buffer instead of sending ArrowUp/ArrowDown.
+    // { passive: false } required for preventDefault(); capture:true fires before xterm.js.
+    document.addEventListener('wheel', function(e) {
+      // In alternate screen (vim, less, htop) — let xterm.js handle wheel natively
+      var isAlt = false;
+      try {
+        if (term.buffer && term.buffer.active) {
+          isAlt = term.buffer.active.type === 'alternate';
+        }
+        // fallback to internal API for older xterm.js
+        if (!isAlt && term._core && term._core.buffer) {
+          isAlt = term._core.buffer.active === term._core.buffer.alternate;
+        }
+      } catch(err) {}
+
+      if (isAlt) return; // pass through to xterm.js in vim/less/htop
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      var lines;
+      if (e.deltaMode === 1) {
+        lines = e.deltaY; // DOM_DELTA_LINE: already in lines
+      } else {
+        lines = Math.round(e.deltaY / 40); // DOM_DELTA_PIXEL: ~40px per line
+      }
+      if (lines === 0) lines = e.deltaY > 0 ? 1 : -1;
+
+      term.scrollLines(lines);
+    }, { passive: false, capture: true });
+
     // Expose sendTab function for virtual keyboard
     window.sendTabKey = function(shift) {
       var data = shift ? '\\x1b[Z' : '\\t';
