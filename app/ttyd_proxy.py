@@ -53,6 +53,8 @@ VIRTUAL_KEYBOARD = env_bool(os.environ.get("VIRTUAL_KEYBOARD"), default=True)
 CSRF_TOKEN_TTL = int(os.environ.get("CSRF_TOKEN_TTL", "604800"))  # 7 days default
 SECURE_COOKIES = env_bool(os.environ.get("SECURE_COOKIES"), default=False)
 
+_SERVER_START_TIME = time.time()
+
 # Load templates
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
 
@@ -189,7 +191,7 @@ class TTYDManager:
                 del self.terminals[tid]
 
             result = sorted(
-                [{"id": t["id"], "port": t["port"]} for t in self.terminals.values()],
+                [{"id": t["id"], "port": t["port"], "pid": t["pid"]} for t in self.terminals.values()],
                 key=lambda x: x["id"],
             )
 
@@ -528,6 +530,19 @@ TAB_FIX_SCRIPT = b'''
 '''
 
 
+def _get_memory_rss_mb():
+    """Read process RSS memory from /proc/self/status. Returns float or None."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    kb = int(line.split()[1])
+                    return round(kb / 1024, 1)
+    except OSError:
+        return None
+    return None
+
+
 class TTYDProxyHandler(BaseHandler):
     """HTTP request handler for TTYD proxy."""
 
@@ -622,11 +637,22 @@ class TTYDProxyHandler(BaseHandler):
     def handle_health(self):
         """Health check endpoint."""
         terminals = ttyd_manager.list_terminals()
-        self.send_json(200, {
+        uptime = int(time.time() - _SERVER_START_TIME)
+        terminal_list = [
+            {"id": t["id"], "port": t["port"], "pid": t["pid"], "alive": True}
+            for t in terminals
+        ]
+        response = {
             "status": "ok",
+            "uptime": uptime,
             "ttyd": "running" if terminals else "no terminals",
-            "terminals": len(terminals),
-        })
+            "terminal_count": len(terminals),
+            "terminals": terminal_list,
+        }
+        mem_mb = _get_memory_rss_mb()
+        if mem_mb is not None:
+            response["memory_mb"] = mem_mb
+        self.send_json(200, response)
 
     def _check_auth(self, redirect=False):
         """Check session auth. Returns username or None (sends error/redirect response)."""
