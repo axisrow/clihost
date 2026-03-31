@@ -133,7 +133,7 @@ class TTYDManager:
                 del self.terminals[tid]
 
             result = sorted(
-                [{"id": t["id"], "port": t["port"]} for t in self.terminals.values()],
+                [{"id": t["id"], "port": t["port"], "pid": t["pid"]} for t in self.terminals.values()],
                 key=lambda x: x["id"],
             )
 
