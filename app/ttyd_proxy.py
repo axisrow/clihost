@@ -513,7 +513,13 @@ TAB_FIX_SCRIPT = b'''
     // Fix mouse wheel scroll: scroll buffer instead of sending ArrowUp/ArrowDown.
     // { passive: false } required for preventDefault(); capture:true fires before xterm.js.
     document.addEventListener('wheel', function(e) {
-      // In alternate screen (vim, less, htop) — let xterm.js handle wheel natively
+      // Always prevent default to stop browser from scrolling the textarea (e.g. Claude Code input).
+      // This must happen before any early return, otherwise the browser scrolls the textarea
+      // when the terminal is in alternate screen mode (Claude Code, vim, less, htop).
+      e.preventDefault();
+
+      // In alternate screen (vim, less, htop) -- let xterm.js handle wheel natively.
+      // We do NOT stopPropagation() here so xterm.js bubble-phase handler still fires.
       var isAlt = false;
       try {
         if (term.buffer && term.buffer.active) {
@@ -525,9 +531,8 @@ TAB_FIX_SCRIPT = b'''
         }
       } catch(err) {}
 
-      if (isAlt) return; // pass through to xterm.js in vim/less/htop
+      if (isAlt) return; // xterm.js handles scroll in vim/less/htop
 
-      e.preventDefault();
       e.stopPropagation();
 
       var lines;
