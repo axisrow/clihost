@@ -28,10 +28,10 @@ class TestInjectPlainHTML(unittest.TestCase):
         result = inject_tab_fix_script(SIMPLE_HTML).decode("utf-8")
         self.assertLess(result.index("e.preventDefault()"), result.index("if (isAlternateScreen(term)) return"))
 
-    def test_touch_scroll_logic_in_output(self):
+    def test_terminal_scroll_helpers_in_output(self):
         result = inject_tab_fix_script(SIMPLE_HTML).decode("utf-8")
-        self.assertIn("addEventListener('touchmove'", result)
-        self.assertIn("term.scrollLines(-lineSteps);", result)
+        self.assertIn("window.isTerminalAlternateScreen = function()", result)
+        self.assertIn("window.scrollTerminalLines = function(lines)", result)
 
 
 class TestInjectGzip(unittest.TestCase):

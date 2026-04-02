@@ -27,23 +27,13 @@ class TestScrollFixOrder(unittest.TestCase):
         self.assertIn("passive: false", wheel_section)
         self.assertIn("capture: true", wheel_section)
 
-    def test_touch_listeners_present(self):
-        for event_name in ("touchstart", "touchmove", "touchend", "touchcancel"):
-            with self.subTest(event_name=event_name):
-                self.assertIn(f"addEventListener('{event_name}'", self.script)
+    def test_alternate_screen_helper_present(self):
+        self.assertIn("function isAlternateScreen(term)", self.script)
+        self.assertIn("window.isTerminalAlternateScreen = function()", self.script)
 
-    def test_touchmove_listener_is_non_passive(self):
-        touchmove_section = self.script[self.script.index("addEventListener('touchmove'"):]
-        self.assertIn("passive: false", touchmove_section)
-        self.assertIn("capture: true", touchmove_section)
-
-    def test_touchmove_uses_alt_screen_guard(self):
-        touchmove_section = self.script[self.script.index("addEventListener('touchmove'"):]
-        self.assertIn("if (isAlternateScreen(term)) return", touchmove_section)
-
-    def test_touchmove_scrolls_terminal_buffer(self):
-        touchmove_section = self.script[self.script.index("addEventListener('touchmove'"):]
-        self.assertIn("term.scrollLines(-lineSteps);", touchmove_section)
+    def test_scroll_helper_present(self):
+        self.assertIn("window.scrollTerminalLines = function(lines)", self.script)
+        self.assertIn("term.scrollLines(lines);", self.script)
 
     def test_script_wrapped_in_script_tag(self):
         self.assertIn("<script>", self.script)
