@@ -35,7 +35,31 @@
     return false;
   }
 
+  function isAlternateScreen(term) {
+    var isAlt = false;
+    try {
+      if (term.buffer && term.buffer.active) {
+        isAlt = term.buffer.active.type === 'alternate';
+      }
+      if (!isAlt && term._core && term._core.buffer) {
+        isAlt = term._core.buffer.active === term._core.buffer.alternate;
+      }
+    } catch(err) {}
+    return isAlt;
+  }
+
   waitForTerm(function(term) {
+    var touchScrollActive = false;
+    var touchScrollLastY = 0;
+    var touchScrollRemainder = 0;
+    var TOUCH_SCROLL_LINE_HEIGHT = 24;
+
+    function resetTouchScroll() {
+      touchScrollActive = false;
+      touchScrollLastY = 0;
+      touchScrollRemainder = 0;
+    }
+
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Tab') {
         e.preventDefault();
@@ -59,17 +83,7 @@
     document.addEventListener('wheel', function(e) {
       e.preventDefault();
 
-      var isAlt = false;
-      try {
-        if (term.buffer && term.buffer.active) {
-          isAlt = term.buffer.active.type === 'alternate';
-        }
-        if (!isAlt && term._core && term._core.buffer) {
-          isAlt = term._core.buffer.active === term._core.buffer.alternate;
-        }
-      } catch(err) {}
-
-      if (isAlt) return;
+      if (isAlternateScreen(term)) return;
 
       e.stopPropagation();
 
@@ -85,6 +99,49 @@
 
       term.scrollLines(lines);
     }, { passive: false, capture: true });
+
+    document.addEventListener('touchstart', function(e) {
+      if (e.touches.length !== 1) {
+        resetTouchScroll();
+        return;
+      }
+
+      touchScrollActive = true;
+      touchScrollLastY = e.touches[0].clientY;
+      touchScrollRemainder = 0;
+    }, { capture: true });
+
+    document.addEventListener('touchmove', function(e) {
+      if (!touchScrollActive) return;
+      if (e.touches.length !== 1) {
+        resetTouchScroll();
+        return;
+      }
+      if (isAlternateScreen(term)) return;
+
+      var deltaY = e.touches[0].clientY - touchScrollLastY;
+      if (deltaY === 0) return;
+
+      touchScrollLastY = e.touches[0].clientY;
+      touchScrollRemainder += deltaY;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      var lineSteps = Math.trunc(touchScrollRemainder / TOUCH_SCROLL_LINE_HEIGHT);
+      if (lineSteps === 0) return;
+
+      touchScrollRemainder -= lineSteps * TOUCH_SCROLL_LINE_HEIGHT;
+      term.scrollLines(-lineSteps);
+    }, { passive: false, capture: true });
+
+    document.addEventListener('touchend', function() {
+      resetTouchScroll();
+    }, { capture: true });
+
+    document.addEventListener('touchcancel', function() {
+      resetTouchScroll();
+    }, { capture: true });
 
     window.sendTabKey = function(shift) {
       var data = shift ? '\x1b[Z' : '\t';
@@ -102,4 +159,3 @@
   });
 })();
 </script>
-

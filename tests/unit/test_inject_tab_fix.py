@@ -26,7 +26,12 @@ class TestInjectPlainHTML(unittest.TestCase):
 
     def test_fix_order_in_output(self):
         result = inject_tab_fix_script(SIMPLE_HTML).decode("utf-8")
-        self.assertLess(result.index("e.preventDefault()"), result.index("if (isAlt) return"))
+        self.assertLess(result.index("e.preventDefault()"), result.index("if (isAlternateScreen(term)) return"))
+
+    def test_touch_scroll_logic_in_output(self):
+        result = inject_tab_fix_script(SIMPLE_HTML).decode("utf-8")
+        self.assertIn("addEventListener('touchmove'", result)
+        self.assertIn("term.scrollLines(-lineSteps);", result)
 
 
 class TestInjectGzip(unittest.TestCase):
@@ -83,4 +88,3 @@ class TestInjectTTYDRealistic(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
