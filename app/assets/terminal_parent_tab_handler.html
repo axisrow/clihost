@@ -1,6 +1,37 @@
 <script>
   (function() {
     var iframe = document.getElementById('terminal');
+    var terminalShell = document.getElementById('terminal-shell');
+    var touchScrollActive = false;
+    var touchScrollLastY = 0;
+    var touchScrollRemainder = 0;
+    var TOUCH_SCROLL_LINE_HEIGHT = 24;
+
+    function resetTouchScroll() {
+      touchScrollActive = false;
+      touchScrollLastY = 0;
+      touchScrollRemainder = 0;
+    }
+
+    function getTerminalWindow() {
+      try {
+        return iframe && iframe.contentWindow ? iframe.contentWindow : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function focusTerminal() {
+      var win = getTerminalWindow();
+      if (!win) return;
+      try {
+        win.focus();
+        var doc = win.document;
+        if (!doc) return;
+        var textarea = doc.querySelector('.xterm-helper-textarea');
+        if (textarea) textarea.focus();
+      } catch (e) {}
+    }
 
     document.addEventListener('keydown', function(e) {
       if (e.key !== 'Tab') return;
@@ -14,11 +45,60 @@
 
     if (iframe) {
       iframe.addEventListener('focus', function() {
-        try {
-          iframe.contentWindow.focus();
-        } catch(e) {}
+        focusTerminal();
       });
+    }
+
+    if (terminalShell) {
+      terminalShell.addEventListener('touchstart', function(e) {
+        if (e.touches.length !== 1) {
+          resetTouchScroll();
+          return;
+        }
+
+        touchScrollActive = true;
+        touchScrollLastY = e.touches[0].clientY;
+        touchScrollRemainder = 0;
+      }, { capture: true });
+
+      terminalShell.addEventListener('touchmove', function(e) {
+        if (!touchScrollActive) return;
+        if (e.touches.length !== 1) {
+          resetTouchScroll();
+          return;
+        }
+
+        var win = getTerminalWindow();
+        if (!win) return;
+        if (win.isTerminalAlternateScreen && win.isTerminalAlternateScreen()) return;
+
+        var deltaY = e.touches[0].clientY - touchScrollLastY;
+        if (deltaY === 0) return;
+
+        touchScrollLastY = e.touches[0].clientY;
+        touchScrollRemainder += deltaY;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        var lineSteps = Math.trunc(touchScrollRemainder / TOUCH_SCROLL_LINE_HEIGHT);
+        if (lineSteps === 0) return;
+
+        touchScrollRemainder -= lineSteps * TOUCH_SCROLL_LINE_HEIGHT;
+
+        if (win.scrollTerminalLines) {
+          win.scrollTerminalLines(-lineSteps);
+        }
+      }, { passive: false, capture: true });
+
+      terminalShell.addEventListener('touchend', function() {
+        if (touchScrollActive) focusTerminal();
+        resetTouchScroll();
+      }, { capture: true });
+
+      terminalShell.addEventListener('touchcancel', function() {
+        resetTouchScroll();
+      }, { capture: true });
     }
   })();
 </script>
-

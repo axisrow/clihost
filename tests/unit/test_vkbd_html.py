@@ -16,14 +16,19 @@ class TestVKBDEnabled(unittest.TestCase):
     def test_mobile_styles_present(self):
         self.assertIn("@media (max-width: 768px)", self.html)
         self.assertIn("touch-action: manipulation", self.html)
+        self.assertIn("overflow: hidden", self.html)
+        self.assertIn("overscroll-behavior: none", self.html)
+        self.assertIn("touch-action: none", self.html)
 
     def test_updated_javascript_present(self):
         self.assertIn("function sendKey(key)", self.html)
         self.assertIn("navigator.clipboard.readText()", self.html)
         self.assertIn("socket.send('0' + data)", self.html)
         self.assertIn("win.sendTabKey", self.html)
+        self.assertIn("win.scrollTerminalLines", self.html)
 
     def test_iframe_points_to_terminal(self):
+        self.assertIn('id="terminal-shell"', self.html)
         self.assertIn('id="terminal"', self.html)
         self.assertIn('src="/ttyd1/"', self.html)
 
@@ -39,4 +44,3 @@ class TestVKBDDisabled(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
