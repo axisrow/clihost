@@ -1,14 +1,26 @@
 <div class="vkbd" id="vkbd">
   <button data-key="esc">ESC</button>
+  <button data-key="1">1</button>
+  <button data-key="2">2</button>
+  <button data-key="3">3</button>
+  <button data-key="4">4</button>
+  <button data-key="5">5</button>
+  <button data-key="backspace">&#9003;</button>
   <button data-key="tab">Tab</button>
-  <button data-key="shift-tab">Shift+Tab</button>
-  <button data-key="ctrl-c">Ctrl+C</button>
-  <button data-key="ctrl-b">Ctrl+B</button>
-  <button data-key="up">&#8593;</button>
-  <button data-key="left">&#8592;</button>
-  <button data-key="down">&#8595;</button>
-  <button data-key="right">&#8594;</button>
-  <button data-key="ctrl-v">Ctrl+V</button>
+  <button data-key="shift-tab">&#8617;Tab</button>
+  <button data-key="slash">/</button>
+  <button data-key="bang">!</button>
+  <button data-key="ctrl-c">C-C</button>
+  <button data-key="ctrl-v">C-V</button>
+  <button data-key="ctrl-l">C-L</button>
+  <button data-key="enter">&#8629;</button>
+  <button data-key="ctrl-b">C-B</button>
+  <div class="arrow-grid">
+    <button data-key="up" style="grid-area: up">&#8593;</button>
+    <button data-key="left" style="grid-area: left">&#8592;</button>
+    <button data-key="down" style="grid-area: down">&#8595;</button>
+    <button data-key="right" style="grid-area: right">&#8594;</button>
+  </div>
 </div>
 <script>
   (function() {
@@ -65,10 +77,17 @@
             case 'esc': data = ESC; break;
             case 'ctrl-c': data = String.fromCharCode(3); break;
             case 'ctrl-b': data = String.fromCharCode(2); break;
+            case 'ctrl-l': data = String.fromCharCode(12); break;
             case 'up': data = ESC + '[A'; break;
             case 'down': data = ESC + '[B'; break;
             case 'right': data = ESC + '[C'; break;
             case 'left': data = ESC + '[D'; break;
+            case '1': case '2': case '3': case '4': case '5':
+              data = key; break;
+            case 'slash': data = '/'; break;
+            case 'bang': data = '!'; break;
+            case 'backspace': data = String.fromCharCode(127); break;
+            case 'enter': data = '\r'; break;
           }
           if (data) {
             socket.send('0' + data);
@@ -88,4 +107,3 @@
     });
   })();
 </script>
-

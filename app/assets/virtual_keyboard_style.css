@@ -1,12 +1,20 @@
-.vkbd { display: none; background: #1a1a2e; padding: 8px; gap: 6px; flex-wrap: wrap; justify-content: center; }
+.vkbd { display: none; background: #1a1a2e; padding: 8px; gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); }
 .vkbd button {
   background: #16213e; color: #e8e8e8; border: 1px solid #0f3460;
   padding: 12px 16px; font-size: 14px; font-family: monospace;
   border-radius: 4px; min-width: 44px; touch-action: manipulation;
 }
 .vkbd button:active { background: #0f3460; }
+.arrow-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 44px);
+  grid-template-areas: ". up ." "left down right";
+  gap: 4px;
+  justify-self: end;
+}
 @media (max-width: 768px) {
-  .vkbd { display: flex; }
-  body { height: calc(100vh - 60px); }
+  .vkbd { display: grid; }
+  body { height: calc(100vh - 180px); }
 }
 
