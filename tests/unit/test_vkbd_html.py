@@ -9,9 +9,15 @@ class TestVKBDEnabled(unittest.TestCase):
         self.html = render_terminal_page(1, "testuser", vkbd_enabled=True)
 
     def test_vkbd_buttons_present(self):
-        for key in ("esc", "tab", "shift-tab", "ctrl-c", "ctrl-b", "up", "left", "down", "right", "ctrl-v"):
+        for key in ("esc", "tab", "shift-tab", "ctrl-c", "ctrl-b", "ctrl-l",
+                     "ctrl-v", "up", "left", "down", "right",
+                     "1", "2", "3", "4", "5",
+                     "slash", "bang", "backspace", "enter"):
             with self.subTest(key=key):
                 self.assertIn(f'data-key="{key}"', self.html)
+
+    def test_arrow_grid_present(self):
+        self.assertIn("arrow-grid", self.html)
 
     def test_mobile_styles_present(self):
         self.assertIn("@media (max-width: 768px)", self.html)
@@ -26,6 +32,13 @@ class TestVKBDEnabled(unittest.TestCase):
         self.assertIn("socket.send('0' + data)", self.html)
         self.assertIn("win.sendTabKey", self.html)
         self.assertIn("win.scrollTerminalLines", self.html)
+
+    def test_new_key_sequences(self):
+        self.assertIn("String.fromCharCode(127)", self.html)  # backspace
+        self.assertIn("String.fromCharCode(12)", self.html)   # ctrl-l
+        self.assertIn("'\\r'", self.html)                      # enter
+        self.assertIn("case 'slash'", self.html)               # /
+        self.assertIn("case 'bang'", self.html)                # !
 
     def test_iframe_points_to_terminal(self):
         self.assertIn('id="terminal-shell"', self.html)
