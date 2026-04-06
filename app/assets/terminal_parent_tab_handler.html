@@ -88,11 +88,11 @@
 
         if (win.scrollTerminalLines) {
           win.scrollTerminalLines(-lineSteps);
-          focusTerminal();
         }
       }, { passive: false, capture: true });
 
       terminalShell.addEventListener('touchend', function() {
+        if (touchScrollActive) focusTerminal();
         resetTouchScroll();
       }, { capture: true });
 
