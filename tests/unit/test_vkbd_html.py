@@ -16,8 +16,12 @@ class TestVKBDEnabled(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIn(f'data-key="{key}"', self.html)
 
-    def test_arrow_grid_present(self):
-        self.assertIn("arrow-grid", self.html)
+    def test_nav_cluster_present(self):
+        self.assertIn("vkbd-bottom", self.html)
+
+    def test_vkbd_rows_present(self):
+        self.assertIn('class="vkbd-row"', self.html)
+        self.assertIn('class="vkbd-bottom"', self.html)
 
     def test_mobile_styles_present(self):
         self.assertIn("@media (max-width: 768px)", self.html)

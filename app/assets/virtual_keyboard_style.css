@@ -1,20 +1,40 @@
-.vkbd { display: none; background: #1a1a2e; padding: 8px; gap: 6px;
-  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); }
-.vkbd button {
-  background: #16213e; color: #e8e8e8; border: 1px solid #0f3460;
-  padding: 12px 16px; font-size: 14px; font-family: monospace;
-  border-radius: 4px; min-width: 44px; touch-action: manipulation;
-}
-.vkbd button:active { background: #0f3460; }
-.arrow-grid {
+.vkbd { display: none; background: #0d0d1a; padding: 6px; gap: 4px; flex-direction: column; }
+.vkbd-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.vkbd-bottom {
   display: grid;
-  grid-template-columns: repeat(3, 44px);
-  grid-template-areas: ". up ." "left down right";
+  grid-template-columns: repeat(8, 1fr);
+  grid-template-rows: 1fr 1fr;
+  grid-template-areas:
+    "tab stab slash bang cl up ut enter"
+    "cc cv at cb left down right enter";
   gap: 4px;
-  justify-self: end;
+}
+.vkbd button {
+  background: linear-gradient(180deg, #253552, #1b2940);
+  color: #e8e8e8; border: 1px solid rgba(255,255,255,0.15);
+  box-shadow: 0 2px 0 #080c18;
+  padding: 10px 6px; font-size: 13px; font-family: monospace;
+  border-radius: 6px; min-width: 0; touch-action: manipulation;
+}
+.vkbd button:active {
+  background: #0f1e35; box-shadow: none; transform: translateY(1px);
+}
+.vkbd button.key-action {
+  background: linear-gradient(180deg, #302038, #221530);
+}
+.vkbd button.key-mod { color: #8898b4; }
+.vkbd button.key-enter {
+  background: linear-gradient(180deg, #1e4535, #16352a);
+  font-size: 16px;
+}
+.vkbd button.key-ultra span {
+  background: linear-gradient(90deg, #ff4444, #ff8844, #ffcc44, #44cc44, #44cccc, #4488ff, #cc44ff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  font-weight: bold; font-size: 15px;
 }
 @media (max-width: 768px) {
-  .vkbd { display: grid; }
-  body { height: calc(100vh - 180px); }
+  .vkbd { display: flex; }
+  body { height: calc(100vh - 140px); }
 }
-

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>VKBD Preview</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; min-height: 100vh; background: #222; display: flex; justify-content: center; align-items: start; padding-top: 20px; }
+
+    .phone-frame {
+      width: 390px; height: 700px;
+      border: 3px solid #555; border-radius: 40px;
+      background: #0f131a;
+      display: flex; flex-direction: column;
+      overflow: visible;
+      position: relative;
+    }
+    .phone-notch {
+      width: 120px; height: 28px; background: #555; border-radius: 0 0 14px 14px;
+      margin: 0 auto;
+    }
+    .terminal-mock {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      color: #444; font-family: monospace; font-size: 13px;
+    }
+
+    .phone-frame .vkbd { display: flex !important; }
+  </style>
+  <link rel="stylesheet" href="../../app/assets/virtual_keyboard_style.css">
+</head>
+<body>
+
+  <div class="phone-frame">
+    <div class="phone-notch"></div>
+    <div class="terminal-mock">~ $ _</div>
+
+    <!-- Copy of app/assets/virtual_keyboard.html markup (no JS) -->
+    <div class="vkbd" id="vkbd">
+      <div class="vkbd-row">
+        <button data-key="esc" class="key-action">ESC</button>
+        <button data-key="1">1</button>
+        <button data-key="2">2</button>
+        <button data-key="3">3</button>
+        <button data-key="4">4</button>
+        <button data-key="5">5</button>
+        <button data-key="backspace" class="key-action">&#9003;</button>
+      </div>
+      <div class="vkbd-bottom">
+        <button data-key="tab" style="grid-area:tab">Tab</button>
+        <button data-key="shift-tab" style="grid-area:stab">&#8617;Tab</button>
+        <button data-key="slash" style="grid-area:slash">/</button>
+        <button data-key="bang" style="grid-area:bang">!</button>
+        <button data-key="ctrl-l" style="grid-area:cl" class="key-mod">^L</button>
+        <button data-key="up" style="grid-area:up">&#8593;</button>
+        <button data-key="u" style="grid-area:ut" class="key-ultra"><span>u</span></button>
+        <button data-key="enter" style="grid-area:enter" class="key-enter">&#8629;</button>
+        <button data-key="ctrl-c" style="grid-area:cc" class="key-mod">^C</button>
+        <button data-key="ctrl-v" style="grid-area:cv" class="key-mod">^V</button>
+        <button data-key="at" style="grid-area:at">@</button>
+        <button data-key="ctrl-b" style="grid-area:cb" class="key-mod">^B</button>
+        <button data-key="left" style="grid-area:left">&#8592;</button>
+        <button data-key="down" style="grid-area:down">&#8595;</button>
+        <button data-key="right" style="grid-area:right">&#8594;</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('vkbd').addEventListener('click', function(e) {
+      if (e.target.tagName === 'BUTTON') {
+        console.log('Key:', e.target.dataset.key);
+        e.target.style.background = '#0f1e35';
+        e.target.style.boxShadow = 'none';
+        e.target.style.transform = 'translateY(1px)';
+        setTimeout(function() {
+          e.target.style.background = '';
+          e.target.style.boxShadow = '';
+          e.target.style.transform = '';
+        }, 150);
+      }
+    });
+  </script>
+</body>
+</html>

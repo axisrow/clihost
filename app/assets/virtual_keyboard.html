@@ -1,25 +1,29 @@
 <div class="vkbd" id="vkbd">
-  <button data-key="esc">ESC</button>
-  <button data-key="1">1</button>
-  <button data-key="2">2</button>
-  <button data-key="3">3</button>
-  <button data-key="4">4</button>
-  <button data-key="5">5</button>
-  <button data-key="backspace">&#9003;</button>
-  <button data-key="tab">Tab</button>
-  <button data-key="shift-tab">&#8617;Tab</button>
-  <button data-key="slash">/</button>
-  <button data-key="bang">!</button>
-  <button data-key="ctrl-c">C-C</button>
-  <button data-key="ctrl-v">C-V</button>
-  <button data-key="ctrl-l">C-L</button>
-  <button data-key="enter">&#8629;</button>
-  <button data-key="ctrl-b">C-B</button>
-  <div class="arrow-grid">
-    <button data-key="up" style="grid-area: up">&#8593;</button>
-    <button data-key="left" style="grid-area: left">&#8592;</button>
-    <button data-key="down" style="grid-area: down">&#8595;</button>
-    <button data-key="right" style="grid-area: right">&#8594;</button>
+  <div class="vkbd-row">
+    <button data-key="esc" class="key-action">ESC</button>
+    <button data-key="1">1</button>
+    <button data-key="2">2</button>
+    <button data-key="3">3</button>
+    <button data-key="4">4</button>
+    <button data-key="5">5</button>
+    <button data-key="backspace" class="key-action">&#9003;</button>
+  </div>
+  <div class="vkbd-bottom">
+    <button data-key="tab" style="grid-area:tab">Tab</button>
+    <button data-key="shift-tab" style="grid-area:stab">&#8617;Tab</button>
+    <button data-key="slash" style="grid-area:slash">/</button>
+    <button data-key="bang" style="grid-area:bang">!</button>
+    <button data-key="ctrl-l" style="grid-area:cl" class="key-mod">^L</button>
+    <button data-key="up" style="grid-area:up">&#8593;</button>
+    <button data-key="u" style="grid-area:ut" class="key-ultra"><span>u</span></button>
+    <button data-key="enter" style="grid-area:enter" class="key-enter">&#8629;</button>
+    <button data-key="ctrl-c" style="grid-area:cc" class="key-mod">^C</button>
+    <button data-key="ctrl-v" style="grid-area:cv" class="key-mod">^V</button>
+    <button data-key="at" style="grid-area:at">@</button>
+    <button data-key="ctrl-b" style="grid-area:cb" class="key-mod">^B</button>
+    <button data-key="left" style="grid-area:left">&#8592;</button>
+    <button data-key="down" style="grid-area:down">&#8595;</button>
+    <button data-key="right" style="grid-area:right">&#8594;</button>
   </div>
 </div>
 <script>
@@ -88,6 +92,8 @@
             case 'bang': data = '!'; break;
             case 'backspace': data = String.fromCharCode(127); break;
             case 'enter': data = '\r'; break;
+            case 'u': data = 'u'; break;
+            case 'at': data = '@'; break;
           }
           if (data) {
             socket.send('0' + data);
