@@ -22,7 +22,7 @@
       border-radius: 8px;
       box-shadow: 0 4px 12px rgba(0,0,0,0.3);
       width: 100%;
-      max-width: 400px;
+      max-width: 760px;
       text-align: center;
     }
     h1 {
@@ -103,6 +103,147 @@
       flex-direction: column;
       gap: 0.5rem;
     }
+    .section {
+      margin-top: 1.5rem;
+      text-align: left;
+    }
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 0.75rem;
+    }
+    .section-title {
+      color: #e0e6ed;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+    .section-note {
+      color: #b0b8c3;
+      font-size: 0.9rem;
+      margin-bottom: 0.75rem;
+    }
+    .section-note.error {
+      color: #f4a6b3;
+    }
+    .section-actions {
+      display: flex;
+      gap: 0.5rem;
+    }
+    .section-actions .menu-link {
+      padding: 0.75rem 1rem;
+      font-size: 0.9rem;
+    }
+    .menu-link.danger {
+      background: #8c3949;
+    }
+    .menu-link.danger:hover {
+      background: #a64658;
+    }
+    .cleanup-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .cleanup-target {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      padding: 0.9rem;
+      border-radius: 6px;
+      background: #1f242d;
+      border: 1px solid #353b47;
+      cursor: pointer;
+    }
+    .cleanup-target:hover {
+      border-color: #4a90d9;
+    }
+    .cleanup-target input[type="checkbox"] {
+      margin-top: 0.2rem;
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+    }
+    .cleanup-target-body {
+      flex: 1;
+      min-width: 0;
+    }
+    .cleanup-target-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.35rem;
+    }
+    .cleanup-target-label {
+      color: #eef2f7;
+      font-weight: 600;
+      word-break: break-word;
+    }
+    .cleanup-target-size {
+      color: #cdd6e1;
+      font-size: 0.9rem;
+      white-space: nowrap;
+    }
+    .cleanup-target-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin-bottom: 0.35rem;
+    }
+    .cleanup-pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 0.15rem 0.5rem;
+      font-size: 0.75rem;
+      background: #313845;
+      color: #d7deea;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .cleanup-pill.risk-low {
+      background: #244c3b;
+      color: #bfe8d0;
+    }
+    .cleanup-pill.risk-medium {
+      background: #5b4a24;
+      color: #f0ddab;
+    }
+    .cleanup-pill.risk-high {
+      background: #5b2d36;
+      color: #f3bcc6;
+    }
+    .cleanup-target-description {
+      color: #b0b8c3;
+      font-size: 0.9rem;
+      line-height: 1.35;
+    }
+    .empty-state {
+      padding: 1rem;
+      border-radius: 6px;
+      background: #1f242d;
+      color: #b0b8c3;
+      border: 1px dashed #353b47;
+      text-align: center;
+    }
+    @media (max-width: 720px) {
+      .menu-container {
+        padding: 1.25rem;
+      }
+      .section-header,
+      .cleanup-target-top {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .section-actions {
+        width: 100%;
+      }
+      .section-actions .menu-link {
+        flex: 1;
+      }
+    }
   </style>
 </head>
 <body>
@@ -113,6 +254,18 @@
       {{HAPI_LINK}}
       <div id="terminals-list"></div>
       <button class="menu-link new-terminal" id="new-terminal-btn" onclick="createTerminal()">+ New terminal</button>
+    </div>
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">Cleanup</div>
+        <div class="section-actions">
+          <button class="menu-link secondary" id="refresh-cleanup-btn" onclick="loadCleanupTargets()">Refresh</button>
+          <button class="menu-link danger" id="delete-cleanup-btn" onclick="deleteSelectedCleanup()" disabled>Delete selected</button>
+        </div>
+      </div>
+      <div class="section-note" id="cleanup-summary">Loading cleanup targets...</div>
+      <div class="section-note" id="cleanup-status"></div>
+      <div class="cleanup-list" id="cleanup-list"></div>
     </div>
   </div>
   <script>
@@ -231,7 +384,179 @@
         });
     }
 
+    function setCleanupStatus(message, isError) {
+      var status = document.getElementById('cleanup-status');
+      status.textContent = message || '';
+      status.className = isError ? 'section-note error' : 'section-note';
+    }
+
+    function updateCleanupSelectionState() {
+      var selected = document.querySelectorAll('.cleanup-checkbox:checked');
+      var btn = document.getElementById('delete-cleanup-btn');
+      var summary = document.getElementById('cleanup-summary');
+      var total = document.querySelectorAll('.cleanup-checkbox').length;
+      btn.disabled = selected.length === 0;
+      if (summary.dataset.baseSummary) {
+        summary.textContent = summary.dataset.baseSummary + ' Selected: ' + selected.length + ' of ' + total + '.';
+      }
+    }
+
+    function renderCleanupTargets(data) {
+      var list = document.getElementById('cleanup-list');
+      var summary = document.getElementById('cleanup-summary');
+      list.innerHTML = '';
+      var targets = data.targets || [];
+      var totals = data.summary || {};
+      if (!targets.length) {
+        summary.dataset.baseSummary = 'No cleanup targets found.';
+        summary.textContent = 'No cleanup targets found.';
+        list.innerHTML = '<div class="empty-state">Nothing to clean up right now.</div>';
+        updateCleanupSelectionState();
+        return;
+      }
+
+      summary.dataset.baseSummary = 'Found ' + totals.count + ' targets totaling ' + totals.total_size_human + '.';
+      summary.textContent = summary.dataset.baseSummary + ' Selected: 0 of ' + targets.length + '.';
+      targets.forEach(function(target) {
+        var row = document.createElement('label');
+        row.className = 'cleanup-target';
+
+        var checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'cleanup-checkbox';
+        checkbox.value = target.id;
+        checkbox.setAttribute('data-label', target.label);
+        checkbox.onchange = updateCleanupSelectionState;
+        row.appendChild(checkbox);
+
+        var body = document.createElement('div');
+        body.className = 'cleanup-target-body';
+
+        var top = document.createElement('div');
+        top.className = 'cleanup-target-top';
+
+        var label = document.createElement('div');
+        label.className = 'cleanup-target-label';
+        label.textContent = target.label;
+        top.appendChild(label);
+
+        var size = document.createElement('div');
+        size.className = 'cleanup-target-size';
+        size.textContent = target.size_human;
+        top.appendChild(size);
+
+        body.appendChild(top);
+
+        var meta = document.createElement('div');
+        meta.className = 'cleanup-target-meta';
+
+        var category = document.createElement('span');
+        category.className = 'cleanup-pill';
+        category.textContent = target.category;
+        meta.appendChild(category);
+
+        var risk = document.createElement('span');
+        risk.className = 'cleanup-pill risk-' + target.risk;
+        risk.textContent = target.risk + ' risk';
+        meta.appendChild(risk);
+
+        body.appendChild(meta);
+
+        var description = document.createElement('div');
+        description.className = 'cleanup-target-description';
+        description.textContent = target.description;
+        body.appendChild(description);
+
+        row.appendChild(body);
+        list.appendChild(row);
+      });
+
+      updateCleanupSelectionState();
+    }
+
+    function loadCleanupTargets() {
+      var list = document.getElementById('cleanup-list');
+      var refreshBtn = document.getElementById('refresh-cleanup-btn');
+      refreshBtn.disabled = true;
+      list.innerHTML = '<div class="empty-state">Loading cleanup targets...</div>';
+      setCleanupStatus('', false);
+      fetch('/cleanup')
+        .then(function(r) {
+          if (handleAuthError(r)) return;
+          return r.json();
+        })
+        .then(function(data) {
+          if (!data) return;
+          renderCleanupTargets(data);
+        })
+        .catch(function(err) {
+          log('[cleanup] Failed to load cleanup targets:', err);
+          list.innerHTML = '<div class="empty-state">Failed to load cleanup targets.</div>';
+          setCleanupStatus('Failed to load cleanup targets.', true);
+        })
+        .finally(function() {
+          refreshBtn.disabled = false;
+        });
+    }
+
+    function deleteSelectedCleanup() {
+      var boxes = Array.prototype.slice.call(document.querySelectorAll('.cleanup-checkbox:checked'));
+      if (!boxes.length) {
+        setCleanupStatus('Select at least one item to delete.', true);
+        return;
+      }
+      var ids = boxes.map(function(box) { return box.value; });
+      var labels = boxes.map(function(box) { return box.getAttribute('data-label') || box.value; });
+      if (!confirm('Delete selected items?\n\n' + labels.join('\n'))) return;
+
+      var btn = document.getElementById('delete-cleanup-btn');
+      btn.disabled = true;
+      btn.textContent = 'Deleting...';
+      setCleanupStatus('', false);
+
+      fetch('/cleanup/delete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': getCsrfToken()
+        },
+        body: JSON.stringify({ ids: ids })
+      })
+        .then(function(r) {
+          if (handleAuthError(r)) return;
+          return r.json();
+        })
+        .then(function(data) {
+          if (!data) return;
+          if (data.error) {
+            setCleanupStatus(data.error, true);
+            return;
+          }
+          var parts = [];
+          if (data.deleted && data.deleted.length) {
+            parts.push('Deleted: ' + data.deleted.map(function(item) { return item.label; }).join(', '));
+          }
+          if (data.errors && data.errors.length) {
+            parts.push('Errors: ' + data.errors.map(function(item) { return item.label + ' (' + item.error + ')'; }).join(', '));
+          }
+          if (data.skipped && data.skipped.length) {
+            parts.push('Skipped: ' + data.skipped.map(function(item) { return item.id; }).join(', '));
+          }
+          setCleanupStatus(parts.join(' '), data.errors && data.errors.length > 0);
+          loadCleanupTargets();
+        })
+        .catch(function(err) {
+          log('[cleanup] Failed to delete cleanup targets:', err);
+          setCleanupStatus('Failed to delete selected items.', true);
+        })
+        .finally(function() {
+          btn.textContent = 'Delete selected';
+          updateCleanupSelectionState();
+        });
+    }
+
     loadTerminals();
+    loadCleanupTargets();
   </script>
 </body>
 </html>

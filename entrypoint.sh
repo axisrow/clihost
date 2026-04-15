@@ -82,6 +82,8 @@ PORT="${PORT}" \
 TTYD_USER="${TTYD_USER}" \
 TTYD_PASSWORD="${TTYD_PASSWORD}" \
 PASSWORD_SECRET="${PASSWORD_SECRET}" \
+CLEANUP_ROOT="${HAPI_USER_HOME}" \
+HAPI_HOME="${HAPI_HOME}" \
 python3 /app/ttyd_proxy.py &
 
 # Start hapi server with relay in background (logs to file, force TCP relay)
