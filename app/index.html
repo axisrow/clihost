@@ -107,6 +107,9 @@
       margin-top: 1.5rem;
       text-align: left;
     }
+    .section.collapsed .section-body {
+      display: none;
+    }
     .section-header {
       display: flex;
       align-items: center;
@@ -134,6 +137,12 @@
     .section-actions .menu-link {
       padding: 0.75rem 1rem;
       font-size: 0.9rem;
+    }
+    .section-toggle {
+      background: #3d4450;
+    }
+    .section-toggle:hover {
+      background: #4d5460;
     }
     .menu-link.danger {
       background: #8c3949;
@@ -255,21 +264,25 @@
       <div id="terminals-list"></div>
       <button class="menu-link new-terminal" id="new-terminal-btn" onclick="createTerminal()">+ New terminal</button>
     </div>
-    <div class="section">
+    <div class="section collapsed" id="cleanup-section">
       <div class="section-header">
         <div class="section-title">Cleanup</div>
         <div class="section-actions">
+          <button class="menu-link section-toggle" id="toggle-cleanup-btn" onclick="toggleCleanupSection()">Show cleanup</button>
           <button class="menu-link secondary" id="refresh-cleanup-btn" onclick="loadCleanupTargets()">Refresh</button>
           <button class="menu-link danger" id="delete-cleanup-btn" onclick="deleteSelectedCleanup()" disabled>Delete selected</button>
         </div>
       </div>
-      <div class="section-note" id="cleanup-summary">Loading cleanup targets...</div>
-      <div class="section-note" id="cleanup-status"></div>
-      <div class="cleanup-list" id="cleanup-list"></div>
+      <div class="section-body">
+        <div class="section-note" id="cleanup-summary">Cleanup targets are loaded on demand.</div>
+        <div class="section-note" id="cleanup-status"></div>
+        <div class="cleanup-list" id="cleanup-list"></div>
+      </div>
     </div>
   </div>
   <script>
     var DEBUG = false;
+    var cleanupLoaded = false;
     function log() { if (DEBUG) console.log.apply(console, arguments); }
 
     function getCsrfToken() {
@@ -395,6 +408,16 @@
       status.className = isError ? 'section-note error' : 'section-note';
     }
 
+    function toggleCleanupSection() {
+      var section = document.getElementById('cleanup-section');
+      var btn = document.getElementById('toggle-cleanup-btn');
+      var collapsed = section.classList.toggle('collapsed');
+      btn.textContent = collapsed ? 'Show cleanup' : 'Hide cleanup';
+      if (!collapsed && !cleanupLoaded) {
+        loadCleanupTargets();
+      }
+    }
+
     function updateCleanupSelectionState() {
       var selected = document.querySelectorAll('.cleanup-checkbox:checked');
       var btn = document.getElementById('delete-cleanup-btn');
@@ -496,6 +519,7 @@
         })
         .then(function(data) {
           if (!data) return;
+          cleanupLoaded = true;
           renderCleanupTargets(data);
         })
         .catch(function(err) {
@@ -569,7 +593,6 @@
     }
 
     loadTerminals();
-    loadCleanupTargets();
   </script>
 </body>
 </html>

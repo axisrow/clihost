@@ -48,6 +48,8 @@ ttyd_manager = TTYDManager(
 )
 login_rate_limiter = RateLimiter(max_attempts=5, window_seconds=60)
 account_rate_limiter = RateLimiter(max_attempts=5, window_seconds=300)
+MAX_CLEANUP_DELETE_IDS = 50
+MAX_CLEANUP_TARGET_ID_LENGTH = 128
 
 
 def _get_memory_rss_mb():
@@ -271,8 +273,14 @@ class TTYDProxyHandler(BaseHandler):
         if not isinstance(target_ids, list) or not target_ids:
             self.send_json(400, {"error": "ids must be a non-empty array"})
             return
+        if len(target_ids) > MAX_CLEANUP_DELETE_IDS:
+            self.send_json(400, {"error": f"ids must contain at most {MAX_CLEANUP_DELETE_IDS} items"})
+            return
         if any(not isinstance(target_id, str) or not target_id for target_id in target_ids):
             self.send_json(400, {"error": "ids must contain non-empty strings"})
+            return
+        if any(len(target_id) > MAX_CLEANUP_TARGET_ID_LENGTH for target_id in target_ids):
+            self.send_json(400, {"error": f"ids must be at most {MAX_CLEANUP_TARGET_ID_LENGTH} characters long"})
             return
 
         self.send_json(200, delete_cleanup_targets(target_ids, CLEANUP_ROOT, HAPI_HOME))

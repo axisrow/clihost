@@ -65,6 +65,8 @@ STATIC_TARGETS = (
 )
 
 PROJECT_CATEGORY_ORDER = 100
+# runtime/ is exposed as a dedicated static cleanup target, so it must not also
+# show up in the discovered project/work-directory list.
 RESERVED_TOP_LEVEL_NAMES = {"runtime"}
 MAX_SIZE_WALK_ENTRIES = 5000
 
@@ -78,7 +80,6 @@ def _format_size(size_bytes):
             precision = 0 if value >= 10 else 1
             return f"{value:.{precision}f} {unit}"
         value /= 1024
-    return "0 B"
 
 
 def _resolve_within_root(path, root):
@@ -201,6 +202,9 @@ def resolve_cleanup_target(target_id, cleanup_root, hapi_home, include_missing=F
         if spec["id"] != target_id:
             continue
         path = hapi_path if spec["id"] == "hapi-home" else root / spec["relative_path"]
+        if spec["id"] == "hapi-home" and _resolve_within_root(path, root) is None:
+            print(f"WARNING: HAPI_HOME {path} is outside CLEANUP_ROOT {root}, skipping ~/.hapi cleanup target", flush=True)
+            return None
         return _build_target(
             path,
             root,

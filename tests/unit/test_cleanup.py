@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ttydproxy.cleanup import delete_cleanup_targets, list_cleanup_targets, summarize_cleanup_targets
+from ttydproxy.cleanup import _format_size, delete_cleanup_targets, list_cleanup_targets, summarize_cleanup_targets
 
 
 def write_file(path, size):
@@ -94,6 +94,30 @@ class TestCleanupTargets(unittest.TestCase):
 
         self.assertEqual(target["path"], "linked-cache")
 
+    def test_warns_when_hapi_home_is_outside_root(self):
+        outside_hapi_home = Path(self.tempdir.name).parent / "external-hapi-home"
+        outside_hapi_home.mkdir(exist_ok=True)
+
+        with patch("builtins.print") as mock_print:
+            targets = list_cleanup_targets(self.root, outside_hapi_home)
+
+        self.assertNotIn("hapi-home", [target["id"] for target in targets])
+        mock_print.assert_called()
+
+
+class TestFormatSize(unittest.TestCase):
+    def test_zero_bytes(self):
+        self.assertEqual(_format_size(0), "0 B")
+
+    def test_1023_bytes(self):
+        self.assertEqual(_format_size(1023), "1023 B")
+
+    def test_exactly_1024_bytes(self):
+        self.assertEqual(_format_size(1024), "1.0 KB")
+
+    def test_one_terabyte(self):
+        self.assertEqual(_format_size(1024 ** 4), "1.0 TB")
+
 
 class TestCleanupDeletion(unittest.TestCase):
     def setUp(self):
@@ -159,6 +183,30 @@ class TestCleanupDeletion(unittest.TestCase):
         self.assertEqual(result["errors"], [])
         self.assertFalse(symlink_path.exists())
         self.assertTrue(real_cache.exists())
+
+    def test_duplicate_ids_are_deleted_once(self):
+        result = delete_cleanup_targets(
+            ["cache-home", "cache-home", "project:project-a", "project:project-a"],
+            self.root,
+            self.hapi_home,
+        )
+
+        self.assertEqual(
+            [item["id"] for item in result["deleted"]],
+            ["cache-home", "project:project-a"],
+        )
+
+    def test_prune_hapi_home_unlinks_symlink_child(self):
+        external_dir = self.root / "external-cache"
+        write_file(external_dir / "cache.bin", 32)
+        symlink_path = self.hapi_home / "linked-cache"
+        symlink_path.symlink_to(external_dir, target_is_directory=True)
+
+        result = delete_cleanup_targets(["hapi-home"], self.root, self.hapi_home)
+
+        self.assertEqual(result["errors"], [])
+        self.assertFalse(symlink_path.exists())
+        self.assertTrue(external_dir.exists())
 
 
 if __name__ == "__main__":
