@@ -7,7 +7,10 @@ from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from server import BaseHTTPHandler as BaseHandler
+from ttydproxy.cleanup import delete_cleanup_targets, list_cleanup_targets, summarize_cleanup_targets
 from ttydproxy.config import (
+    CLEANUP_ROOT,
+    HAPI_HOME,
     PORT,
     TTYD_USER,
     TTYD_PASSWORD,
@@ -45,6 +48,8 @@ ttyd_manager = TTYDManager(
 )
 login_rate_limiter = RateLimiter(max_attempts=5, window_seconds=60)
 account_rate_limiter = RateLimiter(max_attempts=5, window_seconds=300)
+MAX_CLEANUP_DELETE_IDS = 50
+MAX_CLEANUP_TARGET_ID_LENGTH = 128
 
 
 def _get_memory_rss_mb():
@@ -71,6 +76,8 @@ class TTYDProxyHandler(BaseHandler):
             self.handle_login_page()
         elif parsed.path == "/health":
             self.handle_health()
+        elif parsed.path == "/cleanup":
+            self.handle_cleanup_list()
         elif parsed.path == "/terminals":
             self.handle_terminals_list()
         else:
@@ -89,6 +96,8 @@ class TTYDProxyHandler(BaseHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/login":
             self.handle_login()
+        elif parsed.path == "/cleanup/delete":
+            self.handle_cleanup_delete()
         elif parsed.path == "/terminals":
             self.handle_terminals_create()
         else:
@@ -177,6 +186,27 @@ class TTYDProxyHandler(BaseHandler):
         self.send_json(415, {"error": "Unsupported content type"})
         return None
 
+    def _load_json_payload(self):
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length > 1048576:
+            self.send_json(413, {"error": "Request too large"})
+            return None
+        try:
+            raw_data = self.rfile.read(content_length).decode("utf-8")
+        except UnicodeDecodeError:
+            self.send_json(400, {"error": "Invalid encoding"})
+            return None
+
+        content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if content_type != "application/json":
+            self.send_json(415, {"error": "Unsupported content type"})
+            return None
+        try:
+            return json.loads(raw_data or "{}")
+        except json.JSONDecodeError:
+            self.send_json(400, {"error": "Invalid JSON"})
+            return None
+
     def handle_login_page(self):
         extra_headers, csrf_token = self._auth_cookie_headers()
         self.send_html(200, render_login_page(csrf_token), extra_headers=extra_headers)
@@ -201,6 +231,13 @@ class TTYDProxyHandler(BaseHandler):
             return
         self.send_json(200, {"terminals": ttyd_manager.list_terminals()})
 
+    def handle_cleanup_list(self):
+        username = self._check_auth()
+        if not username:
+            return
+        targets = list_cleanup_targets(CLEANUP_ROOT, HAPI_HOME)
+        self.send_json(200, {"targets": targets, "summary": summarize_cleanup_targets(targets)})
+
     def handle_terminals_create(self):
         username = self._check_auth()
         if not username or not self._check_csrf():
@@ -222,6 +259,31 @@ class TTYDProxyHandler(BaseHandler):
             self.send_json(200, {"deleted": terminal_id})
         else:
             self.send_json(404, {"error": f"Terminal {terminal_id} not found"})
+
+    def handle_cleanup_delete(self):
+        username = self._check_auth()
+        if not username or not self._check_csrf():
+            return
+
+        payload = self._load_json_payload()
+        if payload is None:
+            return
+
+        target_ids = payload.get("ids")
+        if not isinstance(target_ids, list) or not target_ids:
+            self.send_json(400, {"error": "ids must be a non-empty array"})
+            return
+        if len(target_ids) > MAX_CLEANUP_DELETE_IDS:
+            self.send_json(400, {"error": f"ids must contain at most {MAX_CLEANUP_DELETE_IDS} items"})
+            return
+        if any(not isinstance(target_id, str) or not target_id for target_id in target_ids):
+            self.send_json(400, {"error": "ids must contain non-empty strings"})
+            return
+        if any(len(target_id) > MAX_CLEANUP_TARGET_ID_LENGTH for target_id in target_ids):
+            self.send_json(400, {"error": f"ids must be at most {MAX_CLEANUP_TARGET_ID_LENGTH} characters long"})
+            return
+
+        self.send_json(200, delete_cleanup_targets(target_ids, CLEANUP_ROOT, HAPI_HOME))
 
     def handle_login(self):
         client_ip = self.client_address[0]
