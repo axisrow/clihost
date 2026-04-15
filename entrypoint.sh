@@ -21,6 +21,7 @@ fi
 
 HAPI_USER="${HAPI_USER:-hapi}"
 HAPI_USER_HOME="/home/${HAPI_USER}"
+: "${CLEANUP_ROOT:=${HAPI_USER_HOME}}"
 : "${HAPI_HOME:=${HAPI_USER_HOME}/.hapi}"
 HAPI_RUN_PATH="/usr/local/bin:/usr/bin:/bin"
 
@@ -82,7 +83,7 @@ PORT="${PORT}" \
 TTYD_USER="${TTYD_USER}" \
 TTYD_PASSWORD="${TTYD_PASSWORD}" \
 PASSWORD_SECRET="${PASSWORD_SECRET}" \
-CLEANUP_ROOT="${HAPI_USER_HOME}" \
+CLEANUP_ROOT="${CLEANUP_ROOT}" \
 HAPI_HOME="${HAPI_HOME}" \
 python3 /app/ttyd_proxy.py &
 

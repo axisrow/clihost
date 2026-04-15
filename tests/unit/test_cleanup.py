@@ -208,6 +208,27 @@ class TestCleanupDeletion(unittest.TestCase):
         self.assertFalse(symlink_path.exists())
         self.assertTrue(external_dir.exists())
 
+    def test_prune_hapi_home_continues_after_child_error(self):
+        good_dir = self.hapi_home / "good-dir"
+        bad_dir = self.hapi_home / "bad-dir"
+        write_file(good_dir / "artifact.bin", 16)
+        write_file(bad_dir / "artifact.bin", 16)
+
+        real_rmtree = shutil.rmtree
+
+        def fake_rmtree(path, *args, **kwargs):
+            if Path(path).name == "bad-dir":
+                raise OSError("permission denied")
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch("ttydproxy.cleanup.shutil.rmtree", side_effect=fake_rmtree):
+            result = delete_cleanup_targets(["hapi-home"], self.root, self.hapi_home)
+
+        self.assertEqual(result["deleted"], [])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertFalse(good_dir.exists())
+        self.assertTrue(bad_dir.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

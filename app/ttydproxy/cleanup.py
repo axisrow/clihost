@@ -8,6 +8,9 @@ PROTECTED_HAPI_NAMES = {
     "runner.state.json",
     "runner.state.json.lock",
     "server.log",
+    # Preserve the live relay/session config during interactive cleanup. The
+    # container entrypoint may remove stale settings on restart, but dashboard
+    # cleanup should avoid breaking the current process mid-session.
     "settings.json",
 }
 
@@ -290,14 +293,20 @@ def _prune_hapi_home(path):
         return False
 
     removed_anything = False
+    errors = []
     for child in path.iterdir():
         if child.name in PROTECTED_HAPI_NAMES:
             continue
-        if child.is_symlink() or child.is_file():
-            child.unlink()
-        else:
-            shutil.rmtree(child)
-        removed_anything = True
+        try:
+            if child.is_symlink() or child.is_file():
+                child.unlink()
+            else:
+                shutil.rmtree(child)
+            removed_anything = True
+        except OSError as exc:
+            errors.append(f"{child.name}: {exc}")
+    if errors:
+        raise OSError("; ".join(errors))
     return removed_anything
 
 
