@@ -237,7 +237,11 @@
       border: 1px dashed #353b47;
       text-align: center;
     }
-    @media (max-width: 720px) {
+    .section.collapsed #refresh-cleanup-btn,
+    .section.collapsed #delete-cleanup-btn {
+      display: none;
+    }
+    @media (max-width: 800px) {
       .menu-container {
         padding: 1.25rem;
       }

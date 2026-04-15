@@ -62,6 +62,13 @@ class TestCleanupAPI(unittest.TestCase):
 
         self.assertEqual(handler.response, (400, {"error": "ids must be a non-empty array"}))
 
+    def test_handle_cleanup_delete_rejects_empty_ids(self):
+        handler = RecordingCleanupHandler()
+        handler._load_json_payload = lambda: {"ids": []}
+        handler.handle_cleanup_delete()
+
+        self.assertEqual(handler.response, (400, {"error": "ids must be a non-empty array"}))
+
     def test_handle_cleanup_delete_rejects_too_many_ids(self):
         handler = RecordingCleanupHandler()
         handler._load_json_payload = lambda: {"ids": [f"id-{index}" for index in range(51)]}
