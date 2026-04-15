@@ -1,8 +1,10 @@
 """Tests for cleanup target discovery and deletion helpers."""
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ttydproxy.cleanup import delete_cleanup_targets, list_cleanup_targets, summarize_cleanup_targets
 
@@ -67,6 +69,31 @@ class TestCleanupTargets(unittest.TestCase):
         self.assertGreater(summary["total_size_bytes"], 0)
         self.assertTrue(summary["total_size_human"])
 
+    def test_size_scan_marks_large_targets_as_approximate(self):
+        write_file(self.root / "project-c" / "file.bin", 16)
+
+        with patch("ttydproxy.cleanup._measure_directory_size", return_value=(16, True)):
+            target = next(
+                item for item in list_cleanup_targets(self.root, self.hapi_home)
+                if item["id"] == "project:project-c"
+            )
+
+        self.assertTrue(target["size_approximate"])
+        self.assertEqual(target["size_human"], "~16 B")
+
+    def test_symlink_target_keeps_original_relative_path(self):
+        real_cache = self.root / "cache_data"
+        write_file(real_cache / "pip" / "cache.bin", 64)
+        symlink_path = self.root / "linked-cache"
+        symlink_path.symlink_to(real_cache, target_is_directory=True)
+
+        target = next(
+            item for item in list_cleanup_targets(self.root, self.hapi_home)
+            if item["id"] == "project:linked-cache"
+        )
+
+        self.assertEqual(target["path"], "linked-cache")
+
 
 class TestCleanupDeletion(unittest.TestCase):
     def setUp(self):
@@ -108,6 +135,30 @@ class TestCleanupDeletion(unittest.TestCase):
         self.assertEqual(result["deleted"], [])
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["skipped"], [{"id": "unknown-target", "reason": "unknown target"}])
+
+    def test_missing_target_returns_already_removed(self):
+        shutil.rmtree(self.root / "project-a")
+
+        result = delete_cleanup_targets(["project:project-a"], self.root, self.hapi_home)
+
+        self.assertEqual(result["deleted"], [])
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(
+            result["skipped"],
+            [{"id": "project:project-a", "label": "project-a/", "reason": "already removed"}],
+        )
+
+    def test_delete_symlink_target_unlinks_symlink_only(self):
+        real_cache = self.root / "cache_data"
+        write_file(real_cache / "pip" / "cache.bin", 64)
+        symlink_path = self.root / "linked-cache"
+        symlink_path.symlink_to(real_cache, target_is_directory=True)
+
+        result = delete_cleanup_targets(["project:linked-cache"], self.root, self.hapi_home)
+
+        self.assertEqual(result["errors"], [])
+        self.assertFalse(symlink_path.exists())
+        self.assertTrue(real_cache.exists())
 
 
 if __name__ == "__main__":

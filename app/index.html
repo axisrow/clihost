@@ -277,10 +277,15 @@
       return match ? match[1] : '';
     }
 
-    function handleAuthError(r) {
+    function handleAuthError(r, options) {
+      options = options || {};
       if (r.status === 419) {
-        var btn = document.getElementById('new-terminal-btn');
-        if (btn) btn.textContent = 'Session expired, reloading...';
+        if (options.onCsrfExpired) {
+          options.onCsrfExpired();
+        } else {
+          var btn = document.getElementById('new-terminal-btn');
+          if (btn) btn.textContent = 'Session expired, reloading...';
+        }
         setTimeout(function() { window.location.reload(); }, 500);
         return true;
       }
@@ -482,7 +487,11 @@
       setCleanupStatus('', false);
       fetch('/cleanup')
         .then(function(r) {
-          if (handleAuthError(r)) return;
+          if (handleAuthError(r, {
+            onCsrfExpired: function() {
+              setCleanupStatus('Session expired, reloading...', true);
+            }
+          })) return;
           return r.json();
         })
         .then(function(data) {
@@ -523,7 +532,11 @@
         body: JSON.stringify({ ids: ids })
       })
         .then(function(r) {
-          if (handleAuthError(r)) return;
+          if (handleAuthError(r, {
+            onCsrfExpired: function() {
+              setCleanupStatus('Session expired, reloading...', true);
+            }
+          })) return;
           return r.json();
         })
         .then(function(data) {
