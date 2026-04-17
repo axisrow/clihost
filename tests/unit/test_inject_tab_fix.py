@@ -86,5 +86,39 @@ class TestInjectTTYDRealistic(unittest.TestCase):
         self.assertIn("</script>", TAB_FIX_SCRIPT)
 
 
+class TestInjectTouchScroll(unittest.TestCase):
+    """Touch scroll is handled inside the iframe so iOS (which doesn't bubble
+    touch events out of iframes) works, and so registration happens after term
+    is ready (fixes #36 race after reconnect)."""
+
+    def test_touch_listeners_present(self):
+        for event_name in ("touchstart", "touchmove", "touchend", "touchcancel"):
+            with self.subTest(event_name=event_name):
+                self.assertIn(f"addEventListener('{event_name}'", TAB_FIX_SCRIPT)
+
+    def test_touchmove_is_non_passive_and_captured(self):
+        section = TAB_FIX_SCRIPT[TAB_FIX_SCRIPT.index("addEventListener('touchmove'"):]
+        self.assertIn("passive: false", section)
+        self.assertIn("capture: true", section)
+
+    def test_touchmove_skips_alternate_screen(self):
+        section = TAB_FIX_SCRIPT[TAB_FIX_SCRIPT.index("addEventListener('touchmove'"):]
+        self.assertIn("isAlternateScreen(term)", section)
+
+    def test_touchmove_calls_term_scroll_lines(self):
+        section = TAB_FIX_SCRIPT[TAB_FIX_SCRIPT.index("addEventListener('touchmove'"):]
+        self.assertIn("term.scrollLines(", section)
+
+    def test_touchend_restores_textarea_focus(self):
+        # Regression guard for commit 79cda5b (iOS keyboard flash fix):
+        # touchend must refocus .xterm-helper-textarea after a swipe so the
+        # soft keyboard reopens on the next tap.
+        section = TAB_FIX_SCRIPT[TAB_FIX_SCRIPT.index("addEventListener('touchend'"):]
+        end = section.index("addEventListener('touchcancel'")
+        touchend_section = section[:end]
+        self.assertIn(".xterm-helper-textarea", touchend_section)
+        self.assertIn(".focus()", touchend_section)
+
+
 if __name__ == "__main__":
     unittest.main()

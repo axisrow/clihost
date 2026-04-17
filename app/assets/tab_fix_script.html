@@ -112,6 +112,52 @@
       term.scrollLines(lines);
       return true;
     };
+
+    var touchActive = false;
+    var touchLastY = 0;
+    var touchRemainder = 0;
+    var TOUCH_LINE_HEIGHT = 24;
+
+    function resetTouch() {
+      touchActive = false;
+      touchLastY = 0;
+      touchRemainder = 0;
+    }
+
+    document.addEventListener('touchstart', function(e) {
+      if (e.touches.length !== 1) { resetTouch(); return; }
+      touchActive = true;
+      touchLastY = e.touches[0].clientY;
+      touchRemainder = 0;
+    }, { capture: true, passive: true });
+
+    document.addEventListener('touchmove', function(e) {
+      if (!touchActive) return;
+      if (e.touches.length !== 1) { resetTouch(); return; }
+      if (isAlternateScreen(term)) return;
+
+      var deltaY = e.touches[0].clientY - touchLastY;
+      if (deltaY === 0) return;
+      touchLastY = e.touches[0].clientY;
+      touchRemainder += deltaY;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      var steps = Math.trunc(touchRemainder / TOUCH_LINE_HEIGHT);
+      if (steps === 0) return;
+      touchRemainder -= steps * TOUCH_LINE_HEIGHT;
+      term.scrollLines(-steps);
+    }, { passive: false, capture: true });
+
+    document.addEventListener('touchend', function() {
+      if (touchActive) {
+        var ta = document.querySelector('.xterm-helper-textarea');
+        if (ta) ta.focus();
+      }
+      resetTouch();
+    }, { capture: true, passive: true });
+    document.addEventListener('touchcancel', resetTouch, { capture: true, passive: true });
   });
 })();
 </script>

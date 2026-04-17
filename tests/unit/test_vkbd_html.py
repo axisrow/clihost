@@ -35,7 +35,6 @@ class TestVKBDEnabled(unittest.TestCase):
         self.assertIn("navigator.clipboard.readText()", self.html)
         self.assertIn("socket.send('0' + data)", self.html)
         self.assertIn("win.sendTabKey", self.html)
-        self.assertIn("win.scrollTerminalLines", self.html)
 
     def test_new_key_sequences(self):
         self.assertIn("String.fromCharCode(127)", self.html)  # backspace
