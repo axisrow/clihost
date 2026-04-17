@@ -71,9 +71,6 @@
 
     document.addEventListener('wheel', function(e) {
       e.preventDefault();
-
-      if (isAlternateScreen(term)) return;
-
       e.stopPropagation();
 
       var lines;
