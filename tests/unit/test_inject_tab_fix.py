@@ -24,15 +24,15 @@ class TestInjectPlainHTML(unittest.TestCase):
         result = inject_tab_fix_script(SIMPLE_HTML).decode("utf-8")
         self.assertLess(result.index("<script>"), result.index("<title>"))
 
-    def test_wheel_handler_scrolls_unconditionally(self):
-        # Wheel handler must always call term.scrollLines — no early return
-        # on alternate screen (#40: tmux mouse mode was the only reason that
-        # early return existed, and it broke native text selection).
+    def test_wheel_handler_skips_alternate_screen(self):
+        # Wheel handler passes through to xterm.js for alternate-screen apps
+        # (less, vim, htop). Since tmux mouse mode is off, native selection
+        # works — the early return no longer conflicts with tmux.
         result = inject_tab_fix_script(SIMPLE_HTML).decode("utf-8")
         wheel_section = result[result.index("addEventListener('wheel'"):result.index("term.scrollLines(lines);")]
         self.assertIn("e.preventDefault()", wheel_section)
         self.assertIn("e.stopPropagation()", wheel_section)
-        self.assertNotIn("if (isAlternateScreen(term)) return", wheel_section)
+        self.assertIn("if (isAlternateScreen(term)) return", wheel_section)
 
     def test_terminal_scroll_helpers_in_output(self):
         result = inject_tab_fix_script(SIMPLE_HTML).decode("utf-8")

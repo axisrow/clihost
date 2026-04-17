@@ -8,14 +8,14 @@ class TestScrollFixOrder(unittest.TestCase):
     def setUp(self):
         self.script = TAB_FIX_SCRIPT
 
-    def test_wheel_always_scrolls_buffer(self):
+    def test_wheel_skips_alternate_screen(self):
         wheel_start = self.script.index("addEventListener('wheel'")
         wheel_end = self.script.index("{ passive: false, capture: true });", wheel_start)
         wheel_section = self.script[wheel_start:wheel_end]
-        # Wheel handler must not early-return on alternate screen — doing so
-        # sent events to tmux which required `set -g mouse on` and broke
-        # native text selection (#40).
-        self.assertNotIn("if (isAlternateScreen(term)) return", wheel_section)
+        # Wheel handler must pass through to xterm.js for alternate-screen
+        # apps (less, vim, htop) so they receive scroll events. Tmux mouse
+        # mode is off, so native text selection works regardless.
+        self.assertIn("if (isAlternateScreen(term)) return", wheel_section)
 
     def test_wheel_prevent_default_and_stop_propagation(self):
         wheel_section_end = self.script.index("term.scrollLines(lines);")
