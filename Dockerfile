@@ -34,8 +34,11 @@ ENV LANG=en_US.UTF-8 \
     LC_CTYPE=en_US.UTF-8 \
     CLAUDE_CONFIG_DIR=/home/hapi/.claude
 
+# Invalidate layer when npm itself has a new release
+ADD https://registry.npmjs.org/npm/latest /tmp/npm-latest.json
 # Update npm to latest version with retry
-RUN for i in 1 2 3 4 5; do npm install -g npm@latest && break || sleep 10; done
+RUN for i in 1 2 3 4 5; do npm install -g npm@latest && break || sleep 10; done && \
+    rm -f /tmp/npm-latest.json
 
 # Install TTYD (multi-architecture support)
 RUN TTYD_VERSION="1.7.7" && \
@@ -46,7 +49,7 @@ RUN TTYD_VERSION="1.7.7" && \
     -o /usr/local/bin/ttyd && \
     chmod +x /usr/local/bin/ttyd
 
-# Invalidate cache when npm package versions change
+# Invalidate cache when npm package versions change (used by build.sh for local builds)
 ARG NPM_VERSIONS_HASH=default
 
 # Create user and group for running hapi
@@ -54,6 +57,17 @@ RUN groupadd -r hapi && useradd -r -g hapi -s /bin/bash hapi && mkdir -p /home/h
 RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
     echo 'export LANG=en_US.UTF-8' >> /home/hapi/.bashrc && \
     echo 'export LC_ALL=en_US.UTF-8' >> /home/hapi/.bashrc
+
+# Invalidate the CLI install layer when any package publishes a new version.
+# Docker refetches these URLs every build; the manifest JSON changes only when
+# the package's latest version changes, so the cache survives unchanged packages.
+# Keep in sync with cli-packages.txt.
+ADD https://registry.npmjs.org/@anthropic-ai/claude-code/latest /tmp/npm-manifests/claude-code.json
+ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-manifests/codex.json
+ADD https://registry.npmjs.org/@google/gemini-cli/latest /tmp/npm-manifests/gemini-cli.json
+ADD https://registry.npmjs.org/@github/copilot/latest /tmp/npm-manifests/copilot.json
+ADD https://registry.npmjs.org/opencode-ai/latest /tmp/npm-manifests/opencode-ai.json
+ADD https://registry.npmjs.org/@twsxtd/hapi/latest /tmp/npm-manifests/hapi.json
 
 COPY cli-packages.txt /tmp/cli-packages.txt
 
