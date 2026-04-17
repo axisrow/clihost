@@ -109,6 +109,16 @@ class TestInjectTouchScroll(unittest.TestCase):
         section = TAB_FIX_SCRIPT[TAB_FIX_SCRIPT.index("addEventListener('touchmove'"):]
         self.assertIn("term.scrollLines(", section)
 
+    def test_touchend_restores_textarea_focus(self):
+        # Regression guard for commit 79cda5b (iOS keyboard flash fix):
+        # touchend must refocus .xterm-helper-textarea after a swipe so the
+        # soft keyboard reopens on the next tap.
+        section = TAB_FIX_SCRIPT[TAB_FIX_SCRIPT.index("addEventListener('touchend'"):]
+        end = section.index("addEventListener('touchcancel'")
+        touchend_section = section[:end]
+        self.assertIn(".xterm-helper-textarea", touchend_section)
+        self.assertIn(".focus()", touchend_section)
+
 
 if __name__ == "__main__":
     unittest.main()

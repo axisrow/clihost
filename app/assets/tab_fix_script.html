@@ -150,7 +150,13 @@
       term.scrollLines(-steps);
     }, { passive: false, capture: true });
 
-    document.addEventListener('touchend', resetTouch, { capture: true, passive: true });
+    document.addEventListener('touchend', function() {
+      if (touchActive) {
+        var ta = document.querySelector('.xterm-helper-textarea');
+        if (ta) ta.focus();
+      }
+      resetTouch();
+    }, { capture: true, passive: true });
     document.addEventListener('touchcancel', resetTouch, { capture: true, passive: true });
   });
 })();
