@@ -70,10 +70,8 @@
     }, true);
 
     document.addEventListener('wheel', function(e) {
-      e.preventDefault();
-
       if (isAlternateScreen(term)) return;
-
+      e.preventDefault();
       e.stopPropagation();
 
       var lines;

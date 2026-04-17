@@ -8,19 +8,20 @@ class TestScrollFixOrder(unittest.TestCase):
     def setUp(self):
         self.script = TAB_FIX_SCRIPT
 
-    def test_wheel_prevent_default_before_alt_check(self):
-        wheel_section = self.script[self.script.index("addEventListener('wheel'"):]
-        self.assertLess(
-            wheel_section.index("e.preventDefault()"),
-            wheel_section.index("if (isAlternateScreen(term)) return"),
-        )
+    def test_wheel_skips_alternate_screen(self):
+        wheel_start = self.script.index("addEventListener('wheel'")
+        wheel_end = self.script.index("{ passive: false, capture: true });", wheel_start)
+        wheel_section = self.script[wheel_start:wheel_end]
+        # Wheel handler must pass through to xterm.js for alternate-screen
+        # apps (less, vim, htop) so they receive scroll events. Tmux mouse
+        # mode is off, so native text selection works regardless.
+        self.assertIn("if (isAlternateScreen(term)) return", wheel_section)
 
-    def test_wheel_stop_propagation_after_alt_check(self):
-        wheel_section = self.script[self.script.index("addEventListener('wheel'"):]
-        self.assertGreater(
-            wheel_section.index("e.stopPropagation()"),
-            wheel_section.index("if (isAlternateScreen(term)) return"),
-        )
+    def test_wheel_prevent_default_and_stop_propagation(self):
+        wheel_section_end = self.script.index("term.scrollLines(lines);")
+        wheel_section = self.script[self.script.index("addEventListener('wheel'"):wheel_section_end]
+        self.assertIn("e.preventDefault()", wheel_section)
+        self.assertIn("e.stopPropagation()", wheel_section)
 
     def test_wheel_listener_options(self):
         wheel_section = self.script[self.script.index("addEventListener('wheel'"):]
