@@ -67,6 +67,23 @@ class BaseHTTPHandler(BaseHTTPRequestHandler):
             extra_headers=headers,
         )
 
+    def send_binary(
+        self,
+        status,
+        body,
+        content_type,
+        cache_control="public, max-age=604800",
+        extra_headers=None,
+    ):
+        """Send a binary asset response."""
+        self._write_response(
+            status,
+            body,
+            content_type,
+            cache_control,
+            extra_headers=extra_headers,
+        )
+
 
 class BaseJSONServer:
     """Base HTTP server class."""

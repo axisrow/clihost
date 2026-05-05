@@ -42,6 +42,18 @@ class TestSendHTML(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertEqual(headers["Cache-Control"], "no-cache")
 
+    def test_send_binary_includes_common_headers(self):
+        handler = RecordingHandler()
+        handler.send_binary(200, b"asset", "image/png")
+
+        headers = dict(handler.headers_sent)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertEqual(headers["Cache-Control"], "public, max-age=604800")
+        self.assertEqual(handler.wfile.getvalue(), b"asset")
+        for key, value in COMMON_SECURITY_HEADERS.items():
+            self.assertEqual(headers[key], value)
+
 
 if __name__ == "__main__":
     unittest.main()

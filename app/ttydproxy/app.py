@@ -7,6 +7,7 @@ from http.server import ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from server import BaseHTTPHandler as BaseHandler
+from ttydproxy import assets
 from ttydproxy.cleanup import delete_cleanup_targets, list_cleanup_targets, summarize_cleanup_targets
 from ttydproxy.config import (
     CLEANUP_ROOT,
@@ -50,6 +51,12 @@ login_rate_limiter = RateLimiter(max_attempts=5, window_seconds=60)
 account_rate_limiter = RateLimiter(max_attempts=5, window_seconds=300)
 MAX_CLEANUP_DELETE_IDS = 50
 MAX_CLEANUP_TARGET_ID_LENGTH = 128
+FAVICON_ROUTES = {
+    "/favicon.ico": ("image/x-icon", assets.FAVICON_ICO),
+    "/favicon-16x16.png": ("image/png", assets.FAVICON_16_PNG),
+    "/favicon-32x32.png": ("image/png", assets.FAVICON_32_PNG),
+    "/apple-touch-icon.png": ("image/png", assets.APPLE_TOUCH_ICON_PNG),
+}
 
 
 def _get_memory_rss_mb():
@@ -72,6 +79,8 @@ class TTYDProxyHandler(BaseHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self.handle_menu()
+        elif parsed.path in FAVICON_ROUTES:
+            self.handle_favicon(parsed.path)
         elif parsed.path == "/login":
             self.handle_login_page()
         elif parsed.path == "/health":
@@ -210,6 +219,11 @@ class TTYDProxyHandler(BaseHandler):
     def handle_login_page(self):
         extra_headers, csrf_token = self._auth_cookie_headers()
         self.send_html(200, render_login_page(csrf_token), extra_headers=extra_headers)
+
+    def handle_favicon(self, path):
+        """Serve fixed favicon assets without requiring authentication."""
+        content_type, body = FAVICON_ROUTES[path]
+        self.send_binary(200, body, content_type)
 
     def handle_health(self):
         terminals = ttyd_manager.list_terminals()
