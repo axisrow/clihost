@@ -41,10 +41,11 @@ def build_ttyd_headers(handler, port):
     return headers
 
 
-def inject_tab_fix_script(data, is_gzipped=False):
+def inject_tab_fix_script(data):
     """Inject the Tab fix script into ttyd HTML responses."""
     try:
-        if is_gzipped or (len(data) >= 2 and data[0:2] == b"\x1f\x8b"):
+        is_gzipped = False
+        if len(data) >= 2 and data[0:2] == b"\x1f\x8b":
             try:
                 data = gzip.decompress(data)
                 is_gzipped = True

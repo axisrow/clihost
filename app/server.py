@@ -4,7 +4,7 @@ Base HTTP Server
 Provides common HTTP server functionality
 """
 import json
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler
 
 
 COMMON_SECURITY_HEADERS = {
@@ -83,26 +83,3 @@ class BaseHTTPHandler(BaseHTTPRequestHandler):
             cache_control,
             extra_headers=extra_headers,
         )
-
-
-class BaseJSONServer:
-    """Base HTTP server class."""
-
-    def __init__(self, port, handler_class):
-        self.port = port
-        self.handler_class = handler_class
-        self.httpd = None
-
-    def start(self):
-        """Start the HTTP server."""
-        server_address = ("0.0.0.0", self.port)
-        self.httpd = ThreadingHTTPServer(server_address, self.handler_class)
-        self.httpd.daemon_threads = True  # don't block shutdown on open connections
-        print(f"HTTP server listening on port {self.port}")
-        self.httpd.serve_forever()
-
-
-def create_server(port, handler_class):
-    """Factory function to create and start HTTP server."""
-    server = BaseJSONServer(port, handler_class)
-    server.start()
