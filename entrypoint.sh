@@ -83,7 +83,7 @@ if [ "${HERMES_AUTO_UPDATE:-true}" != "false" ] && command -v hermes &>/dev/null
   HERMES_UPDATE_DIR=$(mktemp -d) && \
   git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$HERMES_UPDATE_DIR" && \
   cd "$HERMES_UPDATE_DIR" && \
-  pip install --break-system-packages '.[all]' && \
+  pip install --break-system-packages '.[all,messaging]' && \
   cd / && \
   rm -rf "$HERMES_UPDATE_DIR" && \
   echo "Hermes Agent updated" || echo "Hermes Agent update failed, using installed version"
