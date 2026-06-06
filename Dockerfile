@@ -79,6 +79,13 @@ RUN for i in 1 2 3 4 5; do \
     npm cache clean --force && \
     rm -rf /tmp/*
 
+# Install Hermes Agent (Nous Research) — git clone + pip, no venv/uv
+RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
+    cd /tmp/hermes-agent && \
+    pip install --break-system-packages '.[all]' && \
+    which hermes && \
+    rm -rf /tmp/hermes-agent
+
 # Create app directory for TTYD proxy
 RUN mkdir -p /app /bin
 
