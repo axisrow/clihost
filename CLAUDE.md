@@ -72,17 +72,17 @@ hapi Client → HTTP API (HAPI_PORT) → hapi runner
 
 ### ttyd proxy package (app/)
 
-`app/ttyd_proxy.py` is only a **backward-compatible shim**; all logic lives in the `app/ttydproxy/` package:
+`app/ttyd_proxy.py` is only a **thin process entry point** (imports `main` from `ttydproxy.app`; referenced by entrypoint.sh as `python3 /app/ttyd_proxy.py`); all logic lives in the `app/ttydproxy/` package:
 
 - `config.py` — env-based configuration constants and `TTYD_ROUTE_PATTERN`
 - `security.py` — HMAC session/CSRF tokens, PAM/shadow password check, `env_bool`, username validation
 - `manager.py` — `TTYDManager`: spawn/kill ttyd processes, port allocation from TTYD_BASE_PORT (7681), dead-process reaping, tmux session cleanup
 - `proxy.py` — HTTP/WebSocket proxying to ttyd, gzip-aware HTML injection (`inject_tab_fix_script`)
 - `ratelimit.py` — in-memory `RateLimiter`
-- `views.py` — render login/menu/terminal pages from templates
+- `views.py` — render login/menu/terminal pages from templates (`render_template`; shared favicon `<link>` block injected via the `{{FAVICON}}` placeholder from `FAVICON_LINKS`)
 - `cleanup.py` — disk cleanup targets listing/deletion for the dashboard
 - `assets.py` — loads static assets from `app/assets/` **at import time** into module constants (editing an asset requires proxy restart)
-- `app.py` — `TTYDProxyHandler` routing + `main()` (creates the first terminal, installs SIGTERM/SIGINT handlers that kill all terminals)
+- `app.py` — `TTYDProxyHandler` routing + `main()` (creates the first terminal, installs SIGTERM/SIGINT handlers that kill all terminals). `_read_request_body` returns 400/413 on invalid or oversized Content-Length; CSRF double-submit comparison is timing-safe (`hmac.compare_digest`)
 
 `app/server.py` — shared `BaseHTTPHandler` (JSON/HTML/binary responses, silent logging, security headers). Server is `ThreadingHTTPServer` (one thread per request) — never switch to plain `HTTPServer`, slow WebSocket connections would block everything.
 
