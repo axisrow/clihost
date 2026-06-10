@@ -25,6 +25,7 @@ HOP_BY_HOP_HEADERS = {
 
 TUNNEL_RECV_SIZE = 8192
 TUNNEL_MAX_PENDING = 1048576  # 1 MiB per direction before backpressure kicks in
+TUNNEL_SELECT_TIMEOUT = 60
 
 
 def is_websocket_request(handler):
@@ -114,8 +115,16 @@ def tunnel_sockets(handler, upstream):
             if not read_set and not write_set:
                 return
 
-            readable, writable, _ = select.select(read_set, write_set, [], 60)
+            readable, writable, _ = select.select(
+                read_set, write_set, [], TUNNEL_SELECT_TIMEOUT
+            )
             if not readable and not writable:
+                if write_set:
+                    # A peer with pending data was unwritable for the whole
+                    # timeout: it vanished without a FIN (crashed client,
+                    # network partition). Bail out instead of spinning until
+                    # the OS TCP keepalive notices, hours later.
+                    return
                 continue
 
             for sock in writable:

@@ -146,6 +146,26 @@ class TunnelSocketsTest(unittest.TestCase):
         self.assertEqual(received, payload)
         self.join_tunnel()
 
+    def test_stalled_peer_does_not_leak_tunnel_thread(self):
+        # Regression test: a client that vanishes without a FIN (crash,
+        # network partition) used to pin the tunnel thread forever — every
+        # select() timed out and the drain loop just continued.
+        original_timeout = proxy.TUNNEL_SELECT_TIMEOUT
+        proxy.TUNNEL_SELECT_TIMEOUT = 0.2
+        self.addCleanup(setattr, proxy, "TUNNEL_SELECT_TIMEOUT", original_timeout)
+
+        self.client_inner.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        self.client_outer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        self.start_tunnel()
+
+        # Fill the client's kernel buffer and the tunnel's pending buffer,
+        # then EOF upstream to enter drain mode. The client never reads, so
+        # its socket never becomes writable again.
+        self.upstream_outer.sendall(b"w" * 65536)
+        self.upstream_outer.shutdown(socket.SHUT_WR)
+
+        self.join_tunnel()
+
     def test_backpressure_caps_buffering(self):
         original_cap = proxy.TUNNEL_MAX_PENDING
         proxy.TUNNEL_MAX_PENDING = 16384
