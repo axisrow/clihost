@@ -41,5 +41,21 @@ class TestScrollFixOrder(unittest.TestCase):
         self.assertIn("</script>", self.script)
 
 
+class TestWaitForTermTimeout(unittest.TestCase):
+    """waitForTerm must stop polling if window.term never appears."""
+
+    def setUp(self):
+        start = TAB_FIX_SCRIPT.index("function waitForTerm")
+        end = TAB_FIX_SCRIPT.index("}", TAB_FIX_SCRIPT.index("}, 50);", start))
+        self.section = TAB_FIX_SCRIPT[start:end]
+
+    def test_has_attempt_counter(self):
+        self.assertIn("attempts", self.section)
+
+    def test_clears_interval_on_timeout(self):
+        # Two clearInterval calls: one on success, one when giving up.
+        self.assertEqual(self.section.count("clearInterval(i)"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

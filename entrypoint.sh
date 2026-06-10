@@ -69,7 +69,10 @@ ssh-keygen -A >/dev/null 2>&1 || true
 
 # Configure root SSH access if ROOT_PASSWORD is set
 if [ -n "${ROOT_PASSWORD}" ]; then
-  echo "root:${ROOT_PASSWORD}" | chpasswd
+  # Heredoc keeps the password out of every process cmdline (/proc/<pid>/cmdline)
+  chpasswd <<EOF
+root:${ROOT_PASSWORD}
+EOF
   sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
   echo "Root SSH access enabled"
@@ -96,12 +99,17 @@ if [ "${HERMES_AUTO_UPDATE:-true}" != "false" ] && command -v hermes &>/dev/null
   fi
 fi
 
-# Start TTYD HTTP proxy (manages TTYD processes dynamically)
+# Start TTYD HTTP proxy (manages TTYD processes dynamically).
+# The secret goes through a root-only file (Docker *_FILE convention) so it
+# never appears in the proxy's /proc/<pid>/environ.
+PROXY_SECRET_FILE="/run/ttyd-proxy.secret"
+install -m 600 /dev/null "${PROXY_SECRET_FILE}"
+printf '%s' "${PASSWORD_SECRET}" > "${PROXY_SECRET_FILE}"
 echo "Starting TTYD HTTP proxy on port ${PORT}"
 PORT="${PORT}" \
 TTYD_USER="${TTYD_USER}" \
 TTYD_PASSWORD="${TTYD_PASSWORD}" \
-PASSWORD_SECRET="${PASSWORD_SECRET}" \
+PASSWORD_SECRET_FILE="${PROXY_SECRET_FILE}" \
 CLEANUP_ROOT="${CLEANUP_ROOT}" \
 HAPI_HOME="${HAPI_HOME}" \
 python3 /app/ttyd_proxy.py &
@@ -109,6 +117,9 @@ python3 /app/ttyd_proxy.py &
 # Start hapi server with relay in background (logs to file, force TCP relay)
 HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
 ensure_dir_owned "${HAPI_HOME}"
+# Pre-create the log so the URL-extraction loop's -f check passes immediately
+touch "${HAPI_SERVER_LOG}"
+chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_SERVER_LOG}"
 echo "Starting hapi server --relay in background (logs: ${HAPI_SERVER_LOG})..."
 run_as_hapi "HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay 2>&1 | tee \"${HAPI_SERVER_LOG}\"" &
 HAPI_SERVER_PID=$!

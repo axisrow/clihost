@@ -47,6 +47,17 @@ class TestCreateTerminal(unittest.TestCase):
         manager = TTYDManager(base_port=9000)
         self.assertIsNone(manager.create_terminal())
 
+    @patch("ttydproxy.manager.subprocess.Popen")
+    def test_failed_terminal_id_is_not_reused(self, mock_popen):
+        mock_proc = MagicMock()
+        mock_proc.pid = 100
+        mock_popen.side_effect = [OSError("No such file"), mock_proc]
+
+        manager = TTYDManager(base_port=9000)
+        self.assertIsNone(manager.create_terminal())
+        # The ID consumed by the failed attempt must never be handed out again.
+        self.assertEqual(manager.create_terminal()["id"], 2)
+
 
 class TestDeleteTerminal(unittest.TestCase):
     @patch("ttydproxy.manager.subprocess.run")

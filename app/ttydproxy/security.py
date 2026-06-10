@@ -2,8 +2,10 @@
 import base64
 import hashlib
 import hmac
+import os
 import secrets
 import subprocess
+import sys
 import time
 import re
 import pwd
@@ -22,6 +24,40 @@ def env_bool(value, default=False):
     if value in ("0", "false", "no", "off"):
         return False
     return default
+
+
+def env_int(value, default, name=None):
+    """Parse an integer env var value, falling back to default on garbage."""
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        label = name or "env var"
+        print(
+            f"Invalid integer for {label}: {value!r}, using default {default}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return default
+
+
+def env_secret(name, default):
+    """Resolve a secret env var, honoring the Docker *_FILE convention."""
+    path = os.environ.get(f"{name}_FILE")
+    if path:
+        try:
+            with open(path) as secret_file:
+                value = secret_file.read().strip()
+            if value:
+                return value
+        except OSError as exc:
+            print(
+                f"Cannot read {name}_FILE={path}: {exc}, falling back",
+                file=sys.stderr,
+                flush=True,
+            )
+    return os.environ.get(name) or default
 
 
 def parse_cookie_header(cookie_header):

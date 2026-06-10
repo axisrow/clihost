@@ -111,6 +111,9 @@ class TTYDManager:
             port = self._allocate_port()
             if port is None:
                 return "limit"
+            # Consume the ID before starting the process: a failed start must
+            # not let the next terminal reuse the same ID.
+            self.next_id += 1
             try:
                 process = self._start_ttyd_process(terminal_id, port)
             except OSError as exc:
@@ -119,7 +122,6 @@ class TTYDManager:
 
             info = {"id": terminal_id, "port": port, "pid": process.pid, "process": process}
             self.terminals[terminal_id] = info
-            self.next_id += 1
 
         if wait and not self._wait_for_ready(port):
             self.delete_terminal(terminal_id)

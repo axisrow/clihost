@@ -21,8 +21,10 @@
 
   function waitForTerm(cb) {
     if (window.term) { cb(window.term); return; }
+    var attempts = 0;
     var i = setInterval(function() {
       if (window.term) { clearInterval(i); cb(window.term); }
+      else if (++attempts > 600) { clearInterval(i); console.warn('ttyd term not found after 30s, giving up'); }
     }, 50);
   }
 

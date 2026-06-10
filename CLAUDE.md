@@ -119,6 +119,7 @@ Terminal list and controls are built **dynamically in JavaScript**, not static H
 - `TTYD_USER` — terminal user (default: hapi)
 - `TTYD_PASSWORD` — optional global password (if not set, system passwords via PAM/shadow)
 - `PASSWORD_SECRET` — secret for HMAC signatures (entrypoint generates a random one if unset; set explicitly to persist sessions across restarts)
+- `PASSWORD_SECRET_FILE` — path to a file containing the secret (Docker secrets convention, takes precedence over `PASSWORD_SECRET`; entrypoint hands the secret to the proxy via root-only `/run/ttyd-proxy.secret` so it never appears in the proxy's environment)
 - `ROOT_PASSWORD` — optional root SSH password
 - `VIRTUAL_KEYBOARD` — mobile virtual keyboard (default: true)
 - `SESSION_TIMEOUT` — session token lifetime, seconds (default: 604800 = 1 week)
