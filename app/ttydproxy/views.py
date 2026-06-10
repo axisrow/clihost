@@ -11,6 +11,16 @@ from ttydproxy.security import env_bool
 APP_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_DIR = APP_ROOT
 
+FAVICON_LINKS = "\n  ".join((
+    '<link rel="icon" href="/favicon.ico" sizes="any">',
+    '<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">',
+    '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">',
+    '<link rel="apple-touch-icon" href="/apple-touch-icon.png">',
+))
+
+# Placeholders substituted into every rendered page.
+BASE_REPLACEMENTS = {"{{FAVICON}}": FAVICON_LINKS}
+
 
 @lru_cache(maxsize=None)
 def load_template(filename):
@@ -23,9 +33,13 @@ def load_template(filename):
 
 
 def render_template(filename, replacements):
-    """Render a template using plain placeholder replacement."""
+    """Render a template using plain placeholder replacement.
+
+    Base replacements shared by every page (e.g. the favicon links) are applied
+    automatically; callers only pass page-specific values.
+    """
     content = load_template(filename)
-    for key, value in replacements.items():
+    for key, value in {**BASE_REPLACEMENTS, **replacements}.items():
         content = content.replace(key, value)
     return content
 

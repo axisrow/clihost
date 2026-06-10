@@ -63,19 +63,22 @@ hapi Client → HTTP API (HAPI_PORT) → hapi Runner
 
 ### Key Components
 
-**app/server.py** - Base HTTP server with common utilities (JSON/HTML responses, silent logging, security headers)
+**app/server.py** - Base HTTP server with common utilities (JSON/HTML/binary responses, silent logging, security headers via `BaseHTTPHandler`)
 
-**app/ttyd_proxy.py** - TTYD reverse proxy (`ThreadingHTTPServer`) with:
-- Cookie-based HMAC-signed session authentication
-- PAM/shadow password verification (or global password via TTYD_PASSWORD)
-- WebSocket tunneling to TTYD process
-- Rate limiting (5 attempts per 60s per IP, 5 per 300s per account)
-- CSRF double-submit token protection
-- Username validation (alphanumeric, max 32 chars) and command injection prevention
-- `env_bool()` utility for parsing boolean environment variables (used for feature toggles like VIRTUAL_KEYBOARD, SECURE_COOKIES)
-- Routes: `/` (dashboard/menu), `/login` (login form), `/health` (health check), `/ttyd` (terminal), `/ttyd/*` (WebSocket proxy)
+**app/ttyd_proxy.py** - Thin process entry point referenced by `entrypoint.sh` (`python3 /app/ttyd_proxy.py`). Imports `main` from `ttydproxy.app` and runs it. All logic lives in the `ttydproxy` package below.
 
-**app/index.html, app/login.html** - HTML templates with variable substitution (`{{USERNAME}}`, `{{CSRF_TOKEN}}`, `{{HAPI_LINK}}`). Values are escaped via `html.escape()` to prevent XSS.
+**app/ttydproxy/** - The TTYD reverse proxy package (`ThreadingHTTPServer`):
+- `app.py` - `TTYDProxyHandler` (request routing + handlers) and `main()` (process wiring, signal handling). Routes: `/` (dashboard/menu), `/login` (login form), `/health`, `/favicon.ico` & friends (unauthenticated static assets), `/cleanup`, `/terminals`, `/ttyd{N}` (terminal page), `/ttyd{N}/*` (HTTP/WebSocket proxy)
+- `security.py` - HMAC-signed session/CSRF tokens, cookie parsing, `is_valid_username`, PAM/shadow password verification, `env_bool()` (boolean env vars like VIRTUAL_KEYBOARD, SECURE_COOKIES)
+- `manager.py` - `TTYDManager`: lifecycle of ttyd child processes, port allocation, tmux sessions
+- `proxy.py` - upstream HTTP/WebSocket proxying and `inject_tab_fix_script()` HTML injection
+- `ratelimit.py` - `RateLimiter` (5 attempts per 60s per IP, 5 per 300s per account)
+- `cleanup.py` - allowlisted cleanup target discovery and safe deletion
+- `views.py` - HTML template rendering (`render_template`, `FAVICON_LINKS`) with XSS escaping
+- `config.py` - runtime configuration from environment variables
+- `assets.py` - cached loading of static asset files (HTML/CSS partials, favicon bytes)
+
+**app/index.html, app/login.html, app/terminal.html** - HTML templates with variable substitution (`{{USERNAME}}`, `{{CSRF_TOKEN}}`, `{{HAPI_LINK}}`, `{{FAVICON}}`, etc.). Values are escaped via `html.escape()` to prevent XSS. The shared favicon `<link>` block is injected via the `{{FAVICON}}` placeholder from `views.FAVICON_LINKS`.
 
 **Dashboard UI (app/index.html)** - Terminal list and controls are built dynamically in JavaScript (not static HTML), so searching for button text in HTML will not find them. Key UI elements:
 - **Terminal row** (`terminal-row` class): each active ttyd instance gets a row with an open link + close button
@@ -130,9 +133,9 @@ The TTYD module provides secure web terminal access. Key implementation details:
 
 ### Tab Key Fix
 
-The proxy injects a JavaScript fix into TTYD HTML to enable Tab key for shell completion. Technical notes:
+The proxy injects a JavaScript fix into TTYD HTML to enable Tab key for shell completion. Implemented in `app/ttydproxy/proxy.py` (`inject_tab_fix_script()`); the injected script itself lives in `app/assets/tab_fix_script.html` and is loaded as `TAB_FIX_SCRIPT` in `app/ttydproxy/assets.py`. Technical notes:
 
-- **Gzip handling**: TTYD returns gzip-compressed HTML. The `inject_tab_fix_script()` function decompresses before injection and re-compresses after.
+- **Gzip handling**: TTYD returns gzip-compressed HTML. The `inject_tab_fix_script()` function decompresses before injection and re-compresses after (gzip is detected from the response's magic bytes).
 - **WebSocket capture**: The injected script intercepts `window.WebSocket` constructor to capture the TTYD socket. The socket reference must be stored in `window._ttydSocket` (global), not as a local variable inside IIFE.
 - **Tab sending**: Uses TTYD protocol prefix `'0'` (INPUT command) + tab character (`\t`) via WebSocket.
 - **Shell requirement**: Tab completion only works in shells that support it (bash). Default `/bin/sh` (dash) does not have completion.

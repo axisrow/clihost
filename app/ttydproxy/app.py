@@ -1,4 +1,5 @@
 """HTTP handler and process wiring for the ttyd proxy application."""
+import hmac
 import json
 import sys
 import signal
@@ -129,9 +130,12 @@ class TTYDProxyHandler(BaseHandler):
             "Set-Cookie": f"csrf_token={csrf_token}; Path=/; SameSite=Lax;{self._secure_flag()}",
         }, csrf_token
 
+    def _cookie(self, name):
+        """Return a single cookie value from the request, or '' if absent."""
+        return parse_cookie_header(self.headers.get("Cookie", "")).get(name, "")
+
     def _session_username(self):
-        cookies = parse_cookie_header(self.headers.get("Cookie", ""))
-        token = cookies.get("ttyd_session")
+        token = self._cookie("ttyd_session")
         return parse_session_token(token, PASSWORD_SECRET)
 
     def _check_auth(self, redirect=False):
@@ -149,32 +153,62 @@ class TTYDProxyHandler(BaseHandler):
             return None
         return username
 
-    def _check_csrf(self):
-        csrf_header = self.headers.get("X-CSRF-Token", "")
-        csrf_cookie = parse_cookie_header(self.headers.get("Cookie", "")).get("csrf_token", "")
-        if not csrf_header or not csrf_cookie:
-            self.send_json(419, {"error": "CSRF token missing — please refresh the page"})
+    def _check_csrf(
+        self,
+        payload=None,
+        status=419,
+        missing_error="CSRF token missing — please refresh the page",
+        invalid_error="CSRF token expired — please refresh the page",
+    ):
+        """Validate the CSRF double-submit token.
+
+        Uses the X-CSRF-Token header, falling back to the request payload's
+        ``csrf_token`` field when ``payload`` is provided (form login). The
+        status code and error messages are parameters so the login flow can
+        return 403 with its own wording while API routes return 419.
+        """
+        provided_token = (
+            self.headers.get("X-CSRF-Token", "") or (payload or {}).get("csrf_token", "")
+        ).strip()
+        csrf_cookie = self._cookie("csrf_token")
+        if not provided_token or not csrf_cookie:
+            self.send_json(status, {"error": missing_error})
             return False
-        if csrf_header != csrf_cookie or not parse_csrf_token(csrf_header, PASSWORD_SECRET, CSRF_TOKEN_TTL):
-            self.send_json(419, {"error": "CSRF token expired — please refresh the page"})
+        if not hmac.compare_digest(provided_token, csrf_cookie) or not parse_csrf_token(
+            provided_token, PASSWORD_SECRET, CSRF_TOKEN_TTL
+        ):
+            self.send_json(status, {"error": invalid_error})
             return False
         return True
 
-    def _load_login_payload(self):
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length > 1048576:
+    def _read_request_body(self):
+        """Read and UTF-8 decode the request body. Returns text or None on error."""
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self.send_json(400, {"error": "Invalid Content-Length"})
+            return None
+        if content_length < 0 or content_length > 1048576:
             self.send_json(413, {"error": "Request too large"})
             return None
         try:
-            post_data = self.rfile.read(content_length).decode("utf-8")
+            return self.rfile.read(content_length).decode("utf-8")
         except UnicodeDecodeError:
             self.send_json(400, {"error": "Invalid encoding"})
             return None
 
-        content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    def _content_type(self):
+        return self.headers.get_content_type()
+
+    def _load_login_payload(self):
+        raw_data = self._read_request_body()
+        if raw_data is None:
+            return None
+
+        content_type = self._content_type()
         if content_type == "application/json":
             try:
-                data = json.loads(post_data)
+                data = json.loads(raw_data or "{}")
             except json.JSONDecodeError:
                 self.send_json(400, {"error": "Invalid JSON"})
                 return None
@@ -185,7 +219,7 @@ class TTYDProxyHandler(BaseHandler):
             }
 
         if content_type == "application/x-www-form-urlencoded":
-            form = parse_qs(post_data, keep_blank_values=True)
+            form = parse_qs(raw_data, keep_blank_values=True)
             return {
                 "username": (form.get("username", [""])[0]).strip(),
                 "password": form.get("password", [""])[0],
@@ -196,18 +230,10 @@ class TTYDProxyHandler(BaseHandler):
         return None
 
     def _load_json_payload(self):
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length > 1048576:
-            self.send_json(413, {"error": "Request too large"})
+        raw_data = self._read_request_body()
+        if raw_data is None:
             return None
-        try:
-            raw_data = self.rfile.read(content_length).decode("utf-8")
-        except UnicodeDecodeError:
-            self.send_json(400, {"error": "Invalid encoding"})
-            return None
-
-        content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        if content_type != "application/json":
+        if self._content_type() != "application/json":
             self.send_json(415, {"error": "Unsupported content type"})
             return None
         try:
@@ -309,14 +335,12 @@ class TTYDProxyHandler(BaseHandler):
         if payload is None:
             return
 
-        csrf_header = self.headers.get("X-CSRF-Token", "")
-        csrf_cookie = parse_cookie_header(self.headers.get("Cookie", "")).get("csrf_token", "")
-        provided_token = (csrf_header or payload["csrf_token"]).strip()
-        if not provided_token or not csrf_cookie:
-            self.send_json(403, {"error": "CSRF token missing"})
-            return
-        if provided_token != csrf_cookie or not parse_csrf_token(provided_token, PASSWORD_SECRET, CSRF_TOKEN_TTL):
-            self.send_json(403, {"error": "Invalid CSRF token"})
+        if not self._check_csrf(
+            payload=payload,
+            status=403,
+            missing_error="CSRF token missing",
+            invalid_error="Invalid CSRF token",
+        ):
             return
 
         username = payload["username"]
