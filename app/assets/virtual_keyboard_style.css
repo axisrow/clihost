@@ -27,12 +27,10 @@
   background: linear-gradient(180deg, #1e4535, #16352a);
   font-size: 16px;
 }
-.vkbd button.key-ultra span {
-  background: linear-gradient(90deg, #ff4444, #ff8844, #ffcc44, #44cc44, #44cccc, #4488ff, #cc44ff);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  font-weight: bold; font-size: 15px;
+.vkbd button.key-scroll { font-size: 15px; }
+.vkbd button.key-scroll.on {
+  background: linear-gradient(180deg, #1e4535, #16352a);
+  color: #6fdc9c; border-color: rgba(111,220,156,0.4);
 }
 @media (max-width: 768px) {
   .vkbd { display: flex; }

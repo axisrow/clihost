@@ -15,7 +15,7 @@
     <button data-key="bang" style="grid-area:bang">!</button>
     <button data-key="ctrl-l" style="grid-area:cl" class="key-mod">^L</button>
     <button data-key="up" style="grid-area:up">&#8593;</button>
-    <button data-key="u" style="grid-area:ut" class="key-ultra"><span>u</span></button>
+    <button data-key="scroll" style="grid-area:ut" class="key-scroll" title="Toggle scroll (tmux mouse mode)">&#8645;</button>
     <button data-key="enter" style="grid-area:enter" class="key-enter">&#8629;</button>
     <button data-key="ctrl-c" style="grid-area:cc" class="key-mod">^C</button>
     <button data-key="ctrl-v" style="grid-area:cv" class="key-mod">^V</button>
@@ -92,7 +92,8 @@
             case 'bang': data = '!'; break;
             case 'backspace': data = String.fromCharCode(127); break;
             case 'enter': data = '\r'; break;
-            case 'u': data = 'u'; break;
+            // tmux prefix (Ctrl+B) + m — toggles tmux mouse mode (scroll on/off)
+            case 'scroll': data = String.fromCharCode(2) + 'm'; break;
             case 'at': data = '@'; break;
           }
           if (data) {
@@ -106,6 +107,7 @@
     document.getElementById('vkbd').addEventListener('click', function(e) {
       if (e.target.tagName === 'BUTTON') {
         sendKey(e.target.dataset.key);
+        if (e.target.dataset.key === 'scroll') e.target.classList.toggle('on');
       }
     });
     iframe.addEventListener('load', function() {
