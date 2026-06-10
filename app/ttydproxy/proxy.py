@@ -93,16 +93,23 @@ def tunnel_sockets(handler, upstream):
     eof = {client: False, upstream: False}
     try:
         while True:
-            for sock in (client, upstream):
-                if eof[sock] and not pending[peer[sock]]:
-                    return
+            # Once either side EOFs, the tunnel is logically done: stop
+            # ingesting new data, drain BOTH pending buffers, then close.
+            # Returning before pending[client] is flushed would drop ttyd
+            # output that the (possibly half-closed) client can still read.
+            draining = eof[client] or eof[upstream]
+            if draining and not pending[client] and not pending[upstream]:
+                return
 
-            # Stop reading a side whose peer's outbound buffer is full;
-            # may overshoot the cap by at most one recv chunk.
-            read_set = [
-                sock for sock in (client, upstream)
-                if not eof[sock] and len(pending[peer[sock]]) < TUNNEL_MAX_PENDING
-            ]
+            if draining:
+                read_set = []
+            else:
+                # Stop reading a side whose peer's outbound buffer is full;
+                # may overshoot the cap by at most one recv chunk.
+                read_set = [
+                    sock for sock in (client, upstream)
+                    if len(pending[peer[sock]]) < TUNNEL_MAX_PENDING
+                ]
             write_set = [sock for sock in (client, upstream) if pending[sock]]
             if not read_set and not write_set:
                 return

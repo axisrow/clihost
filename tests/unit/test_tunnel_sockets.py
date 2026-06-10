@@ -126,6 +126,26 @@ class TunnelSocketsTest(unittest.TestCase):
         self.client_outer.close()
         self.join_tunnel()
 
+    def test_client_half_close_still_drains_pending_data(self):
+        # Regression test: an early-exit on client EOF used to discard
+        # ttyd output still buffered for the (half-closed) client.
+        self.client_inner.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        self.client_outer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        self.start_tunnel()
+
+        payload = b"z" * 65536
+        self.upstream_outer.sendall(payload)
+        # Let the tunnel ingest the burst into its pending buffer before
+        # the client half-closes its write side.
+        time.sleep(0.3)
+        self.client_outer.shutdown(socket.SHUT_WR)
+
+        received = _recv_exactly(
+            self.client_outer, len(payload) + 1, chunk_size=2048, delay=0.0005
+        )
+        self.assertEqual(received, payload)
+        self.join_tunnel()
+
     def test_backpressure_caps_buffering(self):
         original_cap = proxy.TUNNEL_MAX_PENDING
         proxy.TUNNEL_MAX_PENDING = 16384

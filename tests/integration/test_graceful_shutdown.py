@@ -27,8 +27,16 @@ class GracefulShutdownTest(unittest.TestCase):
             port = probe.getsockname()[1]
 
         env = dict(os.environ, PORT=str(port))
+        # Skip real ttyd spawning: on hosts with runuser but no ttyd binary,
+        # create_terminal(wait=True) burns 15s in _wait_for_ready before the
+        # HTTP server binds, overrunning this test's listen deadline.
+        child_code = (
+            "from ttydproxy import app\n"
+            "app.ttyd_manager.create_terminal = lambda wait=False: None\n"
+            "app.main()\n"
+        )
         proc = subprocess.Popen(
-            [sys.executable, "-c", "from ttydproxy.app import main; main()"],
+            [sys.executable, "-c", child_code],
             cwd=APP_DIR,
             env=env,
             stdout=subprocess.PIPE,
