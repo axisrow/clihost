@@ -34,7 +34,8 @@ class TestEntrypointRegressions(unittest.TestCase):
         # secret value itself in its environment (/proc/<pid>/environ).
         self.assertIn("PASSWORD_SECRET_FILE=", self.text)
         self.assertNotRegex(
-            self.text, r'^PASSWORD_SECRET="\$\{PASSWORD_SECRET\}"', re.MULTILINE
+            self.text,
+            re.compile(r'^PASSWORD_SECRET="\$\{PASSWORD_SECRET\}"', re.MULTILINE),
         )
 
     def test_hapi_server_log_precreated(self):
