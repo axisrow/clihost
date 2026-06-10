@@ -1,7 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-PACKAGE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cli-packages.txt"
+# docker build uses "." as context — always run from the repo root
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+PACKAGE_FILE="cli-packages.txt"
 
 # Получаем версию пакета с retry (соответствует паттерну из CLAUDE.md)
 get_version() {
