@@ -169,10 +169,14 @@ def verify_pam_password(username, password):
 
     if shadow_info and crypt_module:
         password_hash = shadow_info.sp_pwdp
-        if password_hash in ("*", "!"):
+        # Empty or "!"/"*"-prefixed hashes mean a locked/disabled account
+        # (covers "!", "!!", "!<hash>" from passwd -l, "*", "*LK*", "*NP*").
+        if not password_hash or password_hash.startswith(("!", "*")):
             return False
         crypted = crypt_module.crypt(password, password_hash)
-        return crypted == password_hash
+        if crypted is None:
+            return False
+        return hmac.compare_digest(crypted, password_hash)
 
     try:
         result = subprocess.run(

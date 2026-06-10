@@ -23,6 +23,9 @@ HOP_BY_HOP_HEADERS = {
     "content-length", "authorization",
 }
 
+TUNNEL_RECV_SIZE = 8192
+TUNNEL_MAX_PENDING = 1048576  # 1 MiB per direction before backpressure kicks in
+
 
 def is_websocket_request(handler):
     """Check if the current request is a WebSocket upgrade request."""
@@ -75,30 +78,71 @@ def inject_tab_fix_script(data, is_gzipped=False):
 
 
 def tunnel_sockets(handler, upstream):
-    """Bidirectional socket tunneling."""
+    """Bidirectional socket tunneling with write buffering and backpressure.
+
+    Non-blocking sockets require partial-send accounting: sendall() would
+    raise BlockingIOError on a full kernel buffer after possibly sending
+    only part of the data, silently dropping bytes and killing the tunnel.
+    """
     client = handler.connection
     client.setblocking(False)
     upstream.setblocking(False)
-    sockets = [client, upstream]
+    peer = {client: upstream, upstream: client}
+    pending = {client: bytearray(), upstream: bytearray()}
+    eof = {client: False, upstream: False}
     try:
         while True:
-            readable, _, _ = select.select(sockets, [], [], 60)
-            if not readable:
+            for sock in (client, upstream):
+                if eof[sock] and not pending[peer[sock]]:
+                    return
+
+            # Stop reading a side whose peer's outbound buffer is full;
+            # may overshoot the cap by at most one recv chunk.
+            read_set = [
+                sock for sock in (client, upstream)
+                if not eof[sock] and len(pending[peer[sock]]) < TUNNEL_MAX_PENDING
+            ]
+            write_set = [sock for sock in (client, upstream) if pending[sock]]
+            if not read_set and not write_set:
+                return
+
+            readable, writable, _ = select.select(read_set, write_set, [], 60)
+            if not readable and not writable:
                 continue
+
+            for sock in writable:
+                buf = pending[sock]
+                try:
+                    sent = sock.send(buf)
+                except (BlockingIOError, InterruptedError):
+                    continue
+                except (OSError, ConnectionError):
+                    return
+                if sent:
+                    del buf[:sent]
+
             for sock in readable:
                 try:
-                    data = sock.recv(8192)
-                except BlockingIOError:
+                    data = sock.recv(TUNNEL_RECV_SIZE)
+                except (BlockingIOError, InterruptedError):
                     continue
                 except (OSError, ConnectionError):
                     return
                 if not data:
-                    return
-                target = upstream if sock is client else client
-                try:
-                    target.sendall(data)
-                except (OSError, ConnectionError):
-                    return
+                    eof[sock] = True
+                    continue
+                target = peer[sock]
+                buf = pending[target]
+                if not buf:
+                    try:
+                        sent = target.send(data)
+                    except (BlockingIOError, InterruptedError):
+                        sent = 0
+                    except (OSError, ConnectionError):
+                        return
+                    data = data[sent:]
+                if data:
+                    buf.extend(data)
     except Exception:
         return
 

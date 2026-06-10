@@ -80,13 +80,20 @@ cleanup_runner_state
 # Update Hermes Agent to latest version
 if [ "${HERMES_AUTO_UPDATE:-true}" != "false" ] && command -v hermes &>/dev/null; then
   echo "Updating Hermes Agent..."
-  HERMES_UPDATE_DIR=$(mktemp -d) && \
-  git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$HERMES_UPDATE_DIR" && \
-  cd "$HERMES_UPDATE_DIR" && \
-  pip install --break-system-packages '.[all,messaging]' && \
-  cd / && \
-  rm -rf "$HERMES_UPDATE_DIR" && \
-  echo "Hermes Agent updated" || echo "Hermes Agent update failed, using installed version"
+  HERMES_UPDATE_DIR=""
+  # The subshell keeps the parent cwd intact when any step fails.
+  if HERMES_UPDATE_DIR=$(mktemp -d) && (
+       git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$HERMES_UPDATE_DIR" &&
+       cd "$HERMES_UPDATE_DIR" &&
+       pip install --break-system-packages '.[all,messaging]'
+     ); then
+    echo "Hermes Agent updated"
+  else
+    echo "Hermes Agent update failed, using installed version"
+  fi
+  if [ -n "${HERMES_UPDATE_DIR}" ]; then
+    rm -rf "${HERMES_UPDATE_DIR}"
+  fi
 fi
 
 # Start TTYD HTTP proxy (manages TTYD processes dynamically)
