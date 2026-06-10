@@ -445,7 +445,10 @@ def main():
             terminal_ids = list(ttyd_manager.terminals.keys())
         for terminal_id in terminal_ids:
             ttyd_manager.delete_terminal(terminal_id)
-        httpd.shutdown()
+        # Never call httpd.shutdown() here: the handler runs in the main
+        # thread, which is inside serve_forever(); shutdown() waits for
+        # serve_forever() to exit and deadlocks. SystemExit unwinds
+        # serve_forever() and the finally clause closes the server.
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, signal_handler)
