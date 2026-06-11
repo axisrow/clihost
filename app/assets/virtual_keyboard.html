@@ -1,3 +1,4 @@
+<button id="vkbd-toggle" type="button" aria-label="Toggle virtual keyboard" aria-pressed="false" title="Toggle keyboard">&#9000;</button>
 <div class="vkbd" id="vkbd">
   <div class="vkbd-row">
     <button data-key="esc" class="key-action">ESC</button>
@@ -110,8 +111,49 @@
         if (e.target.dataset.key === 'scroll') e.target.classList.toggle('on');
       }
     });
+
+    // --- Keyboard toggle (issue #32) ---
+    var STORAGE_KEY = 'clihost:vkbd-open';
+    var toggleBtn = document.getElementById('vkbd-toggle');
+
+    function notifyTerminalResize() {
+      // The browser fires resize in the iframe when its box changes, but the
+      // re-fit can read stale dimensions (iOS layout timing) — nudge it again.
+      try {
+        var win = iframe.contentWindow;
+        if (win) win.dispatchEvent(new Event('resize'));
+      } catch (e) {}
+    }
+
+    function applyVkbdState(open) {
+      document.body.classList.toggle('vkbd-open', open);
+      toggleBtn.setAttribute('aria-pressed', open ? 'true' : 'false');
+    }
+
+    toggleBtn.addEventListener('click', function() {
+      var open = !document.body.classList.contains('vkbd-open');
+      applyVkbdState(open);
+      try { localStorage.setItem(STORAGE_KEY, open ? '1' : '0'); } catch (e) {}
+      // Flex resizes #terminal-shell synchronously; let layout settle, then
+      // re-fit the terminal (two frames for reliability on iOS).
+      requestAnimationFrame(function() {
+        notifyTerminalResize();
+        requestAnimationFrame(notifyTerminalResize);
+      });
+      focusTerminal();
+    });
+
+    // No stored choice yet: open on narrow (mobile) screens, closed on desktop.
+    var stored = null;
+    try { stored = localStorage.getItem(STORAGE_KEY); } catch (e) {}
+    applyVkbdState(stored === null
+      ? window.matchMedia('(max-width: 768px)').matches
+      : stored === '1');
+
     iframe.addEventListener('load', function() {
       focusTerminal();
+      // The terminal may have fitted before the class was applied — re-fit it.
+      notifyTerminalResize();
     });
   })();
 </script>
