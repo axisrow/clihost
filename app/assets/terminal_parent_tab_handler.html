@@ -28,5 +28,41 @@
         focusTerminal();
       });
     }
+
+    // Paste/drop can land on the parent page when the iframe is not focused
+    // (e.g. right after load). The injected iframe script owns the triage
+    // (image → upload, text → type, other → skip); the parent only forwards
+    // the transfer through this same-origin global and mirrors whether it
+    // was consumed. The parent page has no inputs, so its default
+    // paste/drop would lose the text.
+    function forwardDataTransfer(dataTransfer) {
+      try {
+        var win = iframe && iframe.contentWindow;
+        if (win && win.__handleDataTransfer) return win.__handleDataTransfer(dataTransfer);
+      } catch (e) {}
+      // Only worth a warning when files were actually present: text-only
+      // pastes routinely land here while the iframe is still loading.
+      if (dataTransfer && dataTransfer.files && dataTransfer.files.length) {
+        console.warn('terminal iframe not ready for image upload');
+      }
+      return false;
+    }
+
+    document.addEventListener('paste', function(e) {
+      if (forwardDataTransfer(e.clipboardData)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }, true);
+
+    document.addEventListener('dragover', function(e) {
+      e.preventDefault();
+    }, true);
+
+    document.addEventListener('drop', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      forwardDataTransfer(e.dataTransfer);
+    }, true);
   })();
 </script>

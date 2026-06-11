@@ -2,23 +2,7 @@
 import unittest
 from unittest.mock import patch
 
-from ttydproxy.app import TTYDProxyHandler
-
-
-class RecordingCleanupHandler(TTYDProxyHandler):
-    def __init__(self):
-        self.response = None
-
-    def send_json(self, status, data, extra_headers=None):
-        del extra_headers
-        self.response = (status, data)
-
-    def _check_auth(self, redirect=False):
-        del redirect
-        return "alice"
-
-    def _check_csrf(self):
-        return True
+from tests.unit.handler_stubs import RecordingHandler
 
 
 class TestCleanupAPI(unittest.TestCase):
@@ -28,7 +12,7 @@ class TestCleanupAPI(unittest.TestCase):
         mock_list_cleanup_targets.return_value = [{"id": "cache-home", "label": "~/.cache"}]
         mock_summarize_cleanup_targets.return_value = {"count": 1, "total_size_bytes": 128, "total_size_human": "128 B"}
 
-        handler = RecordingCleanupHandler()
+        handler = RecordingHandler()
         handler.handle_cleanup_list()
 
         self.assertEqual(
@@ -46,7 +30,7 @@ class TestCleanupAPI(unittest.TestCase):
     def test_handle_cleanup_delete(self, mock_delete_cleanup_targets):
         mock_delete_cleanup_targets.return_value = {"deleted": [{"id": "cache-home", "label": "~/.cache"}], "skipped": [], "errors": []}
 
-        handler = RecordingCleanupHandler()
+        handler = RecordingHandler()
         handler._load_json_payload = lambda: {"ids": ["cache-home"]}
         handler.handle_cleanup_delete()
 
@@ -56,28 +40,28 @@ class TestCleanupAPI(unittest.TestCase):
         )
 
     def test_handle_cleanup_delete_rejects_invalid_ids(self):
-        handler = RecordingCleanupHandler()
+        handler = RecordingHandler()
         handler._load_json_payload = lambda: {"ids": "cache-home"}
         handler.handle_cleanup_delete()
 
         self.assertEqual(handler.response, (400, {"error": "ids must be a non-empty array"}))
 
     def test_handle_cleanup_delete_rejects_empty_ids(self):
-        handler = RecordingCleanupHandler()
+        handler = RecordingHandler()
         handler._load_json_payload = lambda: {"ids": []}
         handler.handle_cleanup_delete()
 
         self.assertEqual(handler.response, (400, {"error": "ids must be a non-empty array"}))
 
     def test_handle_cleanup_delete_rejects_too_many_ids(self):
-        handler = RecordingCleanupHandler()
+        handler = RecordingHandler()
         handler._load_json_payload = lambda: {"ids": [f"id-{index}" for index in range(51)]}
         handler.handle_cleanup_delete()
 
         self.assertEqual(handler.response, (400, {"error": "ids must contain at most 50 items"}))
 
     def test_handle_cleanup_delete_rejects_too_long_ids(self):
-        handler = RecordingCleanupHandler()
+        handler = RecordingHandler()
         handler._load_json_payload = lambda: {"ids": ["x" * 129]}
         handler.handle_cleanup_delete()
 
@@ -90,7 +74,7 @@ class TestCleanupAPI(unittest.TestCase):
     def test_handle_cleanup_delete_allows_duplicate_ids(self, mock_delete_cleanup_targets):
         mock_delete_cleanup_targets.return_value = {"deleted": [{"id": "cache-home", "label": "~/.cache"}], "skipped": [], "errors": []}
 
-        handler = RecordingCleanupHandler()
+        handler = RecordingHandler()
         handler._load_json_payload = lambda: {"ids": ["cache-home", "cache-home"]}
         handler.handle_cleanup_delete()
 

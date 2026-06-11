@@ -1,6 +1,8 @@
 """HTTP handler and process wiring for the ttyd proxy application."""
 import hmac
 import json
+import os
+import pwd
 import sys
 import signal
 import time
@@ -24,11 +26,14 @@ from ttydproxy.config import (
     CSRF_TOKEN_TTL,
     SECURE_COOKIES,
     HAPI_URL_FILE,
+    MAX_UPLOAD_SIZE,
+    UPLOAD_DIR,
     TTYD_ROUTE_PATTERN,
 )
 from ttydproxy.manager import TTYDManager
 from ttydproxy.proxy import is_websocket_request, proxy_ttyd_http, proxy_ttyd_websocket
 from ttydproxy.ratelimit import RateLimiter
+from ttydproxy.uploads import save_upload
 from ttydproxy.security import (
     build_csrf_token,
     build_session_token,
@@ -110,6 +115,8 @@ class TTYDProxyHandler(BaseHandler):
             self.handle_cleanup_delete()
         elif parsed.path == "/terminals":
             self.handle_terminals_create()
+        elif parsed.path == "/upload":
+            self.handle_upload()
         else:
             self.send_json(404, {"error": "Not found"})
 
@@ -181,18 +188,25 @@ class TTYDProxyHandler(BaseHandler):
             return False
         return True
 
-    def _read_request_body(self):
-        """Read and UTF-8 decode the request body. Returns text or None on error."""
+    def _read_binary_request_body(self, max_size):
+        """Read the raw request body. Returns bytes or None on error."""
         try:
             content_length = int(self.headers.get("Content-Length", 0))
         except ValueError:
             self.send_json(400, {"error": "Invalid Content-Length"})
             return None
-        if content_length < 0 or content_length > 1048576:
+        if content_length < 0 or content_length > max_size:
             self.send_json(413, {"error": "Request too large"})
             return None
+        return self.rfile.read(content_length)
+
+    def _read_request_body(self):
+        """Read and UTF-8 decode the request body. Returns text or None on error."""
+        data = self._read_binary_request_body(1048576)
+        if data is None:
+            return None
         try:
-            return self.rfile.read(content_length).decode("utf-8")
+            return data.decode("utf-8")
         except UnicodeDecodeError:
             self.send_json(400, {"error": "Invalid encoding"})
             return None
@@ -300,6 +314,27 @@ class TTYDProxyHandler(BaseHandler):
         else:
             self.send_json(404, {"error": f"Terminal {terminal_id} not found"})
 
+    def handle_upload(self):
+        username = self._check_auth()
+        if not username or not self._check_csrf():
+            return
+        data = self._read_binary_request_body(MAX_UPLOAD_SIZE)
+        if data is None:
+            return
+        if not data:
+            self.send_json(400, {"error": "Empty upload"})
+            return
+        try:
+            path = save_upload(data, UPLOAD_DIR, TTYD_USER)
+        except ValueError as exc:
+            # save_upload is the single validator and owns the message.
+            self.send_json(415, {"error": str(exc)})
+            return
+        except OSError:
+            self.send_json(500, {"error": "Failed to save upload"})
+            return
+        self.send_json(201, {"path": path})
+
     def handle_cleanup_delete(self):
         username = self._check_auth()
         if not username or not self._check_csrf():
@@ -397,7 +432,14 @@ class TTYDProxyHandler(BaseHandler):
             self.send_json(404, {"error": f"Terminal ttyd{terminal_id} not found"})
             return
         vkbd_enabled = resolve_vkbd_enabled(self.path, VIRTUAL_KEYBOARD)
-        self.send_html(200, render_terminal_page(terminal_id, username, vkbd_enabled))
+        # Refresh the CSRF cookie: image uploads from a long-lived terminal
+        # tab must not outlive the token minted on the last dashboard visit.
+        extra_headers, _csrf_token = self._auth_cookie_headers()
+        self.send_html(
+            200,
+            render_terminal_page(terminal_id, username, vkbd_enabled),
+            extra_headers=extra_headers,
+        )
 
     def handle_ttyd_proxy(self, terminal_id):
         username = self._check_auth()
@@ -421,8 +463,26 @@ class TTYDProxyHandler(BaseHandler):
             proxy_ttyd_http(self, upstream_path, port)
 
 
+def _warn_on_user_mismatch():
+    """Warn when running unprivileged as a user other than TTYD_USER."""
+    if os.geteuid() == 0:
+        return
+    try:
+        current_user = pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        current_user = f"uid {os.geteuid()}"
+    if current_user != TTYD_USER:
+        print(
+            f"WARNING: proxy running as {current_user}, not root; cannot switch to "
+            f"TTYD_USER={TTYD_USER} — terminals will run as {current_user}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def main():
     """Start the ttyd proxy server."""
+    _warn_on_user_mismatch()
     server_address = ("0.0.0.0", PORT)
     print(f"Starting TTYD HTTP proxy on {server_address}...", flush=True)
 

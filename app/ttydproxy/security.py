@@ -43,20 +43,27 @@ def env_int(value, default, name=None):
 
 
 def env_secret(name, default):
-    """Resolve a secret env var, honoring the Docker *_FILE convention."""
+    """Resolve a secret env var, honoring the Docker *_FILE convention.
+
+    When <NAME>_FILE is set it is authoritative: an unreadable or empty file
+    aborts startup instead of silently falling back to a guessable default.
+    """
     path = os.environ.get(f"{name}_FILE")
     if path:
         try:
             with open(path) as secret_file:
                 value = secret_file.read().strip()
-            if value:
-                return value
         except OSError as exc:
             print(
-                f"Cannot read {name}_FILE={path}: {exc}, falling back",
+                f"ERROR: Cannot read {name}_FILE={path}: {exc}",
                 file=sys.stderr,
                 flush=True,
             )
+            sys.exit(1)
+        if not value:
+            print(f"ERROR: {name}_FILE={path} is empty", file=sys.stderr, flush=True)
+            sys.exit(1)
+        return value
     return os.environ.get(name) or default
 
 
@@ -200,7 +207,10 @@ def verify_pam_password(username, password):
 
         shadow_info = spwd.getspnam(username)
         crypt_module = crypt_import
-    except (ImportError, KeyError, FileNotFoundError):
+    except (ImportError, KeyError, OSError):
+        # OSError covers PermissionError when the proxy runs unprivileged and
+        # cannot read /etc/shadow; fall through to su(1), whose setgid
+        # unix_chkpwd helper can verify the proxy's own user's password.
         shadow_info = None
 
     if shadow_info and crypt_module:

@@ -18,5 +18,7 @@ VIRTUAL_KEYBOARD = env_bool(os.environ.get("VIRTUAL_KEYBOARD"), default=True)
 CSRF_TOKEN_TTL = env_int(os.environ.get("CSRF_TOKEN_TTL"), 604800, name="CSRF_TOKEN_TTL")
 SECURE_COOKIES = env_bool(os.environ.get("SECURE_COOKIES"), default=False)
 HAPI_URL_FILE = os.environ.get("HAPI_URL_FILE", "/home/hapi/url")
+MAX_UPLOAD_SIZE = env_int(os.environ.get("MAX_UPLOAD_SIZE"), 10485760, name="MAX_UPLOAD_SIZE")
+UPLOAD_DIR = os.environ.get("UPLOAD_DIR", f"{CLEANUP_ROOT}/.uploads")
 
 TTYD_ROUTE_PATTERN = re.compile(r"^/ttyd(\d+)(/.*)?$")

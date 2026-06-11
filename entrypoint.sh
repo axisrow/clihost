@@ -23,6 +23,7 @@ HAPI_USER="${HAPI_USER:-hapi}"
 HAPI_USER_HOME="/home/${HAPI_USER}"
 : "${CLEANUP_ROOT:=${HAPI_USER_HOME}}"
 : "${HAPI_HOME:=${HAPI_USER_HOME}/.hapi}"
+: "${UPLOAD_DIR:=${CLEANUP_ROOT}/.uploads}"
 HAPI_RUN_PATH="/usr/local/bin:/usr/bin:/bin"
 
 echo "Starting clihost container..."
@@ -99,20 +100,36 @@ if [ "${HERMES_AUTO_UPDATE:-true}" != "false" ] && command -v hermes &>/dev/null
   fi
 fi
 
-# Start TTYD HTTP proxy (manages TTYD processes dynamically).
-# The secret goes through a root-only file (Docker *_FILE convention) so it
-# never appears in the proxy's /proc/<pid>/environ.
+# Start TTYD HTTP proxy (manages TTYD processes dynamically; drops root and
+# runs as TTYD_USER). The secret goes through a TTYD_USER-only file (Docker
+# *_FILE convention) so it never appears in the proxy's /proc/<pid>/environ.
+# Validate PORT is numeric first: `[ "$PORT" -lt 1024 ]` on a non-numeric value
+# exits 2 (error, not false), which would let the range guard silently pass.
+case "${PORT}" in
+  ''|*[!0-9]*)
+    echo "ERROR: PORT=${PORT} must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "${PORT}" -lt 1024 ]; then
+  echo "ERROR: PORT=${PORT} is a privileged port; the proxy runs as ${TTYD_USER} and needs PORT >= 1024" >&2
+  exit 1
+fi
+# The proxy runs as TTYD_USER and creates upload files itself; pre-create and
+# chown UPLOAD_DIR so a bind-mounted /home/hapi (often not writable by the hapi
+# UID) doesn't make pasted-image uploads fail with 500.
+ensure_dir_owned "${UPLOAD_DIR}"
 PROXY_SECRET_FILE="/run/ttyd-proxy.secret"
-install -m 600 /dev/null "${PROXY_SECRET_FILE}"
+install -m 400 -o "${TTYD_USER}" /dev/null "${PROXY_SECRET_FILE}"
 printf '%s' "${PASSWORD_SECRET}" > "${PROXY_SECRET_FILE}"
-echo "Starting TTYD HTTP proxy on port ${PORT}"
+echo "Starting TTYD HTTP proxy on port ${PORT} as ${TTYD_USER}"
 PORT="${PORT}" \
 TTYD_USER="${TTYD_USER}" \
 TTYD_PASSWORD="${TTYD_PASSWORD}" \
 PASSWORD_SECRET_FILE="${PROXY_SECRET_FILE}" \
 CLEANUP_ROOT="${CLEANUP_ROOT}" \
 HAPI_HOME="${HAPI_HOME}" \
-python3 /app/ttyd_proxy.py &
+runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &
 
 # Start hapi server with relay in background (logs to file, force TCP relay)
 HAPI_SERVER_LOG="${HAPI_HOME}/server.log"

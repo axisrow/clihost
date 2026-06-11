@@ -10,13 +10,17 @@ from ttydproxy import security
 VALID_HASH = "$6$saltsalt$hashedpasswordvalue"
 
 
-def _fake_modules(password_hash, crypt_func):
+def _fake_modules(password_hash, crypt_func, getspnam_error=None):
     """Build fake spwd/crypt modules for sys.modules injection.
 
     password_hash=None simulates a missing shadow entry (getspnam raises
-    KeyError), which sends verify_pam_password down the su fallback path.
+    KeyError); getspnam_error simulates an unreadable /etc/shadow (e.g.
+    PermissionError under an unprivileged proxy). Both send
+    verify_pam_password down the su fallback path.
     """
     def getspnam(username):
+        if getspnam_error is not None:
+            raise getspnam_error
         if password_hash is None:
             raise KeyError(username)
         return SimpleNamespace(sp_pwdp=password_hash)
@@ -54,15 +58,34 @@ class VerifyPamPasswordTest(unittest.TestCase):
     def test_crypt_returning_none_rejected(self):
         self.assertFalse(self._verify(VALID_HASH, lambda password, salt: None))
 
-    def test_missing_shadow_entry_falls_back_to_su(self):
-        su_result = SimpleNamespace(returncode=0)
-        with mock.patch.dict(sys.modules, _fake_modules(None, mock.Mock())):
+    def _su_fallback(self, modules, su_returncode):
+        """Run verify_pam_password with mocked su; assert su was consulted."""
+        su_result = SimpleNamespace(returncode=su_returncode)
+        with mock.patch.dict(sys.modules, modules):
             with mock.patch.object(security, "user_exists", return_value=True):
                 with mock.patch.object(
                     security.subprocess, "run", return_value=su_result
                 ) as run_mock:
-                    self.assertTrue(security.verify_pam_password("hapi", "secret"))
+                    result = security.verify_pam_password("hapi", "secret")
         run_mock.assert_called_once()
+        return result
+
+    def test_missing_shadow_entry_falls_back_to_su(self):
+        self.assertTrue(self._su_fallback(_fake_modules(None, mock.Mock()), 0))
+
+    def test_unreadable_shadow_falls_back_to_su(self):
+        # Unprivileged proxy: spwd.getspnam raises PermissionError (EACCES on
+        # /etc/shadow); the su fallback must take over instead of crashing.
+        modules = _fake_modules(
+            None, mock.Mock(), getspnam_error=PermissionError(13, "Permission denied")
+        )
+        self.assertTrue(self._su_fallback(modules, 0))
+
+    def test_unreadable_shadow_su_rejects_wrong_password(self):
+        modules = _fake_modules(
+            None, mock.Mock(), getspnam_error=PermissionError(13, "Permission denied")
+        )
+        self.assertFalse(self._su_fallback(modules, 1))
 
     def test_unknown_user_rejected(self):
         with mock.patch.object(security, "user_exists", return_value=False):

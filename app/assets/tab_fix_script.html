@@ -50,6 +50,140 @@
     return isAlt;
   }
 
+  function getCsrfToken() {
+    var match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]*)/);
+    return match ? match[1] : '';
+  }
+
+  function extractImageFiles(source) {
+    var files = [];
+    var i;
+    if (source && source.items) {
+      for (i = 0; i < source.items.length; i++) {
+        var item = source.items[i];
+        if (item.kind === 'file' && item.type.indexOf('image/') === 0) {
+          var file = item.getAsFile();
+          if (file) files.push(file);
+        }
+      }
+    }
+    // Safari screenshot pastes can populate .files while .items stays empty.
+    if (!files.length && source && source.files) {
+      for (i = 0; i < source.files.length; i++) {
+        if (source.files[i].type.indexOf('image/') === 0) files.push(source.files[i]);
+      }
+    }
+    return files;
+  }
+
+  var MAX_UPLOAD_FILES = 5;
+
+  function uploadImageFile(file, csrfToken) {
+    return fetch('/upload', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrfToken },
+      body: file
+    }).then(function(res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    }).then(function(data) {
+      return data.path;
+    }).catch(function(err) {
+      console.warn('image upload failed:', err);
+      return null;
+    });
+  }
+
+  function uploadImageFiles(files) {
+    // Uploads run in parallel; the paths are typed afterwards in the
+    // original order, skipping files whose upload failed.
+    var csrfToken = getCsrfToken();
+    var uploads = files.slice(0, MAX_UPLOAD_FILES).map(function(file) {
+      return uploadImageFile(file, csrfToken);
+    });
+    return Promise.all(uploads).then(function(paths) {
+      paths.forEach(function(path) {
+        if (path === null) return;
+        if (!sendToTTYD(path + ' ')) {
+          console.warn('image uploaded but terminal socket not ready:', path);
+        }
+      });
+    }).catch(function(err) {
+      console.warn('upload pipeline error:', err);
+    });
+  }
+
+  function pasteTextToTerminal(text) {
+    // term.paste honours bracketed-paste mode; raw socket send is the fallback.
+    if (window.term && window.term.paste) {
+      window.term.paste(text);
+    } else if (!sendToTTYD(text)) {
+      console.warn('text transfer dropped: terminal not ready');
+    }
+  }
+
+  function containsFiles(source) {
+    // Same items/files coverage as extractImageFiles, but deliberately WITHOUT
+    // a MIME filter: any file (e.g. a dropped PDF) must block the text branch
+    // so a non-image transfer is silently skipped, not typed as its file:// URL.
+    if (!source) return false;
+    if (source.files && source.files.length) return true;
+    var items = source.items;
+    if (items) {
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].kind === 'file') return true;
+      }
+    }
+    return false;
+  }
+
+  function handleImageTransfer(source) {
+    var images = extractImageFiles(source);
+    if (!images.length) return false;
+    uploadImageFiles(images);
+    return true;
+  }
+
+  // Full triage of a paste/drop payload: images upload, plain text types
+  // into the prompt, anything else (non-image files) is silently skipped.
+  // Returns true when the transfer was consumed.
+  function handleDataTransfer(source) {
+    if (handleImageTransfer(source)) return true;
+    // A non-image file transfer is skipped entirely, even when the browser
+    // also exposes a text representation of it (e.g. a file:// URL).
+    if (!source || containsFiles(source) || !source.getData) return false;
+    var text = source.getData('text/plain');
+    if (!text) return false;
+    pasteTextToTerminal(text);
+    return true;
+  }
+
+  // The parent page delegates its paste/drop events through this global
+  // instead of duplicating the triage logic in its own document.
+  window.__handleDataTransfer = handleDataTransfer;
+
+  document.addEventListener('paste', function(e) {
+    // Only images are consumed on the iframe paste path: pasted text stays
+    // on xterm's own default handling (bracketed paste, IME, etc.).
+    if (handleImageTransfer(e.clipboardData)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true);
+
+  document.addEventListener('dragover', function(e) {
+    e.preventDefault();
+  }, true);
+
+  document.addEventListener('drop', function(e) {
+    // Always prevent the default: a dropped file would otherwise navigate
+    // the iframe away from the terminal. That also swallows text drops, so
+    // the full triage types them into the prompt itself.
+    e.preventDefault();
+    e.stopPropagation();
+    handleDataTransfer(e.dataTransfer);
+  }, true);
+
   waitForTerm(function(term) {
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Tab') {

@@ -1,4 +1,5 @@
 """Lifecycle management for ttyd child processes."""
+import os
 import socket
 import subprocess
 import sys
@@ -40,17 +41,22 @@ class TTYDManager:
     def _tmux_session_name(self, terminal_id):
         return f"ttyd-{terminal_id}"
 
+    def _as_ttyd_user(self, command):
+        """Wrap a command with runuser when root; unprivileged proxies run it directly."""
+        if os.geteuid() == 0:
+            return ["runuser", "-u", self.ttyd_user, "--", *command]
+        return command
+
     def _start_ttyd_process(self, terminal_id, port):
         tmux_session = self._tmux_session_name(terminal_id)
         return subprocess.Popen(
-            [
-                "runuser", "-u", self.ttyd_user, "--",
+            self._as_ttyd_user([
                 self.ttyd_binary,
                 "-p", str(port),
                 "-i", "127.0.0.1",
                 "-W",
                 self.tmux_wrapper, tmux_session,
-            ],
+            ]),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -73,10 +79,9 @@ class TTYDManager:
     def _kill_tmux_session(self, terminal_id):
         try:
             subprocess.run(
-                [
-                    "runuser", "-u", self.ttyd_user, "--",
-                    "tmux", "kill-session", "-t", self._tmux_session_name(terminal_id),
-                ],
+                self._as_ttyd_user(
+                    ["tmux", "kill-session", "-t", self._tmux_session_name(terminal_id)]
+                ),
                 capture_output=True,
                 timeout=5,
             )

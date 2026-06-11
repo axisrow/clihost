@@ -38,6 +38,32 @@ class TestEntrypointRegressions(unittest.TestCase):
             re.compile(r'^PASSWORD_SECRET="\$\{PASSWORD_SECRET\}"', re.MULTILINE),
         )
 
+    def test_proxy_started_as_ttyd_user(self):
+        # The proxy must drop root (issue #52): launched via runuser, with the
+        # secret file owned by TTYD_USER so the unprivileged proxy can read it.
+        self.assertIn(
+            'runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &', self.text
+        )
+        self.assertIn('install -m 400 -o "${TTYD_USER}"', self.text)
+
+    def test_port_validated_numeric_before_range_check(self):
+        # A non-numeric PORT must fail loudly: `[ "$PORT" -lt 1024 ]` returns
+        # exit 2 (error, not "false"), so the range guard silently passes and
+        # the proxy starts on the default 8080. A numeric pre-check prevents it.
+        case_pos = self.text.find("*[!0-9]*")
+        range_pos = self.text.find('[ "${PORT}" -lt 1024 ]')
+        self.assertGreater(case_pos, -1, "PORT is not validated as numeric")
+        self.assertLess(case_pos, range_pos)
+
+    def test_upload_dir_prepared_before_proxy(self):
+        # The unprivileged proxy creates upload files itself; a bind-mounted
+        # /home/hapi may not be writable by the hapi UID, so the entrypoint
+        # must create+chown UPLOAD_DIR before starting the proxy.
+        prep_pos = self.text.find('ensure_dir_owned "${UPLOAD_DIR}"')
+        proxy_pos = self.text.find('runuser -u "${TTYD_USER}" -- python3')
+        self.assertGreater(prep_pos, -1, "UPLOAD_DIR is not pre-created")
+        self.assertLess(prep_pos, proxy_pos)
+
     def test_hapi_server_log_precreated(self):
         # The log file must exist before the URL-extraction loop starts so the
         # [ -f "$HAPI_SERVER_LOG" ] guard passes on the first iteration.
