@@ -52,6 +52,19 @@ class TestCleanupTargets(unittest.TestCase):
         self.assertEqual(project_b["risk"], "high")
         self.assertTrue(project_b["size_bytes"] >= 512)
 
+    def test_uploads_is_a_static_target_not_a_project(self):
+        write_file(self.root / ".uploads" / "img-1.png", 64)
+        targets = list_cleanup_targets(self.root, self.hapi_home)
+        target_ids = [target["id"] for target in targets]
+
+        self.assertIn("uploads", target_ids)
+        # Hidden dir: must not be duplicated as a discovered project dir.
+        self.assertNotIn("project:.uploads", target_ids)
+
+        uploads = next(target for target in targets if target["id"] == "uploads")
+        self.assertEqual(uploads["risk"], "low")
+        self.assertEqual(uploads["strategy"], "remove-tree")
+
     def test_skips_targets_resolving_outside_root(self):
         outside = Path(self.tempdir.name).parent / "outside-cleanup-target"
         outside.mkdir(exist_ok=True)
@@ -153,6 +166,15 @@ class TestCleanupDeletion(unittest.TestCase):
         self.assertFalse((self.hapi_home / "trash").exists())
         self.assertFalse((self.root / ".cache").exists())
         self.assertFalse((self.root / "project-a").exists())
+
+    def test_delete_uploads_target_removes_directory(self):
+        write_file(self.root / ".uploads" / "img-1.png", 64)
+
+        result = delete_cleanup_targets(["uploads"], self.root, self.hapi_home)
+
+        self.assertEqual(result["errors"], [])
+        self.assertEqual([item["id"] for item in result["deleted"]], ["uploads"])
+        self.assertFalse((self.root / ".uploads").exists())
 
     def test_unknown_target_is_skipped(self):
         result = delete_cleanup_targets(["unknown-target"], self.root, self.hapi_home)

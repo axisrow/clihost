@@ -54,7 +54,7 @@ Docker container running hapi CLI runner alongside OpenSSH server, bundling AI C
 
 **Multi-process layout:**
 - `sshd` (port 22) — SSH access, the container's main process (`exec` at end of entrypoint.sh)
-- `ttyd_proxy.py` (PORT, default 8080) — HTTP/WebSocket reverse proxy with auth; **spawns and manages ttyd processes itself**
+- `ttyd_proxy.py` (PORT, default 8080) — HTTP/WebSocket reverse proxy with auth; **spawns and manages ttyd processes itself**; runs unprivileged as `TTYD_USER` (entrypoint drops root via `runuser`)
 - `ttyd` (127.0.0.1:7681, 7682, …) — one process per terminal, localhost-only, each attached to its own tmux session `ttyd-{id}` via `bin/tmux-wrapper.sh`
 - `hapi server --relay` — always starts; tunnel URL + token are extracted from its log into `/home/hapi/url` (shown on the dashboard)
 - `hapi runner` (HAPI_PORT, default 80) — optional, requires HAPI_RUNNER_ENABLED=true
@@ -66,7 +66,7 @@ SSH Client → sshd (22) → shell
 hapi Client → HTTP API (HAPI_PORT) → hapi runner
 ```
 
-**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → start ttyd proxy (it auto-creates the first terminal) → start `hapi server --relay` and extract connection URL → optionally start hapi runner → `exec sshd`.
+**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → start `hapi server --relay` and extract connection URL → optionally start hapi runner → `exec sshd`.
 
 **Volume mount:** `/home/hapi` — persistent runner state, logs, configs. The mount overwrites permissions, hence the permission fixes in entrypoint.sh.
 
@@ -100,6 +100,7 @@ hapi Client → HTTP API (HAPI_PORT) → hapi runner
 | `/terminals/{id}` | DELETE | cookie + CSRF | Kill terminal |
 | `/cleanup` | GET | cookie | List disk cleanup targets |
 | `/cleanup/delete` | POST | cookie + CSRF | Delete cleanup targets |
+| `/upload` | POST | cookie + CSRF | Save a pasted/dropped image (raw body), returns `{"path"}` |
 | `/ttyd{N}` | GET | cookie (redirect) | Terminal iframe page |
 | `/ttyd{N}/*` | GET/WS | cookie | HTTP/WebSocket proxy to that ttyd |
 
@@ -115,11 +116,11 @@ Terminal list and controls are built **dynamically in JavaScript**, not static H
 ### Environment Variables
 
 **TTYD web terminal:**
-- `PORT` — HTTP proxy port (default: 8080)
-- `TTYD_USER` — terminal user (default: hapi)
-- `TTYD_PASSWORD` — optional global password (if not set, system passwords via PAM/shadow)
+- `PORT` — HTTP proxy port (default: 8080; must be >= 1024 — the proxy runs without root)
+- `TTYD_USER` — terminal user (default: hapi); the proxy process itself also runs as this user
+- `TTYD_PASSWORD` — optional global password (if not set, system passwords — but only for `TTYD_USER`: the unprivileged proxy verifies passwords via `su`/unix_chkpwd, which can only check its own user's password)
 - `PASSWORD_SECRET` — secret for HMAC signatures (entrypoint generates a random one if unset; set explicitly to persist sessions across restarts)
-- `PASSWORD_SECRET_FILE` — path to a file containing the secret (Docker secrets convention, takes precedence over `PASSWORD_SECRET`; entrypoint hands the secret to the proxy via root-only `/run/ttyd-proxy.secret` so it never appears in the proxy's environment)
+- `PASSWORD_SECRET_FILE` — path to a file containing the secret (Docker secrets convention, takes precedence over `PASSWORD_SECRET`; entrypoint hands the secret to the proxy via `/run/ttyd-proxy.secret` — mode 400, owned by `TTYD_USER` — so it never appears in the proxy's environment; an unreadable or empty secret file aborts proxy startup instead of silently falling back)
 - `ROOT_PASSWORD` — optional root SSH password
 - `VIRTUAL_KEYBOARD` — mobile virtual keyboard (default: true)
 - `SESSION_TIMEOUT` — session token lifetime, seconds (default: 604800 = 1 week)
@@ -127,6 +128,8 @@ Terminal list and controls are built **dynamically in JavaScript**, not static H
 - `SECURE_COOKIES` — Secure flag on cookies for HTTPS (default: false)
 - `MAX_TERMINALS` — max concurrent terminals (default: 100)
 - `CLEANUP_ROOT` — root for cleanup dashboard targets (default: /home/hapi)
+- `MAX_UPLOAD_SIZE` — image upload size limit, bytes (default: 10485760 = 10 MB)
+- `UPLOAD_DIR` — where pasted/dropped terminal images are saved (default: `CLEANUP_ROOT/.uploads`; the cleanup dashboard's `uploads` target always points at `CLEANUP_ROOT/.uploads`, so overriding `UPLOAD_DIR` elsewhere decouples it from cleanup)
 
 **Hapi runner (optional):**
 - `HAPI_RUNNER_ENABLED` — enable runner (default: false)
@@ -154,6 +157,7 @@ The proxy injects a script into ttyd's HTML (`inject_tab_fix_script` in `proxy.p
 - **WebSocket capture**: the script intercepts the `window.WebSocket` constructor; the socket reference must live in `window._ttydSocket` (global), not a local inside the IIFE.
 - **Tab key**: sends ttyd protocol prefix `'0'` (INPUT) + `\t` over the WebSocket. Completion only works in shells that support it (bash); `/bin/sh` (dash) does not.
 - **Mouse wheel**: normal screen — intercepts `wheel` with `capture: true, passive: false`, calls `term.scrollLines(n)`; alternate screen (vim/less/htop, `term.buffer.active.type === 'alternate'`) — passes through. deltaMode: `1` = lines, `2` = pages (`term.rows`), `0` = pixels (÷40).
+- **Paste/drop triage**: capture-phase `paste`/`drop` listeners triage the payload — images upload to `POST /upload` (CSRF token read from the non-HttpOnly `csrf_token` cookie; up to 5 in parallel, returned paths typed in order + space), text types into the prompt (`term.paste`, bracketed-paste-safe; on iframe paste text stays on xterm's default path), anything else (non-image files) is silently skipped. Server validates by magic bytes only (png/jpg/gif/webp; SVG rejected) — the client Content-Type is never trusted. `terminal_parent_tab_handler.html` forwards paste/drop from the parent page into the iframe via `contentWindow.__handleDataTransfer(dataTransfer)`. `handle_ttyd` refreshes the `csrf_token` cookie so long-lived terminal tabs keep uploading.
 
 **tmux mouse mode** (`config/.tmux.conf`, copied to `/home/hapi/.tmux.conf` in Dockerfile): mouse is **off by default** so xterm.js keeps native browser text selection and Cmd+C (#40). `Ctrl+B m` toggles tmux mouse mode when tmux scroll/copy is needed. A direct Ctrl+M binding is impossible — C-m and Enter are the same byte (0x0D).
 

@@ -36,6 +36,16 @@ STATIC_TARGETS = (
         "strategy": "remove-tree",
     },
     {
+        "id": "uploads",
+        "label": ".uploads/",
+        "relative_path": ".uploads",
+        "description": "Images pasted/dropped into the web terminal",
+        "category": "runtime",
+        "risk": "low",
+        "order": 25,
+        "strategy": "remove-tree",
+    },
+    {
         "id": "cache-home",
         "label": "~/.cache",
         "relative_path": ".cache",
@@ -68,9 +78,13 @@ STATIC_TARGETS = (
 )
 
 PROJECT_CATEGORY_ORDER = 100
-# runtime/ is exposed as a dedicated static cleanup target, so it must not also
-# show up in the discovered project/work-directory list.
-RESERVED_TOP_LEVEL_NAMES = {"runtime"}
+# Top-level static targets (runtime/, ...) must not also show up in the
+# discovered project/work-directory list. Derived from STATIC_TARGETS so adding
+# a target keeps the two in sync; dot-prefixed entries (.hapi, .uploads, ...)
+# are already excluded by the callers' hidden-name filters.
+RESERVED_TOP_LEVEL_NAMES = {
+    spec["relative_path"] for spec in STATIC_TARGETS if "/" not in spec["relative_path"]
+}
 MAX_SIZE_WALK_ENTRIES = 5000
 
 

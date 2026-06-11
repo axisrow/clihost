@@ -145,6 +145,42 @@ class TestListAndGet(unittest.TestCase):
         self.assertIsNone(manager.get_terminal(1))
 
 
+class TestSpawnPrivileges(unittest.TestCase):
+    """Root wraps child commands in runuser; an unprivileged proxy runs them directly."""
+
+    def _commands(self, euid):
+        """Create and delete a terminal under euid; return (manager, spawn argv, kill argv)."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 100
+        with patch("ttydproxy.manager.os.geteuid", return_value=euid), patch(
+            "ttydproxy.manager.subprocess.Popen", return_value=mock_proc
+        ) as mock_popen, patch("ttydproxy.manager.subprocess.run") as mock_run:
+            manager = TTYDManager(base_port=9000, ttyd_user="hapi")
+            manager.create_terminal()
+            manager.delete_terminal(1)
+        return manager, mock_popen.call_args[0][0], mock_run.call_args[0][0]
+
+    def test_root_spawns_via_runuser(self):
+        manager, spawn, _kill = self._commands(euid=0)
+        self.assertEqual(spawn[:4], ["runuser", "-u", "hapi", "--"])
+        self.assertIn(manager.ttyd_binary, spawn)
+
+    def test_nonroot_spawns_directly(self):
+        manager, spawn, _kill = self._commands(euid=1000)
+        self.assertEqual(spawn[0], manager.ttyd_binary)
+        self.assertNotIn("runuser", spawn)
+
+    def test_root_kills_tmux_via_runuser(self):
+        _manager, _spawn, kill = self._commands(euid=0)
+        self.assertEqual(kill[:4], ["runuser", "-u", "hapi", "--"])
+        self.assertIn("kill-session", kill)
+
+    def test_nonroot_kills_tmux_directly(self):
+        _manager, _spawn, kill = self._commands(euid=1000)
+        self.assertEqual(kill[0], "tmux")
+        self.assertNotIn("runuser", kill)
+
+
 class TestAllocatePort(unittest.TestCase):
     def test_first_port(self):
         self.assertEqual(TTYDManager(base_port=9000)._allocate_port(), 9000)

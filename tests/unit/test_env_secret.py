@@ -37,18 +37,24 @@ class TestEnvSecret(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(env_secret("MY_SECRET", "default"), "default")
 
-    def test_unreadable_file_falls_back_to_env(self):
+    def test_unreadable_file_exits(self):
+        # <NAME>_FILE is authoritative: a broken file must abort startup, not
+        # silently fall back to the env var or a guessable default secret.
         env = {"MY_SECRET_FILE": "/nonexistent/path", "MY_SECRET": "env-secret"}
         with patch.dict(os.environ, env, clear=True):
-            self.assertEqual(env_secret("MY_SECRET", "default"), "env-secret")
+            with self.assertRaises(SystemExit) as ctx:
+                env_secret("MY_SECRET", "default")
+        self.assertEqual(ctx.exception.code, 1)
 
-    def test_empty_file_falls_back(self):
+    def test_empty_file_exits(self):
         with tempfile.NamedTemporaryFile("w", suffix=".secret", delete=False) as f:
             f.write("\n")
             path = f.name
         try:
             with patch.dict(os.environ, {"MY_SECRET_FILE": path}, clear=True):
-                self.assertEqual(env_secret("MY_SECRET", "default"), "default")
+                with self.assertRaises(SystemExit) as ctx:
+                    env_secret("MY_SECRET", "default")
+            self.assertEqual(ctx.exception.code, 1)
         finally:
             os.unlink(path)
 
