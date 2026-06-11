@@ -25,14 +25,19 @@
       color: #444; font-family: monospace; font-size: 13px;
     }
 
-    .phone-frame .vkbd { display: flex !important; }
+    /* Preview only: pin the toggle to the phone frame instead of the viewport
+       (production uses position: fixed against the real viewport). */
+    .phone-frame #vkbd-toggle { position: absolute; }
   </style>
   <link rel="stylesheet" href="../../app/assets/virtual_keyboard_style.css">
 </head>
-<body>
+<body class="vkbd-open">
 
   <div class="phone-frame">
     <div class="phone-notch"></div>
+    <!-- Copy of the toggle from app/assets/virtual_keyboard.html
+         (aria-pressed=true: the preview starts open) -->
+    <button id="vkbd-toggle" type="button" aria-label="Toggle virtual keyboard" aria-pressed="true" title="Toggle keyboard">&#9000;</button>
     <div class="terminal-mock">~ $ _</div>
 
     <!-- Copy of app/assets/virtual_keyboard.html markup (no JS) -->
@@ -67,6 +72,10 @@
   </div>
 
   <script>
+    document.getElementById('vkbd-toggle').addEventListener('click', function() {
+      var open = document.body.classList.toggle('vkbd-open');
+      this.setAttribute('aria-pressed', open ? 'true' : 'false');
+    });
     document.getElementById('vkbd').addEventListener('click', function(e) {
       if (e.target.tagName === 'BUTTON') {
         console.log('Key:', e.target.dataset.key);

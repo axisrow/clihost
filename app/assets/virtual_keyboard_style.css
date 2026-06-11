@@ -1,4 +1,5 @@
 .vkbd { display: none; background: #0d0d1a; padding: 6px; gap: 4px; flex-direction: column; }
+body.vkbd-open .vkbd { display: flex; }
 .vkbd-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
 .vkbd-bottom {
   display: grid;
@@ -30,9 +31,20 @@
 .vkbd button.key-scroll { font-size: 15px; }
 .vkbd button.key-scroll.on {
   background: linear-gradient(180deg, #1e4535, #16352a);
-  color: #6fdc9c; border-color: rgba(111,220,156,0.4);
 }
-@media (max-width: 768px) {
-  .vkbd { display: flex; }
-  body { height: calc(100vh - 140px); }
+/* Floating keyboard toggle — always visible, raises/lowers the vkbd (issue #32). */
+#vkbd-toggle {
+  position: fixed; top: 8px; right: 8px; z-index: 1;
+  width: 34px; height: 34px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; line-height: 1; color: #cdd6e6;
+  background: rgba(13, 13, 26, 0.8); border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 8px; cursor: pointer; opacity: 0.55;
+  touch-action: manipulation; transition: opacity 0.15s ease;
 }
+#vkbd-toggle:hover { opacity: 1; }
+#vkbd-toggle:active { transform: translateY(1px); }
+body.vkbd-open #vkbd-toggle { opacity: 0.85; }
+/* Shared "on" accent: the scroll key and the open keyboard toggle. */
+.vkbd button.key-scroll.on,
+body.vkbd-open #vkbd-toggle { color: #6fdc9c; border-color: rgba(111,220,156,0.4); }

@@ -24,11 +24,19 @@ class TestVKBDEnabled(unittest.TestCase):
         self.assertIn('class="vkbd-bottom"', self.html)
 
     def test_mobile_styles_present(self):
-        self.assertIn("@media (max-width: 768px)", self.html)
+        self.assertIn("body.vkbd-open .vkbd", self.html)
         self.assertIn("touch-action: manipulation", self.html)
         self.assertIn("overflow: hidden", self.html)
         self.assertIn("overscroll-behavior: none", self.html)
         self.assertIn("touch-action: none", self.html)
+
+    def test_toggle_button_present(self):
+        self.assertIn('id="vkbd-toggle"', self.html)
+        self.assertIn('aria-label="Toggle virtual keyboard"', self.html)
+        self.assertIn("clihost:vkbd-open", self.html)
+        self.assertIn("dispatchEvent(new Event('resize'))", self.html)
+        # Static keyboard height was replaced by flex-driven layout.
+        self.assertNotIn("calc(100vh - 140px)", self.html)
 
     def test_updated_javascript_present(self):
         self.assertIn("function sendKey(key)", self.html)
@@ -54,7 +62,7 @@ class TestVKBDDisabled(unittest.TestCase):
         html = render_terminal_page(1, "testuser", vkbd_enabled=False)
         self.assertNotIn('id="vkbd"', html)
         self.assertNotIn("navigator.clipboard.readText()", html)
-        self.assertNotIn("@media (max-width: 768px)", html)
+        self.assertNotIn('id="vkbd-toggle"', html)
         self.assertIn('src="/ttyd1/"', html)
 
 
