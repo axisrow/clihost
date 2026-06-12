@@ -66,6 +66,25 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertGreater(prep_pos, -1, "UPLOAD_DIR is not pre-created")
         self.assertLess(prep_pos, proxy_pos)
 
+    def test_local_bin_env_created_before_interactive_shells(self):
+        # Persisted home volumes may have shell startup files that source
+        # ~/.local/bin/env. Create a compatibility file instead of rewriting
+        # user dotfiles, and do it before ttyd or ssh can start a shell.
+        local_env_pos = self.text.find('LOCAL_BIN_ENV="${LOCAL_BIN_DIR}/env"')
+        proxy_pos = self.text.find('runuser -u "${TTYD_USER}" -- python3')
+        sshd_pos = self.text.find("exec /usr/sbin/sshd -D -e")
+        self.assertGreater(local_env_pos, -1, "LOCAL_BIN_ENV bootstrap is missing")
+        self.assertLess(local_env_pos, proxy_pos)
+        self.assertLess(local_env_pos, sshd_pos)
+        self.assertIn('mkdir -p "${LOCAL_BIN_DIR}"', self.text)
+        self.assertIn('[ ! -e "${LOCAL_BIN_ENV}" ]', self.text)
+        self.assertIn("cat > \"${LOCAL_BIN_ENV}\" <<'EOF'", self.text)
+        self.assertIn('case ":${PATH}:" in', self.text)
+        self.assertIn('*":${HOME}/.local/bin:"*) ;;', self.text)
+        self.assertIn('export PATH="${HOME}/.local/bin:${PATH}"', self.text)
+        self.assertIn('chmod 0644 "${LOCAL_BIN_ENV}"', self.text)
+        self.assertIn('chown "${HAPI_USER}:${HAPI_USER}" "${LOCAL_BIN_ENV}"', self.text)
+
     def test_hapi_server_log_precreated(self):
         # The log file must exist before the URL-extraction loop starts so the
         # [ -f "$HAPI_SERVER_LOG" ] guard passes on the first iteration.

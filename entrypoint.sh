@@ -36,6 +36,24 @@ ensure_dir_owned() {
   chown -R "${HAPI_USER}:${HAPI_USER}" "${path}"
 }
 
+ensure_local_bin_env() {
+  LOCAL_BIN_DIR="${HAPI_USER_HOME}/.local/bin"
+  LOCAL_BIN_ENV="${LOCAL_BIN_DIR}/env"
+  mkdir -p "${LOCAL_BIN_DIR}"
+  chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}/.local" "${LOCAL_BIN_DIR}"
+  if [ ! -e "${LOCAL_BIN_ENV}" ]; then
+    cat > "${LOCAL_BIN_ENV}" <<'EOF'
+# Compatibility shim for shell startup files that source ~/.local/bin/env.
+case ":${PATH}:" in
+  *":${HOME}/.local/bin:"*) ;;
+  *) export PATH="${HOME}/.local/bin:${PATH}" ;;
+esac
+EOF
+    chmod 0644 "${LOCAL_BIN_ENV}"
+    chown "${HAPI_USER}:${HAPI_USER}" "${LOCAL_BIN_ENV}"
+  fi
+}
+
 run_as_hapi() {
   local command="$1"
   runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"${HAPI_RUN_PATH}\" HAPI_HOME=\"${HAPI_HOME}\" ${command}"
@@ -58,6 +76,7 @@ cleanup_runner_state() {
 
 ensure_dir_owned "${HAPI_USER_HOME}/.config/gh"
 ensure_dir_owned "${HAPI_USER_HOME}/.claude"
+ensure_local_bin_env
 
 # Ensure tmux config exists (volume mount may overwrite it)
 if [ ! -f "${HAPI_USER_HOME}/.tmux.conf" ]; then
