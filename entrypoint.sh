@@ -17,6 +17,7 @@ fi
 : "${CLI_API_TOKEN:=}"
 : "${HAPI_API_URL:=}"
 : "${HAPI_RUNNER_ENABLED:=false}"
+: "${DROID_DAEMON_ENABLED:=false}"
 : "${ROOT_PASSWORD:=}"
 
 HAPI_USER="${HAPI_USER:-hapi}"
@@ -103,16 +104,20 @@ fi
 ensure_dir_owned "${HAPI_HOME}"
 
 # Start Droid daemon with remote access in background
-DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"
-touch "${DROID_DAEMON_LOG}"
-chown "${HAPI_USER}:${HAPI_USER}" "${DROID_DAEMON_LOG}"
-if PATH="${HAPI_RUN_PATH}" command -v droid >/dev/null 2>&1; then
-  echo "Starting droid daemon --remote-access in background (logs: ${DROID_DAEMON_LOG})..."
-  run_as_hapi "stdbuf -oL droid daemon --remote-access 2>&1 | tee \"${DROID_DAEMON_LOG}\"" &
-  DROID_DAEMON_PID=$!
-  echo "Droid daemon started with PID: ${DROID_DAEMON_PID}"
+if [ "${DROID_DAEMON_ENABLED}" = "true" ]; then
+  if PATH="${HAPI_RUN_PATH}" command -v droid >/dev/null 2>&1; then
+    DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"
+    touch "${DROID_DAEMON_LOG}"
+    chown "${HAPI_USER}:${HAPI_USER}" "${DROID_DAEMON_LOG}"
+    echo "Starting droid daemon --remote-access in background (logs: ${DROID_DAEMON_LOG})..."
+    run_as_hapi "stdbuf -oL droid daemon --remote-access 2>&1 | tee \"${DROID_DAEMON_LOG}\"" &
+    DROID_DAEMON_PID=$!
+    echo "Droid daemon started with PID: ${DROID_DAEMON_PID}"
+  else
+    echo "droid CLI not found; skipping droid daemon startup" >&2
+  fi
 else
-  echo "droid CLI not found; skipping droid daemon startup" >&2
+  echo "Droid daemon disabled (set DROID_DAEMON_ENABLED=true to enable remote access)"
 fi
 
 # Start TTYD HTTP proxy (manages TTYD processes dynamically; drops root and

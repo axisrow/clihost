@@ -51,7 +51,7 @@ hapi Client               → hapi runner (80)     → CLI tools
 | `sshd` | 22 | SSH-доступ, main-процесс контейнера |
 | `ttyd_proxy.py` | 8080 | Multithreaded HTTP/WS прокси с аутентификацией |
 | `ttyd` | 127.0.0.1:768x | Web-терминал (по одному на сессию, только localhost) |
-| `droid daemon --remote-access` | — | Droid gateway, logs to `/home/hapi/.hapi/droid-daemon.log` |
+| `droid daemon --remote-access` | — | Optional Droid gateway, logs to `/home/hapi/.hapi/droid-daemon.log` |
 | `hapi runner` | `HAPI_PORT` (default 80) | Запуск CLI-инструментов по API (опционально) |
 | `hapi server --relay` | — | Туннель для внешнего доступа |
 
@@ -90,6 +90,7 @@ Terminal iframe page и связанные JS/CSS-ассеты лежат в `ap
 | `TTYD_PASSWORD` | - | Global password for web terminal (uses system passwords if not set) |
 | `PASSWORD_SECRET` | auto | Secret for session signatures (auto-generated if not set) |
 | `ROOT_PASSWORD` | - | Enable root SSH access with this password |
+| `DROID_DAEMON_ENABLED` | false | Start `droid daemon --remote-access` for Droid remote access |
 
 ### Hapi Runner (Optional)
 
