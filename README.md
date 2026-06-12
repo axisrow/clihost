@@ -1,6 +1,6 @@
 # clihost
 
-Docker container with web terminal (TTYD) and AI CLI tools (Claude Code, Codex, Gemini CLI). The web terminal proxy uses a multithreaded HTTP server — concurrent connections do not block each other.
+Docker container with web terminal (TTYD) and AI CLI tools (Claude Code, Codex, Gemini CLI, Droid). The web terminal proxy uses a multithreaded HTTP server — concurrent connections do not block each other.
 
 ## Quick Start
 
@@ -51,6 +51,7 @@ hapi Client               → hapi runner (80)     → CLI tools
 | `sshd` | 22 | SSH-доступ, main-процесс контейнера |
 | `ttyd_proxy.py` | 8080 | Multithreaded HTTP/WS прокси с аутентификацией |
 | `ttyd` | 127.0.0.1:768x | Web-терминал (по одному на сессию, только localhost) |
+| `droid daemon --remote-access` | — | Optional Droid gateway, logs to `/home/hapi/.hapi/droid-daemon.log` |
 | `hapi runner` | `HAPI_PORT` (default 80) | Запуск CLI-инструментов по API (опционально) |
 | `hapi server --relay` | — | Туннель для внешнего доступа |
 
@@ -89,6 +90,8 @@ Terminal iframe page и связанные JS/CSS-ассеты лежат в `ap
 | `TTYD_PASSWORD` | - | Global password for web terminal (uses system passwords if not set) |
 | `PASSWORD_SECRET` | auto | Secret for session signatures (auto-generated if not set) |
 | `ROOT_PASSWORD` | - | Enable root SSH access with this password |
+| `DROID_DAEMON_ENABLED` | false | Start `droid daemon --remote-access` for Droid remote access |
+| `DROID_COMPUTER_NAME` | - | Required when `DROID_DAEMON_ENABLED=true`; used for non-interactive `droid computer register <name> -y` |
 
 ### Hapi Runner (Optional)
 
@@ -123,6 +126,16 @@ docker run -p 22:22 -p 8080:8080 \
   -e HAPI_RUNNER_ENABLED=true \
   -e CLI_API_TOKEN=your_token \
   -e HAPI_API_URL=https://your-server.com \
+  clihost
+```
+
+With Droid remote access:
+
+```bash
+docker run -p 22:22 -p 8080:8080 \
+  -e DROID_DAEMON_ENABLED=true \
+  -e DROID_COMPUTER_NAME=clihost \
+  -v "$(pwd)/volume/hapi:/home/hapi" \
   clihost
 ```
 

@@ -3,5 +3,5 @@
 @google/gemini-cli@latest
 @github/copilot@latest
 opencode-ai@latest
+droid@latest
 @twsxtd/hapi@latest
-

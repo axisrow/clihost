@@ -17,6 +17,8 @@ fi
 : "${CLI_API_TOKEN:=}"
 : "${HAPI_API_URL:=}"
 : "${HAPI_RUNNER_ENABLED:=false}"
+: "${DROID_DAEMON_ENABLED:=false}"
+: "${DROID_COMPUTER_NAME:=}"
 : "${ROOT_PASSWORD:=}"
 
 HAPI_USER="${HAPI_USER:-hapi}"
@@ -100,6 +102,42 @@ if [ "${HERMES_AUTO_UPDATE:-true}" != "false" ] && command -v hermes &>/dev/null
   fi
 fi
 
+ensure_dir_owned "${HAPI_HOME}"
+
+# Start Droid daemon with remote access in background
+if [ "${DROID_DAEMON_ENABLED}" = "true" ]; then
+  if PATH="${HAPI_RUN_PATH}" command -v droid >/dev/null 2>&1; then
+    if [ -z "${DROID_COMPUTER_NAME}" ]; then
+      echo "ERROR: DROID_DAEMON_ENABLED=true requires DROID_COMPUTER_NAME for non-interactive registration" >&2
+      exit 1
+    fi
+    case "${DROID_COMPUTER_NAME}" in
+      *[!A-Za-z0-9_.-]*)
+        echo "ERROR: DROID_COMPUTER_NAME may only contain letters, numbers, dot, underscore, and dash" >&2
+        exit 1
+        ;;
+    esac
+
+    echo "Registering Droid computer '${DROID_COMPUTER_NAME}'..."
+    if ! run_as_hapi "droid computer register \"${DROID_COMPUTER_NAME}\" -y 2>&1"; then
+      echo "ERROR: Droid computer registration failed; daemon not started" >&2
+      exit 1
+    fi
+
+    DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"
+    touch "${DROID_DAEMON_LOG}"
+    chown "${HAPI_USER}:${HAPI_USER}" "${DROID_DAEMON_LOG}"
+    echo "Starting droid daemon --remote-access in background (logs: ${DROID_DAEMON_LOG})..."
+    run_as_hapi "stdbuf -oL droid daemon --remote-access 2>&1 | tee \"${DROID_DAEMON_LOG}\"" &
+    DROID_DAEMON_PID=$!
+    echo "Droid daemon started with PID: ${DROID_DAEMON_PID}"
+  else
+    echo "droid CLI not found; skipping droid daemon startup" >&2
+  fi
+else
+  echo "Droid daemon disabled (set DROID_DAEMON_ENABLED=true to enable remote access)"
+fi
+
 # Start TTYD HTTP proxy (manages TTYD processes dynamically; drops root and
 # runs as TTYD_USER). The secret goes through a TTYD_USER-only file (Docker
 # *_FILE convention) so it never appears in the proxy's /proc/<pid>/environ.
@@ -133,7 +171,6 @@ runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &
 
 # Start hapi server with relay in background (logs to file, force TCP relay)
 HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
-ensure_dir_owned "${HAPI_HOME}"
 # Pre-create the log so the URL-extraction loop's -f check passes immediately
 touch "${HAPI_SERVER_LOG}"
 chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_SERVER_LOG}"

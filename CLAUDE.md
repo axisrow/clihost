@@ -50,12 +50,13 @@ python -m pytest tests/ -k "test_truthy_1"       # single test by name
 
 ## Architecture
 
-Docker container running hapi CLI runner alongside OpenSSH server, bundling AI CLI tools (Claude Code, Codex, Gemini CLI, Copilot, OpenCode, Hermes Agent), with an integrated multi-terminal web UI (TTYD).
+Docker container running hapi CLI runner alongside OpenSSH server, bundling AI CLI tools (Claude Code, Codex, Gemini CLI, Copilot, OpenCode, Droid, Hermes Agent), with an integrated multi-terminal web UI (TTYD).
 
 **Multi-process layout:**
 - `sshd` (port 22) — SSH access, the container's main process (`exec` at end of entrypoint.sh)
 - `ttyd_proxy.py` (PORT, default 8080) — HTTP/WebSocket reverse proxy with auth; **spawns and manages ttyd processes itself**; runs unprivileged as `TTYD_USER` (entrypoint drops root via `runuser`)
 - `ttyd` (127.0.0.1:7681, 7682, …) — one process per terminal, localhost-only, each attached to its own tmux session `ttyd-{id}` via `bin/tmux-wrapper.sh`
+- `droid daemon --remote-access` — optional remote-access gateway; starts as `hapi` only when `DROID_DAEMON_ENABLED=true`; requires `DROID_COMPUTER_NAME` for non-interactive `droid computer register <name> -y`; logs to `/home/hapi/.hapi/droid-daemon.log`
 - `hapi server --relay` — always starts; tunnel URL + token are extracted from its log into `/home/hapi/url` (shown on the dashboard)
 - `hapi runner` (HAPI_PORT, default 80) — optional, requires HAPI_RUNNER_ENABLED=true
 
@@ -66,7 +67,7 @@ SSH Client → sshd (22) → shell
 hapi Client → HTTP API (HAPI_PORT) → hapi runner
 ```
 
-**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → start `hapi server --relay` and extract connection URL → optionally start hapi runner → `exec sshd`.
+**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → start `hapi server --relay` and extract connection URL → optionally start hapi runner → `exec sshd`.
 
 **Volume mount:** `/home/hapi` — persistent runner state, logs, configs. The mount overwrites permissions, hence the permission fixes in entrypoint.sh.
 
@@ -136,7 +137,10 @@ Terminal list and controls are built **dynamically in JavaScript**, not static H
 - `CLI_API_TOKEN`, `HAPI_API_URL` — required if runner enabled
 - `HAPI_HOST` (default: 0.0.0.0), `HAPI_PORT` (default: 80), `HAPI_USER` (default: hapi)
 
-**Other:** `HERMES_AUTO_UPDATE` — set `false` to skip Hermes Agent update at container start.
+**Other:**
+- `DROID_DAEMON_ENABLED` — set `true` to start `droid daemon --remote-access` at container start (default: false)
+- `DROID_COMPUTER_NAME` — required when `DROID_DAEMON_ENABLED=true`; limited to letters, numbers, dots, underscores, and dashes; used for non-interactive registration before daemon startup
+- `HERMES_AUTO_UPDATE` — set `false` to skip Hermes Agent update at container start.
 
 Update `.env.example` when adding/changing variables.
 

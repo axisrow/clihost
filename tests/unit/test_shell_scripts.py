@@ -7,6 +7,8 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 ENTRYPOINT = REPO_ROOT / "entrypoint.sh"
 BUILD_SH = REPO_ROOT / "build.sh"
+DOCKERFILE = REPO_ROOT / "Dockerfile"
+CLI_PACKAGES = REPO_ROOT / "cli-packages.txt"
 
 
 class TestShellSyntax(unittest.TestCase):
@@ -71,6 +73,30 @@ class TestEntrypointRegressions(unittest.TestCase):
         server_start_pos = self.text.find("hapi server --relay 2>&1")
         self.assertGreater(touch_pos, -1, "HAPI_SERVER_LOG is not pre-created")
         self.assertLess(touch_pos, server_start_pos)
+
+    def test_droid_daemon_started_as_hapi_with_log(self):
+        self.assertIn(': "${DROID_DAEMON_ENABLED:=false}"', self.text)
+        self.assertIn(': "${DROID_COMPUTER_NAME:=}"', self.text)
+        self.assertIn('[ "${DROID_DAEMON_ENABLED}" = "true" ]', self.text)
+        self.assertIn("DROID_DAEMON_ENABLED=true requires DROID_COMPUTER_NAME", self.text)
+        self.assertIn('droid computer register \\"${DROID_COMPUTER_NAME}\\" -y', self.text)
+        self.assertIn('DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"', self.text)
+        self.assertIn('PATH="${HAPI_RUN_PATH}" command -v droid', self.text)
+        self.assertIn(
+            'run_as_hapi "stdbuf -oL droid daemon --remote-access 2>&1 | tee \\"${DROID_DAEMON_LOG}\\"" &',
+            self.text,
+        )
+
+
+class TestDockerPackageRegressions(unittest.TestCase):
+    def test_droid_package_is_installed_and_cache_busted(self):
+        packages = CLI_PACKAGES.read_text()
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn("droid@latest", packages)
+        self.assertIn(
+            "https://registry.npmjs.org/droid/latest /tmp/npm-manifests/droid.json",
+            dockerfile,
+        )
 
 
 class TestBuildShRegressions(unittest.TestCase):
