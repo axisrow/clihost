@@ -76,7 +76,10 @@ class TestEntrypointRegressions(unittest.TestCase):
 
     def test_droid_daemon_started_as_hapi_with_log(self):
         self.assertIn(': "${DROID_DAEMON_ENABLED:=false}"', self.text)
+        self.assertIn(': "${DROID_COMPUTER_NAME:=}"', self.text)
         self.assertIn('[ "${DROID_DAEMON_ENABLED}" = "true" ]', self.text)
+        self.assertIn("DROID_DAEMON_ENABLED=true requires DROID_COMPUTER_NAME", self.text)
+        self.assertIn('droid computer register \\"${DROID_COMPUTER_NAME}\\" -y', self.text)
         self.assertIn('DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"', self.text)
         self.assertIn('PATH="${HAPI_RUN_PATH}" command -v droid', self.text)
         self.assertIn(

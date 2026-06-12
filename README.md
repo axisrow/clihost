@@ -91,6 +91,7 @@ Terminal iframe page и связанные JS/CSS-ассеты лежат в `ap
 | `PASSWORD_SECRET` | auto | Secret for session signatures (auto-generated if not set) |
 | `ROOT_PASSWORD` | - | Enable root SSH access with this password |
 | `DROID_DAEMON_ENABLED` | false | Start `droid daemon --remote-access` for Droid remote access |
+| `DROID_COMPUTER_NAME` | - | Required when `DROID_DAEMON_ENABLED=true`; used for non-interactive `droid computer register <name> -y` |
 
 ### Hapi Runner (Optional)
 
@@ -125,6 +126,16 @@ docker run -p 22:22 -p 8080:8080 \
   -e HAPI_RUNNER_ENABLED=true \
   -e CLI_API_TOKEN=your_token \
   -e HAPI_API_URL=https://your-server.com \
+  clihost
+```
+
+With Droid remote access:
+
+```bash
+docker run -p 22:22 -p 8080:8080 \
+  -e DROID_DAEMON_ENABLED=true \
+  -e DROID_COMPUTER_NAME=clihost \
+  -v "$(pwd)/volume/hapi:/home/hapi" \
   clihost
 ```
 

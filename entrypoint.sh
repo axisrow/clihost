@@ -18,6 +18,7 @@ fi
 : "${HAPI_API_URL:=}"
 : "${HAPI_RUNNER_ENABLED:=false}"
 : "${DROID_DAEMON_ENABLED:=false}"
+: "${DROID_COMPUTER_NAME:=}"
 : "${ROOT_PASSWORD:=}"
 
 HAPI_USER="${HAPI_USER:-hapi}"
@@ -106,6 +107,23 @@ ensure_dir_owned "${HAPI_HOME}"
 # Start Droid daemon with remote access in background
 if [ "${DROID_DAEMON_ENABLED}" = "true" ]; then
   if PATH="${HAPI_RUN_PATH}" command -v droid >/dev/null 2>&1; then
+    if [ -z "${DROID_COMPUTER_NAME}" ]; then
+      echo "ERROR: DROID_DAEMON_ENABLED=true requires DROID_COMPUTER_NAME for non-interactive registration" >&2
+      exit 1
+    fi
+    case "${DROID_COMPUTER_NAME}" in
+      *[!A-Za-z0-9_.-]*)
+        echo "ERROR: DROID_COMPUTER_NAME may only contain letters, numbers, dot, underscore, and dash" >&2
+        exit 1
+        ;;
+    esac
+
+    echo "Registering Droid computer '${DROID_COMPUTER_NAME}'..."
+    if ! run_as_hapi "droid computer register \"${DROID_COMPUTER_NAME}\" -y 2>&1"; then
+      echo "ERROR: Droid computer registration failed; daemon not started" >&2
+      exit 1
+    fi
+
     DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"
     touch "${DROID_DAEMON_LOG}"
     chown "${HAPI_USER}:${HAPI_USER}" "${DROID_DAEMON_LOG}"

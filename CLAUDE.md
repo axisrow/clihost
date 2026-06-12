@@ -56,7 +56,7 @@ Docker container running hapi CLI runner alongside OpenSSH server, bundling AI C
 - `sshd` (port 22) — SSH access, the container's main process (`exec` at end of entrypoint.sh)
 - `ttyd_proxy.py` (PORT, default 8080) — HTTP/WebSocket reverse proxy with auth; **spawns and manages ttyd processes itself**; runs unprivileged as `TTYD_USER` (entrypoint drops root via `runuser`)
 - `ttyd` (127.0.0.1:7681, 7682, …) — one process per terminal, localhost-only, each attached to its own tmux session `ttyd-{id}` via `bin/tmux-wrapper.sh`
-- `droid daemon --remote-access` — optional remote-access gateway; starts as `hapi` only when `DROID_DAEMON_ENABLED=true`; logs to `/home/hapi/.hapi/droid-daemon.log`
+- `droid daemon --remote-access` — optional remote-access gateway; starts as `hapi` only when `DROID_DAEMON_ENABLED=true`; requires `DROID_COMPUTER_NAME` for non-interactive `droid computer register <name> -y`; logs to `/home/hapi/.hapi/droid-daemon.log`
 - `hapi server --relay` — always starts; tunnel URL + token are extracted from its log into `/home/hapi/url` (shown on the dashboard)
 - `hapi runner` (HAPI_PORT, default 80) — optional, requires HAPI_RUNNER_ENABLED=true
 
@@ -139,6 +139,7 @@ Terminal list and controls are built **dynamically in JavaScript**, not static H
 
 **Other:**
 - `DROID_DAEMON_ENABLED` — set `true` to start `droid daemon --remote-access` at container start (default: false)
+- `DROID_COMPUTER_NAME` — required when `DROID_DAEMON_ENABLED=true`; limited to letters, numbers, dots, underscores, and dashes; used for non-interactive registration before daemon startup
 - `HERMES_AUTO_UPDATE` — set `false` to skip Hermes Agent update at container start.
 
 Update `.env.example` when adding/changing variables.
