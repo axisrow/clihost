@@ -1,6 +1,6 @@
 # clihost
 
-Docker container with web terminal (TTYD) and AI CLI tools (Claude Code, Codex, Gemini CLI). The web terminal proxy uses a multithreaded HTTP server — concurrent connections do not block each other.
+Docker container with web terminal (TTYD) and AI CLI tools (Claude Code, Codex, Gemini CLI, Droid). The web terminal proxy uses a multithreaded HTTP server — concurrent connections do not block each other.
 
 ## Quick Start
 
@@ -51,6 +51,7 @@ hapi Client               → hapi runner (80)     → CLI tools
 | `sshd` | 22 | SSH-доступ, main-процесс контейнера |
 | `ttyd_proxy.py` | 8080 | Multithreaded HTTP/WS прокси с аутентификацией |
 | `ttyd` | 127.0.0.1:768x | Web-терминал (по одному на сессию, только localhost) |
+| `droid daemon --remote-access` | — | Droid gateway, logs to `/home/hapi/.hapi/droid-daemon.log` |
 | `hapi runner` | `HAPI_PORT` (default 80) | Запуск CLI-инструментов по API (опционально) |
 | `hapi server --relay` | — | Туннель для внешнего доступа |
 

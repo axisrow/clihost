@@ -100,6 +100,21 @@ if [ "${HERMES_AUTO_UPDATE:-true}" != "false" ] && command -v hermes &>/dev/null
   fi
 fi
 
+ensure_dir_owned "${HAPI_HOME}"
+
+# Start Droid daemon with remote access in background
+DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"
+touch "${DROID_DAEMON_LOG}"
+chown "${HAPI_USER}:${HAPI_USER}" "${DROID_DAEMON_LOG}"
+if PATH="${HAPI_RUN_PATH}" command -v droid >/dev/null 2>&1; then
+  echo "Starting droid daemon --remote-access in background (logs: ${DROID_DAEMON_LOG})..."
+  run_as_hapi "stdbuf -oL droid daemon --remote-access 2>&1 | tee \"${DROID_DAEMON_LOG}\"" &
+  DROID_DAEMON_PID=$!
+  echo "Droid daemon started with PID: ${DROID_DAEMON_PID}"
+else
+  echo "droid CLI not found; skipping droid daemon startup" >&2
+fi
+
 # Start TTYD HTTP proxy (manages TTYD processes dynamically; drops root and
 # runs as TTYD_USER). The secret goes through a TTYD_USER-only file (Docker
 # *_FILE convention) so it never appears in the proxy's /proc/<pid>/environ.
@@ -133,7 +148,6 @@ runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &
 
 # Start hapi server with relay in background (logs to file, force TCP relay)
 HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
-ensure_dir_owned "${HAPI_HOME}"
 # Pre-create the log so the URL-extraction loop's -f check passes immediately
 touch "${HAPI_SERVER_LOG}"
 chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_SERVER_LOG}"

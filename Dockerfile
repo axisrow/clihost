@@ -67,6 +67,7 @@ ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-manifests/codex.jso
 ADD https://registry.npmjs.org/@google/gemini-cli/latest /tmp/npm-manifests/gemini-cli.json
 ADD https://registry.npmjs.org/@github/copilot/latest /tmp/npm-manifests/copilot.json
 ADD https://registry.npmjs.org/opencode-ai/latest /tmp/npm-manifests/opencode-ai.json
+ADD https://registry.npmjs.org/droid/latest /tmp/npm-manifests/droid.json
 ADD https://registry.npmjs.org/@twsxtd/hapi/latest /tmp/npm-manifests/hapi.json
 
 COPY cli-packages.txt /tmp/cli-packages.txt
