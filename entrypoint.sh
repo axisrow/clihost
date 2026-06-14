@@ -20,6 +20,7 @@ fi
 : "${DROID_DAEMON_ENABLED:=false}"
 : "${DROID_COMPUTER_NAME:=}"
 : "${ROOT_PASSWORD:=}"
+: "${TTYD_SANDBOX:=false}"
 
 HAPI_USER="${HAPI_USER:-hapi}"
 HAPI_USER_HOME="/home/${HAPI_USER}"
@@ -186,6 +187,7 @@ TTYD_PASSWORD="${TTYD_PASSWORD}" \
 PASSWORD_SECRET_FILE="${PROXY_SECRET_FILE}" \
 CLEANUP_ROOT="${CLEANUP_ROOT}" \
 HAPI_HOME="${HAPI_HOME}" \
+TTYD_SANDBOX="${TTYD_SANDBOX}" \
 runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &
 
 # Start hapi server with relay in background (logs to file, force TCP relay)
