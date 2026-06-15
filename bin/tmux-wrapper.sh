@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 # tmux-wrapper.sh - Присоединяется к существующей tmux сессии или создаёт новую
 # Обеспечивает постоянные сессии при переподключении к терминалу
 #
@@ -34,7 +35,7 @@ if [ "${TTYD_SANDBOX}" = "true" ]; then
   # bwrap падает, если SOURCE у --ro-bind отсутствует ("Can't find source path"),
   # поэтому каждый системный путь биндим только если он существует.
   binds=()
-  for p in /usr /bin /sbin /lib /lib64 /etc /usr/local; do
+  for p in /usr /bin /sbin /lib /lib64 /etc; do
     [ -e "$p" ] && binds+=(--ro-bind "$p" "$p")
   done
 

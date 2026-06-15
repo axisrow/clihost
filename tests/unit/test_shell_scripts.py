@@ -171,7 +171,7 @@ class TestTmuxWrapperSandboxRegressions(unittest.TestCase):
 
 
 class TestDockerPackageRegressions(unittest.TestCase):
-    def test_bubblewrap_is_installed_for_codex_sandboxing(self):
+    def test_bubblewrap_is_installed_for_ttyd_sandbox(self):
         dockerfile = DOCKERFILE.read_text()
         self.assertIn("bubblewrap", dockerfile)
 
