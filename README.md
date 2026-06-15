@@ -92,6 +92,19 @@ Terminal iframe page и связанные JS/CSS-ассеты лежат в `ap
 | `ROOT_PASSWORD` | - | Enable root SSH access with this password |
 | `DROID_DAEMON_ENABLED` | false | Start `droid daemon --remote-access` for Droid remote access |
 | `DROID_COMPUTER_NAME` | - | Required when `DROID_DAEMON_ENABLED=true`; used for non-interactive `droid computer register <name> -y` |
+| `TTYD_SANDBOX` | false | Wrap each tmux session in a bubblewrap jail (see Multi-tenant sandbox below) |
+
+### Multi-tenant sandbox (optional)
+
+`TTYD_SANDBOX=true` launches every tmux session inside a [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) jail so that, in multi-tenant deployments where each terminal runs as a different Linux user, users can't read each other's `/home/*` and system directories are read-only. It is **off by default** — single-user clihost is unchanged.
+
+The jail **requires** the container to run with `--security-opt seccomp=unconfined` (Docker's default seccomp profile blocks the namespace syscalls bwrap needs). On Dokku:
+
+```bash
+dokku docker-options:add <app> deploy,run "--security-opt seccomp=unconfined"
+```
+
+The jail keeps network access (AI CLIs need it) and is **fail-closed**: if it can't start, the terminal doesn't open rather than falling back to an unsandboxed shell.
 
 ### Hapi Runner (Optional)
 

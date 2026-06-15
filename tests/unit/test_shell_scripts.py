@@ -9,11 +9,12 @@ ENTRYPOINT = REPO_ROOT / "entrypoint.sh"
 BUILD_SH = REPO_ROOT / "build.sh"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 CLI_PACKAGES = REPO_ROOT / "cli-packages.txt"
+TMUX_WRAPPER = REPO_ROOT / "bin/tmux-wrapper.sh"
 
 
 class TestShellSyntax(unittest.TestCase):
     def test_scripts_parse(self):
-        for script in (ENTRYPOINT, BUILD_SH):
+        for script in (ENTRYPOINT, BUILD_SH, TMUX_WRAPPER):
             with self.subTest(script=script.name):
                 result = subprocess.run(
                     ["bash", "-n", str(script)], capture_output=True, text=True
@@ -106,8 +107,74 @@ class TestEntrypointRegressions(unittest.TestCase):
             self.text,
         )
 
+    def test_sandbox_flag_passed_to_proxy(self):
+        # tmux-wrapper.sh only sees TTYD_SANDBOX if the entrypoint defaults it
+        # and adds it to the proxy's runuser env block (a closed allow-list);
+        # the proxy then inherits it down to the ttyd -> tmux-wrapper child.
+        self.assertIn(': "${TTYD_SANDBOX:=false}"', self.text)
+        self.assertIn('TTYD_SANDBOX="${TTYD_SANDBOX}"', self.text)
+
+
+class TestTmuxWrapperSandboxRegressions(unittest.TestCase):
+    def setUp(self):
+        self.text = TMUX_WRAPPER.read_text()
+
+    def test_sandbox_default_off(self):
+        # Single-user clihost stays unchanged unless explicitly opted in.
+        self.assertIn(': "${TTYD_SANDBOX:=false}"', self.text)
+
+    def test_sandbox_is_flag_gated(self):
+        self.assertIn('if [ "${TTYD_SANDBOX}" = "true" ]', self.text)
+
+    def test_default_path_is_byte_for_byte_original(self):
+        # The flag-off exec must be the original jail-free tmux launch AND the
+        # last line of the file (so the gated branch never shadows it).
+        last_exec = self.text.rstrip().splitlines()[-1]
+        self.assertEqual(
+            last_exec.strip(),
+            'exec tmux new-session -A -s "$SESSION_NAME" -c "$HOME"',
+        )
+
+    def test_sandbox_uses_bwrap(self):
+        self.assertIn("exec bwrap", self.text)
+
+    def test_required_unshare_flags_present(self):
+        for flag in ("--unshare-user", "--unshare-pid", "--unshare-ipc",
+                     "--die-with-parent"):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, self.text)
+
+    def test_network_namespace_not_unshared(self):
+        # AI CLIs (claude-code/codex/gemini) need network — net stays shared.
+        self.assertNotIn("--unshare-net", self.text)
+
+    def test_proc_inherited_readonly(self):
+        # A fresh --proc can't be mounted in some target envs; /proc is ro-bound.
+        self.assertIn("--ro-bind /proc /proc", self.text)
+
+    def test_binds_are_guarded(self):
+        # Each --ro-bind SOURCE is added only if it exists, else bwrap aborts.
+        self.assertRegex(self.text, r'\[ -e "\$p" \] && binds\+=\(--ro-bind')
+        for p in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"):
+            with self.subTest(path=p):
+                self.assertIn(p, self.text)
+
+    def test_home_is_writable_bind(self):
+        self.assertIn('--bind "$HOME" "$HOME"', self.text)
+
+    def test_tmux_socket_pinned_under_home(self):
+        # Per-jail tmpfs /tmp would break `new-session -A` reattach, so the tmux
+        # socket lives under the bound $HOME and survives reconnects.
+        self.assertIn("tmux -S", self.text)
+        self.assertIn('${HOME}/.cache/tmux', self.text)
+        self.assertIn("new-session -A -s", self.text)
+
 
 class TestDockerPackageRegressions(unittest.TestCase):
+    def test_bubblewrap_is_installed_for_ttyd_sandbox(self):
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn("bubblewrap", dockerfile)
+
     def test_droid_package_is_installed_and_cache_busted(self):
         packages = CLI_PACKAGES.read_text()
         dockerfile = DOCKERFILE.read_text()

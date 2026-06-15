@@ -62,7 +62,7 @@ Docker container running hapi CLI runner alongside OpenSSH server, bundling AI C
 
 **Data flow:**
 ```
-Browser → HTTP/WS → ttyd_proxy (8080) → ttyd (127.0.0.1:768x) → tmux-wrapper → shell
+Browser → HTTP/WS → ttyd_proxy (8080) → ttyd (127.0.0.1:768x) → tmux-wrapper → [bwrap jail if TTYD_SANDBOX=true] → shell
 SSH Client → sshd (22) → shell
 hapi Client → HTTP API (HAPI_PORT) → hapi runner
 ```
@@ -141,6 +141,24 @@ Terminal list and controls are built **dynamically in JavaScript**, not static H
 - `DROID_DAEMON_ENABLED` — set `true` to start `droid daemon --remote-access` at container start (default: false)
 - `DROID_COMPUTER_NAME` — required when `DROID_DAEMON_ENABLED=true`; limited to letters, numbers, dots, underscores, and dashes; used for non-interactive registration before daemon startup
 - `HERMES_AUTO_UPDATE` — set `false` to skip Hermes Agent update at container start.
+
+**Sandbox (optional):**
+- `TTYD_SANDBOX` — set `true` to launch each tmux session inside a bubblewrap (bwrap)
+  jail (default: false). Isolates per-user `/home` (other users' homes are invisible),
+  makes system dirs read-only. Intended for multi-tenant forks (e.g. clihost_cloud) where
+  each terminal runs as a different Linux user via `runuser`. **REQUIRES** the container to
+  start with `--security-opt seccomp=unconfined` — Docker's default seccomp blocks the
+  `clone(CLONE_NEW*)` syscalls bwrap needs, so without it the jail fails at namespace
+  creation. On Dokku: `dokku docker-options:add <app> deploy,run "--security-opt seccomp=unconfined"`.
+  Behavior is **fail-closed**: if `TTYD_SANDBOX=true` but the jail can't start, the terminal
+  does not open (it never falls back to an unsandboxed shell). The jail does NOT unshare the
+  network (AI CLIs need it) and inherits `/proc` read-only, so filesystem isolation is complete
+  but process hiding is not (host PIDs stay visible via `/proc/{pid}`; a later `hidepid` concern).
+  Cleanup note: when sandboxed, `manager.py`'s `tmux kill-session` becomes a no-op (the jailed
+  tmux uses a socket under `$HOME/.cache/tmux/`, not the default one); the real lifecycle
+  guarantee is `--die-with-parent`, and the orphaned tmux server is harmlessly reattached on
+  reconnect. Known limitation: a future nested bwrap (e.g. codex's own sandbox) breaks under the
+  outer `--unshare-user`; codex does not invoke bwrap today.
 
 Update `.env.example` when adding/changing variables.
 
