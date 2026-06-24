@@ -1,6 +1,6 @@
 # clihost
 
-Docker container with web terminal (TTYD) and AI CLI tools (Claude Code, Codex, Gemini CLI, Droid). The web terminal proxy uses a multithreaded HTTP server — concurrent connections do not block each other.
+Docker container with web terminal (TTYD) and AI CLI tools (Claude Code, Codex, Gemini CLI, Copilot, OpenCode, Droid, Hermes). Each tool can be excluded at build time for a lighter image — see [Модульный состав образа](#модульный-состав-образа). The web terminal proxy uses a multithreaded HTTP server — concurrent connections do not block each other.
 
 ## Quick Start
 
@@ -13,6 +13,31 @@ docker run -p 22:22 -p 8080:8080 clihost
 ```
 
 Open http://localhost:8080 for web terminal access.
+
+## Модульный состав образа
+
+Каждый CLI-инструмент можно исключить из образа на этапе сборки, чтобы получить более лёгкий, заточенный под конкретный деплой образ. Управление — через **build-time** аргументы `INSTALL_<KEY>` (по умолчанию `true`, ставится всё):
+
+| Build arg | Компонент |
+|-----------|-----------|
+| `INSTALL_CLAUDE_CODE` | Claude Code (`@anthropic-ai/claude-code`) |
+| `INSTALL_CODEX` | Codex (`@openai/codex`) |
+| `INSTALL_GEMINI` | Gemini CLI (`@google/gemini-cli`) |
+| `INSTALL_COPILOT` | GitHub Copilot (`@github/copilot`) |
+| `INSTALL_OPENCODE` | OpenCode (`opencode-ai`) |
+| `INSTALL_DROID` | Droid (`droid`) |
+| `INSTALL_HAPI` | Hapi (`@twsxtd/hapi`) — ядро рантайма (туннель/runner/URL на дашборде) |
+| `INSTALL_HERMES` | Hermes Agent (Nous Research, ставится через pip) |
+
+```bash
+# Собрать без Codex и Gemini
+docker build --build-arg INSTALL_CODEX=false --build-arg INSTALL_GEMINI=false -t clihost .
+
+# То же через build.sh (он также авто-определяет версии npm для cache-busting)
+INSTALL_CODEX=false INSTALL_GEMINI=false ./build.sh
+```
+
+> Это **не** runtime-переменные: инструменты устанавливаются во время `docker build`, поэтому задавать их через `docker run -e` бесполезно. На Railway укажите их в разделе **Build-time variables** сервиса — платформа пробросит их в `docker build`.
 
 ## Deploy on Railway
 

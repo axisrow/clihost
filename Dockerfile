@@ -70,22 +70,49 @@ ADD https://registry.npmjs.org/opencode-ai/latest /tmp/npm-manifests/opencode-ai
 ADD https://registry.npmjs.org/droid/latest /tmp/npm-manifests/droid.json
 ADD https://registry.npmjs.org/@twsxtd/hapi/latest /tmp/npm-manifests/hapi.json
 
-COPY cli-packages.txt /tmp/cli-packages.txt
+# Modular install flags (issue #57): set any to "false" at build time to drop
+# that CLI tool from the image, e.g. `docker build --build-arg INSTALL_CODEX=false`.
+# Defaults are "true", so an unspecified build installs everything (unchanged).
+# Keep the keys in sync with cli-packages.txt and .env.example.
+ARG INSTALL_CLAUDE_CODE=true
+ARG INSTALL_CODEX=true
+ARG INSTALL_GEMINI=true
+ARG INSTALL_COPILOT=true
+ARG INSTALL_OPENCODE=true
+ARG INSTALL_DROID=true
+ARG INSTALL_HAPI=true
+ARG INSTALL_HERMES=true
 
-# Install all CLI tools in one layer, then fix permissions and clean up
-RUN for i in 1 2 3 4 5; do \
-      xargs npm install -g < /tmp/cli-packages.txt && break || sleep 10; \
-    done && \
+COPY cli-packages.txt /tmp/cli-packages.txt
+COPY bin/install-cli.sh /tmp/install-cli.sh
+
+# Install the enabled CLI tools in one layer, then fix permissions and clean up.
+# install-cli.sh reads the INSTALL_<KEY> values from the environment, so promote
+# the build args to env vars for the duration of this RUN.
+RUN chmod +x /tmp/install-cli.sh && \
+    INSTALL_CLAUDE_CODE="${INSTALL_CLAUDE_CODE}" \
+    INSTALL_CODEX="${INSTALL_CODEX}" \
+    INSTALL_GEMINI="${INSTALL_GEMINI}" \
+    INSTALL_COPILOT="${INSTALL_COPILOT}" \
+    INSTALL_OPENCODE="${INSTALL_OPENCODE}" \
+    INSTALL_DROID="${INSTALL_DROID}" \
+    INSTALL_HAPI="${INSTALL_HAPI}" \
+    /tmp/install-cli.sh /tmp/cli-packages.txt && \
     chown -R hapi:hapi /usr/local/lib/node_modules && \
     npm cache clean --force && \
     rm -rf /tmp/*
 
-# Install Hermes Agent (Nous Research) — git clone + pip, no venv/uv
-RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
-    cd /tmp/hermes-agent && \
-    pip install --break-system-packages '.[all,messaging]' && \
-    which hermes && \
-    rm -rf /tmp/hermes-agent
+# Install Hermes Agent (Nous Research) — git clone + pip, no venv/uv.
+# Gated by INSTALL_HERMES so it can be dropped from lighter images (issue #57).
+RUN if [ "${INSTALL_HERMES}" = "false" ]; then \
+      echo "Skipping Hermes Agent (INSTALL_HERMES=false)"; \
+    else \
+      git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
+      cd /tmp/hermes-agent && \
+      pip install --break-system-packages '.[all,messaging]' && \
+      which hermes && \
+      rm -rf /tmp/hermes-agent; \
+    fi
 
 # Create app directory for TTYD proxy
 RUN mkdir -p /app /bin
