@@ -190,6 +190,13 @@ HAPI_HOME="${HAPI_HOME}" \
 TTYD_SANDBOX="${TTYD_SANDBOX}" \
 runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &
 
+# Drop any stale dashboard URL up front. On a persistent /home/hapi volume a URL
+# from a previous hapi-enabled image would otherwise make the dashboard render an
+# old relay link/token even when hapi is now absent (INSTALL_HAPI=false). It is
+# recreated below only after a fresh relay URL + token are observed.
+HAPI_URL_FILE="${HAPI_USER_HOME}/url"
+rm -f "${HAPI_URL_FILE}" 2>/dev/null || true
+
 if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then
   # Start hapi server with relay in background (logs to file, force TCP relay)
   HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
@@ -202,7 +209,7 @@ if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then
   echo "Hapi server started with PID: ${HAPI_SERVER_PID}"
 
   # Extract tunnel URL and token, build full connection URL
-  HAPI_URL_FILE="${HAPI_USER_HOME}/url"
+  # (HAPI_URL_FILE was set + cleared above; recreated here only on a fresh URL.)
   HAPI_SETTINGS_FILE="${HAPI_HOME}/settings.json"
   (
     for i in $(seq 1 60); do

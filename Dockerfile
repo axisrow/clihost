@@ -71,7 +71,10 @@ RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
 # while disabled tools copy a stable local file and never fetch their manifest.
 # Keep in sync with cli-packages.txt.
 FROM scratch AS npm-manifest-disabled
-COPY cli-packages.txt /manifest.json
+# Stable, constant placeholder (NOT cli-packages.txt): editing a disabled tool's
+# row must not change this stage's output, or it would invalidate the shared
+# install layer for the enabled tools.
+COPY bin/npm-manifest-placeholder.json /manifest.json
 
 FROM scratch AS npm-manifest-claude-code-true
 ADD https://registry.npmjs.org/@anthropic-ai/claude-code/latest /manifest.json
@@ -152,15 +155,21 @@ RUN chmod +x /tmp/install-cli.sh && \
 
 # Install Hermes Agent (Nous Research) — git clone + pip, no venv/uv.
 # Gated by INSTALL_HERMES so it can be dropped from lighter images (issue #57).
-RUN if [ "${INSTALL_HERMES}" = "false" ]; then \
-      echo "Skipping Hermes Agent (INSTALL_HERMES=false)"; \
-    else \
-      git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
-      cd /tmp/hermes-agent && \
-      pip install --break-system-packages '.[all,messaging]' && \
-      which hermes && \
-      rm -rf /tmp/hermes-agent; \
-    fi
+# Strict boolean: only true/false accepted; fail closed on anything else (e.g.
+# "False", "0") so a misconfigured build never silently ships Hermes.
+RUN case "${INSTALL_HERMES}" in \
+      false) \
+        echo "Skipping Hermes Agent (INSTALL_HERMES=false)" ;; \
+      true) \
+        git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
+        cd /tmp/hermes-agent && \
+        pip install --break-system-packages '.[all,messaging]' && \
+        which hermes && \
+        rm -rf /tmp/hermes-agent ;; \
+      *) \
+        echo "ERROR: INSTALL_HERMES='${INSTALL_HERMES}' is invalid; must be 'true' or 'false'" >&2; \
+        exit 1 ;; \
+    esac
 
 # Create app directory for TTYD proxy
 RUN mkdir -p /app /bin

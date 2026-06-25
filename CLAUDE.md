@@ -37,6 +37,7 @@ Each bundled CLI tool can be dropped from the image to build a lighter, deploy-s
 - `bin/install-cli.sh` reads `cli-packages.txt` and installs only the npm tools whose `INSTALL_<KEY>` env var is not `false`. The `Dockerfile` declares one `ARG INSTALL_<KEY>=true` per component and promotes them into the env for that `RUN`. Hermes has its own `INSTALL_HERMES`-gated `RUN`.
 - `build.sh` forwards every `INSTALL_<KEY>` (read from the shell environment, default `true`) to `docker build` as `--build-arg`, and excludes disabled tools from the cache-busting hash (so bumping a disabled tool's version no longer invalidates the cache).
 - Keys: `INSTALL_CLAUDE_CODE`, `INSTALL_CODEX`, `INSTALL_GEMINI`, `INSTALL_COPILOT`, `INSTALL_OPENCODE`, `INSTALL_DROID`, `INSTALL_HAPI`, `INSTALL_HERMES`. Disabling `INSTALL_HAPI` removes the runtime core (tunnel/runner/dashboard URL); the entrypoint skips hapi startup when the binary is absent and warns if `HAPI_RUNNER_ENABLED=true`.
+- Every `INSTALL_<KEY>` must be exactly `true` or `false` — `install-cli.sh`, `build.sh`, and the Hermes `RUN` all fail closed on anything else (`False`, `0`, typos) so a misconfigured build never silently ships a tool. Caveat: an invalid value passed straight to `docker build` (bypassing `build.sh`) still fails the build, but for an npm tool the manifest stage `FROM npm-manifest-<tool>-${INSTALL_<KEY>}` errors first with an opaque "base name not found" instead of the friendly message — the strict check in `install-cli.sh` is the readable one.
 
 Examples — drop Codex and Gemini:
 ```bash
@@ -85,7 +86,7 @@ SSH Client → sshd (22) → shell
 hapi Client → HTTP API (HAPI_PORT) → hapi runner
 ```
 
-**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → start `hapi server --relay` and extract connection URL → optionally start hapi runner → `exec sshd`.
+**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → drop any stale dashboard URL → if `hapi` is installed, start `hapi server --relay`, extract connection URL, and optionally start hapi runner (otherwise warn and skip) → `exec sshd`.
 
 **Volume mount:** `/home/hapi` — persistent runner state, logs, configs. The mount overwrites permissions, hence the permission fixes in entrypoint.sh.
 

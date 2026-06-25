@@ -306,7 +306,53 @@ class TestModularInstallFlags(unittest.TestCase):
 
     def test_hermes_install_is_gated(self):
         dockerfile = DOCKERFILE.read_text()
-        self.assertIn('if [ "${INSTALL_HERMES}" = "false" ]', dockerfile)
+        # Strict true|false case gate (fails closed on invalid values).
+        self.assertIn('case "${INSTALL_HERMES}" in', dockerfile)
+        self.assertIn("Skipping Hermes Agent (INSTALL_HERMES=false)", dockerfile)
+        self.assertIn(
+            "INSTALL_HERMES='${INSTALL_HERMES}' is invalid", dockerfile
+        )
+
+    def test_disabled_manifest_placeholder_is_independent_of_cli_packages(self):
+        # The disabled-manifest stage must copy a stable placeholder, NOT
+        # cli-packages.txt — otherwise editing a disabled tool's row would change
+        # the stage output and invalidate the shared install layer (issue #57).
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn(
+            "COPY bin/npm-manifest-placeholder.json /manifest.json", dockerfile
+        )
+        self.assertNotIn("COPY cli-packages.txt /manifest.json", dockerfile)
+        self.assertTrue(
+            (REPO_ROOT / "bin/npm-manifest-placeholder.json").is_file(),
+            "placeholder file is missing",
+        )
+
+    def test_install_cli_rejects_invalid_boolean(self):
+        # Strict boolean: a non true/false flag must fail the build, not silently
+        # install (or skip) the tool.
+        result = subprocess.run(
+            ["bash", str(INSTALL_CLI), str(CLI_PACKAGES)],
+            capture_output=True, text=True,
+            env={**os.environ, "INSTALL_CODEX": "False"},
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("INSTALL_CODEX='False' is invalid", result.stderr)
+
+    def test_build_sh_validates_boolean_flags(self):
+        text = BUILD_SH.read_text()
+        self.assertIn("validate_bool", text)
+        self.assertIn("must be 'true' or 'false'", text)
+
+    def test_entrypoint_clears_stale_url_before_hapi_check(self):
+        # On a persistent volume a URL from a previous hapi-enabled image must not
+        # leak into a hapi-disabled run; the entrypoint removes it up front.
+        text = ENTRYPOINT.read_text()
+        rm_pos = text.find('rm -f "${HAPI_URL_FILE}"')
+        guard_pos = text.find(
+            'if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then'
+        )
+        self.assertGreater(rm_pos, -1, "stale URL is not cleared")
+        self.assertLess(rm_pos, guard_pos, "URL must be cleared before the hapi check")
 
     def test_build_sh_forwards_flags_as_build_args(self):
         text = BUILD_SH.read_text()

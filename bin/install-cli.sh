@@ -32,6 +32,16 @@ while read -r key spec _rest; do
   fi
   flag_var="INSTALL_${key}"
   flag_val="${!flag_var:-true}"
+  # Strict boolean: only "true"/"false" are valid. Fail closed on anything else
+  # (e.g. "False", "0", "no", typos) so a misconfigured build never silently
+  # installs a tool that was meant to be excluded.
+  case "${flag_val}" in
+    true|false) ;;
+    *)
+      echo "ERROR: ${flag_var}='${flag_val}' is invalid; must be 'true' or 'false'" >&2
+      exit 1
+      ;;
+  esac
   if [ "${flag_val}" = "false" ]; then
     skipped+=("${spec} (${flag_var}=false)")
     continue

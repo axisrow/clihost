@@ -14,6 +14,19 @@ get_version() {
   echo "unknown"
 }
 
+# Строгая валидация булевого флага: только true/false. Фейлим на любом другом
+# значении, чтобы опечатка ("False"/"0") не привела к тихому включению тула.
+validate_bool() {
+  local name="$1" val="$2"
+  case "${val}" in
+    true|false) ;;
+    *)
+      echo "Error: ${name}='${val}' is invalid; must be 'true' or 'false'"
+      exit 1
+      ;;
+  esac
+}
+
 # cli-packages.txt: "<COMPONENT_KEY> <npm-spec>" (issue #57). Модульные флаги
 # INSTALL_<KEY> читаются из окружения (по умолчанию true) и:
 #   1) передаются в docker build как --build-arg, чтобы install-cli.sh пропустил
@@ -36,6 +49,7 @@ while read -r key spec _rest; do
 
   flag_var="INSTALL_${key}"
   flag_val="${!flag_var:-true}"
+  validate_bool "${flag_var}" "${flag_val}"
   # Всегда пробрасываем флаг в сборку, чтобы образ отражал явный выбор
   BUILD_ARGS+=(--build-arg "${flag_var}=${flag_val}")
 
@@ -58,6 +72,7 @@ done < "${PACKAGE_FILE}"
 # Hermes ставится не из npm (pip из GitHub), но всё равно управляется флагом —
 # пробрасываем его в сборку, если задан.
 if [ -n "${INSTALL_HERMES:-}" ]; then
+  validate_bool "INSTALL_HERMES" "${INSTALL_HERMES}"
   BUILD_ARGS+=(--build-arg "INSTALL_HERMES=${INSTALL_HERMES}")
 fi
 
