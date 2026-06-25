@@ -101,11 +101,14 @@ class TestImageUpload(unittest.TestCase):
                 section = self._section(f"addEventListener('{event_name}'")
                 self.assertIn("e.preventDefault()", section)
 
-    def test_drop_reads_data_transfer(self):
+    def test_drop_prevents_default_only_for_files(self):
         section = self._section("addEventListener('drop'")
-        # Drop always prevents the default (a file drop would navigate away),
-        # so the full triage runs to type dropped text into the terminal.
-        self.assertIn("handleDataTransfer(e.dataTransfer)", section)
+        # Drop suppresses the default only for an image (uploaded) or any other
+        # file (which would navigate the iframe away). A plain-text drop falls
+        # through to xterm's native handling — preventing it would swallow the
+        # text with nothing to replace it (regression #66).
+        self.assertIn("handleImageTransfer(source) || containsFiles(source)", section)
+        self.assertNotIn("handleDataTransfer(e.dataTransfer)", section)
 
     def test_upload_posts_with_csrf(self):
         self.assertIn("fetch('/upload'", self.script)
@@ -126,6 +129,9 @@ class TestImageUpload(unittest.TestCase):
 
     def test_upload_api_exposed_for_parent_page(self):
         self.assertIn("window.__handleDataTransfer = handleDataTransfer", self.script)
+        # The parent forwards only images (text stays on xterm's native path),
+        # so an image-only entry point must be exposed too (regression #66).
+        self.assertIn("window.__handleImageTransfer = handleImageTransfer", self.script)
 
 
 class TestTransferTriage(unittest.TestCase):

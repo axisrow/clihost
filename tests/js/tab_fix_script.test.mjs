@@ -62,10 +62,13 @@ test('iframe paste of plain text reaches the terminal (desktop Ctrl/Cmd+V)', () 
   assert.deepEqual(term.pasted, ['hello world'], 'text must be typed into term');
 });
 
-test('iframe drop of plain text types it into the terminal', () => {
+test('iframe drop of plain text falls through to native xterm (not preventDefault)', () => {
+  // Text drops must reach xterm's own drop handling — the script must neither
+  // type the text itself nor suppress the native path (regression #66).
   const { window, term } = bootIframe();
-  dispatchDrop(window, makeDataTransfer({ text: 'dropped text' }));
-  assert.deepEqual(term.pasted, ['dropped text']);
+  const ev = dispatchDrop(window, makeDataTransfer({ text: 'dropped text' }));
+  assert.equal(ev.defaultPrevented, false, 'text drop must not be preventDefault()ed');
+  assert.deepEqual(term.pasted, [], 'the script must not type the dropped text itself');
 });
 
 test('pasted image still uploads to /upload (regression guard for #53)', () => {

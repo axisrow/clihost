@@ -33,18 +33,35 @@ class TestImageUploadForwarding(unittest.TestCase):
             with self.subTest(event_name=event_name):
                 self.assertIn(f"addEventListener('{event_name}'", self.script)
 
-    def test_delegates_to_iframe_upload_api(self):
-        # The full triage (image → upload, text → type, other → skip) lives
-        # in the iframe's injected script; the parent must not duplicate it,
-        # only forward the transfer.
-        self.assertIn("__handleDataTransfer(dataTransfer)", self.script)
+    def test_delegates_image_only_to_iframe(self):
+        # The parent forwards ONLY images into the iframe's uploader. Plain text
+        # must NOT be forwarded — it has to reach xterm's native paste/drop
+        # handling, or the iOS empty-getData paste loses the text (regression
+        # #66). The actual upload still lives in the iframe; the parent does not
+        # duplicate it.
+        self.assertIn("__handleImageTransfer(dataTransfer)", self.script)
+        self.assertNotIn("__handleDataTransfer", self.script)
         self.assertNotIn("function extractImageFiles", self.script)
         self.assertNotIn("fetch('/upload'", self.script)
+
+    def test_paste_prevents_default_only_when_image_handled(self):
+        # Text paste must fall through (no preventDefault); only a handled image
+        # suppresses the native path.
+        start = self.script.index("addEventListener('paste'")
+        section = self.script[start : self.script.index("}, true);", start)]
+        self.assertIn("if (forwardImageTransfer(e.clipboardData))", section)
+
+    def test_drop_prevents_default_only_for_files(self):
+        # A text drop falls through to xterm; only an image (uploaded) or some
+        # other file (which would navigate the page away) is suppressed.
+        start = self.script.index("addEventListener('drop'")
+        section = self.script[start : self.script.index("}, true);", start)]
+        self.assertIn("forwardImageTransfer(source) || containsFiles(source)", section)
 
     def test_forwarding_is_defensive(self):
         # Same try/catch style as focusTerminal: the iframe may not have the
         # injected script yet.
-        api_start = self.script.index("function forwardDataTransfer")
+        api_start = self.script.index("function forwardImageTransfer")
         section = self.script[api_start : self.script.index("return false;", api_start)]
         self.assertIn("try {", section)
         self.assertIn("console.warn", section)

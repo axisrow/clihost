@@ -158,9 +158,14 @@
     return true;
   }
 
-  // The parent page delegates its paste/drop events through this global
+  // The parent page delegates its paste/drop events through these globals
   // instead of duplicating the triage logic in its own document.
+  // __handleDataTransfer runs the full triage (images + text + skip);
+  // __handleImageTransfer consumes ONLY images and leaves text alone, which
+  // is what the parent forwards so that text paste keeps reaching xterm's
+  // native handler (regression #66).
   window.__handleDataTransfer = handleDataTransfer;
+  window.__handleImageTransfer = handleImageTransfer;
 
   document.addEventListener('paste', function(e) {
     // Only images are consumed on the iframe paste path: pasted text stays
@@ -176,12 +181,15 @@
   }, true);
 
   document.addEventListener('drop', function(e) {
-    // Always prevent the default: a dropped file would otherwise navigate
-    // the iframe away from the terminal. That also swallows text drops, so
-    // the full triage types them into the prompt itself.
-    e.preventDefault();
-    e.stopPropagation();
-    handleDataTransfer(e.dataTransfer);
+    // Images upload; any other FILE is blocked (a dropped file would
+    // otherwise navigate the iframe away from the terminal). Plain TEXT is
+    // left to xterm's own drop handling — preventing the default here would
+    // swallow it with nothing to replace it (regression #66).
+    var source = e.dataTransfer;
+    if (handleImageTransfer(source) || containsFiles(source)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
   }, true);
 
   waitForTerm(function(term) {

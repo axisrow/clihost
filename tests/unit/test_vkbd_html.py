@@ -44,6 +44,20 @@ class TestVKBDEnabled(unittest.TestCase):
         self.assertIn("socket.send('0' + data)", self.html)
         self.assertIn("win.sendTabKey", self.html)
 
+    def test_ctrl_v_uses_term_paste_with_socket_fallback(self):
+        # ^V must deliver pasted text through term.paste (bracketed-paste safe),
+        # falling back to the raw socket only when term.paste is unavailable
+        # (regression #66). The previous raw socket.send('0'+text) bypassed
+        # bracketed paste entirely.
+        self.assertIn("function pasteIntoTerminal(text)", self.html)
+        self.assertIn("win.term.paste(text)", self.html)
+        self.assertIn("pasteIntoTerminal(text)", self.html)
+
+    def test_ctrl_v_surfaces_clipboard_failure(self):
+        # A readText() rejection (common on mobile: focus left the iframe or
+        # permission denied) must warn, not be silently swallowed.
+        self.assertIn("'^V: clipboard read failed:'", self.html)
+
     def test_new_key_sequences(self):
         self.assertIn("String.fromCharCode(127)", self.html)  # backspace
         self.assertIn("String.fromCharCode(12)", self.html)   # ctrl-l

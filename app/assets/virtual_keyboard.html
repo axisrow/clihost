@@ -42,6 +42,25 @@
       } catch (e) {}
     }
 
+    // Deliver pasted text through xterm's term.paste (honours bracketed-paste
+    // mode, so multi-line text is safe) and fall back to a raw ttyd frame only
+    // when term.paste is unavailable. Returns false if nothing could send it.
+    function pasteIntoTerminal(text) {
+      try {
+        var win = iframe.contentWindow;
+        if (win && win.term && win.term.paste) {
+          win.term.paste(text);
+          return true;
+        }
+        var socket = win && (win._ttydSocket || win.socket || win.ws);
+        if (socket && socket.readyState === 1) {
+          socket.send('0' + text);
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+
     function sendKey(key) {
       focusTerminal();
 
@@ -56,18 +75,19 @@
       }
 
       if (key === 'ctrl-v') {
+        if (!navigator.clipboard || !navigator.clipboard.readText) {
+          console.warn('^V: clipboard API unavailable (needs a secure context)');
+          return;
+        }
         navigator.clipboard.readText().then(function(text) {
-          if (text) {
-            try {
-              var win = iframe.contentWindow;
-              var socket = win && (win._ttydSocket || win.socket || win.ws);
-              if (socket && socket.readyState === 1) {
-                socket.send('0' + text);
-              }
-            } catch (e) {}
+          if (!text) return;
+          if (!pasteIntoTerminal(text)) {
+            console.warn('^V: clipboard read but terminal not ready');
           }
         }).catch(function(err) {
-          console.log('Clipboard read failed:', err);
+          // Mobile browsers reject readText() when focus left the iframe or the
+          // permission was denied — surface it instead of swallowing silently.
+          console.warn('^V: clipboard read failed:', err);
         });
         return;
       }
