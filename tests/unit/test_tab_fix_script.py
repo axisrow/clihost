@@ -101,11 +101,14 @@ class TestImageUpload(unittest.TestCase):
                 section = self._section(f"addEventListener('{event_name}'")
                 self.assertIn("e.preventDefault()", section)
 
-    def test_drop_reads_data_transfer(self):
+    def test_drop_prevents_default_only_for_files(self):
         section = self._section("addEventListener('drop'")
-        # Drop always prevents the default (a file drop would navigate away),
-        # so the full triage runs to type dropped text into the terminal.
-        self.assertIn("handleDataTransfer(e.dataTransfer)", section)
+        # Drop suppresses the default only for an image (uploaded) or any other
+        # file (which would navigate the iframe away). A plain-text drop falls
+        # through to xterm's native handling — preventing it would swallow the
+        # text with nothing to replace it (regression #66).
+        self.assertIn("handleImageTransfer(source) || containsFiles(source)", section)
+        self.assertNotIn("handleDataTransfer(e.dataTransfer)", section)
 
     def test_upload_posts_with_csrf(self):
         self.assertIn("fetch('/upload'", self.script)
@@ -125,45 +128,26 @@ class TestImageUpload(unittest.TestCase):
         self.assertIn("slice(0, MAX_UPLOAD_FILES)", self.script)
 
     def test_upload_api_exposed_for_parent_page(self):
-        self.assertIn("window.__handleDataTransfer = handleDataTransfer", self.script)
+        # The parent forwards ONLY images (text stays on xterm's native path),
+        # so the image-only entry point is the one exposed (regression #66).
+        # The old full-triage __handleDataTransfer export was removed with the
+        # dead text-typing path it fronted.
+        self.assertIn("window.__handleImageTransfer = handleImageTransfer", self.script)
+        self.assertNotIn("__handleDataTransfer", self.script)
+        self.assertNotIn("function handleDataTransfer", self.script)
+        self.assertNotIn("function pasteTextToTerminal", self.script)
 
 
-class TestTransferTriage(unittest.TestCase):
-    """Text types into the prompt, images upload, anything else silently skips."""
+class TestFileGating(unittest.TestCase):
+    """Images upload; any other file is blocked from navigating; text is left
+    entirely to xterm (the iframe never types pasted/dropped text itself)."""
 
     def setUp(self):
         self.script = TAB_FIX_SCRIPT
-        self.triage = script_section(
-            self.script, "function handleDataTransfer", "window.__handleDataTransfer"
-        )
-
-    def test_text_typed_via_bracketed_paste_with_socket_fallback(self):
-        # term.paste honours bracketed-paste mode (safe multi-line text);
-        # the raw socket send stays as the fallback.
-        body = script_section(
-            self.script, "function pasteTextToTerminal", "function containsFiles"
-        )
-        self.assertIn("term.paste(text)", body)
-        self.assertIn("sendToTTYD(text)", body)
-
-    def test_images_win_over_text(self):
-        self.assertIn("if (handleImageTransfer(source)) return true;", self.triage)
-        self.assertLess(
-            self.triage.index("handleImageTransfer(source)"),
-            self.triage.index("getData('text/plain')"),
-        )
-
-    def test_non_image_files_silently_skipped(self):
-        # Pin the actual gate: a non-image file transfer never reaches the
-        # text branch, even when it exposes a text representation.
-        self.assertIn(
-            "if (!source || containsFiles(source) || !source.getData) return false;",
-            self.triage,
-        )
 
     def test_contains_files_covers_items_and_files(self):
         # The gate must share extractImageFiles' items/files coverage, or a
-        # files-via-items-only transfer (Safari quirk) slips into text typing.
+        # files-via-items-only transfer (Safari quirk) slips through.
         body = script_section(
             self.script, "function containsFiles", "function handleImageTransfer"
         )
@@ -172,19 +156,26 @@ class TestTransferTriage(unittest.TestCase):
 
     def test_contains_files_has_no_mime_filter(self):
         # Invariant: containsFiles must NOT filter by image/ MIME — any file
-        # (including a PDF) blocks the text branch, which is what makes a
-        # non-image drop a silent skip rather than its text being typed.
+        # (including a PDF) is blocked from navigating the iframe away.
         body = script_section(
             self.script, "function containsFiles", "function handleImageTransfer"
         )
         self.assertNotIn("image/", body)
+
+    def test_iframe_never_types_pasted_text(self):
+        # Regression #66: the iframe must not read text off the transfer and
+        # type it — that fragile path is what broke mobile paste. Text is left
+        # to xterm's native handling. (A comment may still mention getData; the
+        # ban is on the actual call .getData(.)
+        self.assertNotIn(".getData(", self.script)
+        self.assertNotIn("term.paste(text)", self.script)
 
     def test_upload_pipeline_has_catch(self):
         # The parallel Promise.all chain needs a terminal .catch so a throw in
         # the then-callback (e.g. sendToTTYD) is logged, not an unhandled
         # rejection in the console.
         body = script_section(
-            self.script, "function uploadImageFiles", "function pasteTextToTerminal"
+            self.script, "function uploadImageFiles", "function containsFiles"
         )
         self.assertIn("Promise.all(", body)
         self.assertIn(".catch(", body[body.index("Promise.all("):])

@@ -65,6 +65,20 @@ python -m pytest tests/ -k "test_truthy_1"       # single test by name
 - `tests/integration/` — TTYD handler tests that simulate handler behavior without importing the full app wiring (avoids Linux-only deps like `crypt`/PAM).
 - `tests/preview/vkbd_preview.html` — manual visual preview of the virtual keyboard.
 
+### Executable JS asset tests (`tests/js/`, issue #66)
+
+The Python tests for the terminal assets only *grep* the HTML strings — they never execute the JavaScript, which is how the paste-pipeline regression in #53/#54 slipped through (the strings were present, the behavior was broken). `tests/js/` closes that gap by **running the real `<script>` body** of each asset inside a jsdom window and synthesizing paste/drop events / vkbd clicks against it.
+
+```bash
+npm install        # one-time: installs jsdom (the ONLY npm dependency; test-only)
+npm test           # node --test over tests/js/**/*.test.mjs
+```
+
+- **Stack: Node's built-in `node --test` + jsdom.** Chosen because it actually reproduces the regression — the four #66 scenarios (parent text-paste suppressing native xterm, unconditional drop `preventDefault`, ^V bypassing `term.paste`) each fail on the broken code and pass once fixed. jsdom was enough; Playwright/mobile-emulation was the fallback if jsdom couldn't model the clipboard/focus quirks, and proved unnecessary.
+- **Runtime app stays stdlib/npm-free.** jsdom lives only in `devDependencies`; `node_modules/` is gitignored; nothing in `app/` imports it. `package-lock.json` is committed for reproducibility.
+- `tests/js/harness.mjs` extracts the `<script>` from an asset, runs it in jsdom, and provides fakes (`makeFakeTerm` records `term.paste`, `makeFakeSocket` records ttyd frames, `makeDataTransfer`/`makeImageItems` model clipboard payloads incl. the iOS empty-`getData` quirk). Parent-page tests boot the **real** `tab_fix_script.html` inside the iframe's `contentWindow` (`bootIframeScript`) so the parent forwards into genuine triage logic, not a stub.
+- These tests do not run under pytest; run `npm test` separately. Both suites must be green before pushing.
+
 **Manual smoke test:** build image, run container, verify logs show "Hapi runner startup complete" (or fallback message) and sshd stays running. Web terminal: open http://localhost:8080, login with system credentials.
 
 ## Architecture
@@ -205,7 +219,7 @@ The proxy injects a script into ttyd's HTML (`inject_tab_fix_script` in `proxy.p
 - **WebSocket capture**: the script intercepts the `window.WebSocket` constructor; the socket reference must live in `window._ttydSocket` (global), not a local inside the IIFE.
 - **Tab key**: sends ttyd protocol prefix `'0'` (INPUT) + `\t` over the WebSocket. Completion only works in shells that support it (bash); `/bin/sh` (dash) does not.
 - **Mouse wheel**: normal screen — intercepts `wheel` with `capture: true, passive: false`, calls `term.scrollLines(n)`; alternate screen (vim/less/htop, `term.buffer.active.type === 'alternate'`) — passes through. deltaMode: `1` = lines, `2` = pages (`term.rows`), `0` = pixels (÷40).
-- **Paste/drop triage**: capture-phase `paste`/`drop` listeners triage the payload — images upload to `POST /upload` (CSRF token read from the non-HttpOnly `csrf_token` cookie; up to 5 in parallel, returned paths typed in order + space), text types into the prompt (`term.paste`, bracketed-paste-safe; on iframe paste text stays on xterm's default path), anything else (non-image files) is silently skipped. Server validates by magic bytes only (png/jpg/gif/webp; SVG rejected) — the client Content-Type is never trusted. `terminal_parent_tab_handler.html` forwards paste/drop from the parent page into the iframe via `contentWindow.__handleDataTransfer(dataTransfer)`. `handle_ttyd` refreshes the `csrf_token` cookie so long-lived terminal tabs keep uploading.
+- **Paste/drop triage**: capture-phase `paste`/`drop` listeners triage the payload — **images** upload to `POST /upload` (CSRF token read from the non-HttpOnly `csrf_token` cookie; up to 5 in parallel, returned paths typed in order + space); a **non-image file** is `preventDefault`'d (so a dropped file can't navigate the iframe away) but otherwise skipped; **plain text is left entirely to xterm's native paste/drop** — the listeners only `preventDefault` when they actually consume a file, never for text. This is the #66 fix: the earlier pipeline routed text through a fragile `term.paste`/socket path and `preventDefault`'d it, which lost the text on mobile (iOS paste gesture exposes an empty `getData('text/plain')`, focus is not in the iframe). `terminal_parent_tab_handler.html` forwards **only images** from the parent page into the iframe via `contentWindow.__handleImageTransfer(dataTransfer)`; text paste/drop on the parent falls through untouched. (The earlier full-triage `__handleDataTransfer`/`pasteTextToTerminal` path was removed with the #66 fix — nothing typed pasted text any more, so it was dead code.) Server validates uploads by magic bytes only (png/jpg/gif/webp; SVG rejected) — the client Content-Type is never trusted. The `^V` vkbd button delivers clipboard text via `term.paste` (bracketed-paste-safe) with a raw-socket fallback, and warns on a `readText()` rejection instead of swallowing it. `handle_ttyd` refreshes the `csrf_token` cookie so long-lived terminal tabs keep uploading. Executable coverage lives in `tests/js/` (run `npm test`).
 
 **tmux mouse mode** (`config/.tmux.conf`, copied to `/home/hapi/.tmux.conf` in Dockerfile): mouse is **off by default** so xterm.js keeps native browser text selection and Cmd+C (#40). `Ctrl+B m` toggles tmux mouse mode when tmux scroll/copy is needed. A direct Ctrl+M binding is impossible — C-m and Enter are the same byte (0x0D).
 

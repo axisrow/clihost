@@ -30,18 +30,20 @@
     }
 
     // Paste/drop can land on the parent page when the iframe is not focused
-    // (e.g. right after load). The injected iframe script owns the triage
-    // (image → upload, text → type, other → skip); the parent only forwards
-    // the transfer through this same-origin global and mirrors whether it
-    // was consumed. The parent page has no inputs, so its default
-    // paste/drop would lose the text.
-    function forwardDataTransfer(dataTransfer) {
+    // (e.g. right after load, and routinely on mobile where focus is not in
+    // the iframe). The parent forwards ONLY image payloads into the iframe's
+    // uploader; plain text is deliberately left untouched so it reaches
+    // xterm's native paste/drop handling. Forwarding text here (the #53/#54
+    // behavior) suppressed the native path with preventDefault while the iOS
+    // paste gesture exposes an empty getData('text/plain') — so the text was
+    // lost on mobile (regression #66).
+    function forwardImageTransfer(dataTransfer) {
       try {
         var win = iframe && iframe.contentWindow;
-        if (win && win.__handleDataTransfer) return win.__handleDataTransfer(dataTransfer);
+        if (win && win.__handleImageTransfer) return win.__handleImageTransfer(dataTransfer);
       } catch (e) {}
       // Only worth a warning when files were actually present: text-only
-      // pastes routinely land here while the iframe is still loading.
+      // pastes routinely land here and are intentionally not forwarded.
       if (dataTransfer && dataTransfer.files && dataTransfer.files.length) {
         console.warn('terminal iframe not ready for image upload');
       }
@@ -49,7 +51,9 @@
     }
 
     document.addEventListener('paste', function(e) {
-      if (forwardDataTransfer(e.clipboardData)) {
+      // Only consume (and suppress the native path) when an image was handled;
+      // text paste falls through to xterm untouched.
+      if (forwardImageTransfer(e.clipboardData)) {
         e.preventDefault();
         e.stopPropagation();
       }
@@ -60,9 +64,28 @@
     }, true);
 
     document.addEventListener('drop', function(e) {
-      e.preventDefault();
-      e.stopPropagation();
-      forwardDataTransfer(e.dataTransfer);
+      // Suppress the default only when an image was actually uploaded, or when
+      // some other file was dropped (a bare file drop would navigate the page
+      // away). Text drops fall through to xterm.
+      var source = e.dataTransfer;
+      if (forwardImageTransfer(source) || containsFiles(source)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
     }, true);
+
+    // Mirror the iframe's file-detection so a non-image file drop is blocked
+    // from navigating the page, without duplicating the triage.
+    function containsFiles(source) {
+      if (!source) return false;
+      if (source.files && source.files.length) return true;
+      var items = source.items;
+      if (items) {
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].kind === 'file') return true;
+        }
+      }
+      return false;
+    }
   })();
 </script>

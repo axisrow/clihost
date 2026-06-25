@@ -1,0 +1,12 @@
+{
+  "name": "clihost-asset-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Executable JS tests for the terminal paste/clipboard assets (issue #66). The runtime app uses no npm packages; this is test-only tooling.",
+  "scripts": {
+    "test": "node --test \"tests/js/**/*.test.mjs\""
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0"
+  }
+}

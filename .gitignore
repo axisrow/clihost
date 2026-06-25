@@ -4,3 +4,6 @@ volume/*
 # Python cache
 __pycache__/
 *.pyc
+
+# Node (JS asset tests only — runtime app uses no npm packages)
+node_modules/
