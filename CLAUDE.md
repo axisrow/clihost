@@ -65,6 +65,20 @@ python -m pytest tests/ -k "test_truthy_1"       # single test by name
 - `tests/integration/` — TTYD handler tests that simulate handler behavior without importing the full app wiring (avoids Linux-only deps like `crypt`/PAM).
 - `tests/preview/vkbd_preview.html` — manual visual preview of the virtual keyboard.
 
+### Executable JS asset tests (`tests/js/`, issue #66)
+
+The Python tests for the terminal assets only *grep* the HTML strings — they never execute the JavaScript, which is how the paste-pipeline regression in #53/#54 slipped through (the strings were present, the behavior was broken). `tests/js/` closes that gap by **running the real `<script>` body** of each asset inside a jsdom window and synthesizing paste/drop events / vkbd clicks against it.
+
+```bash
+npm install        # one-time: installs jsdom (the ONLY npm dependency; test-only)
+npm test           # node --test over tests/js/**/*.test.mjs
+```
+
+- **Stack: Node's built-in `node --test` + jsdom.** Chosen because it actually reproduces the regression — the four #66 scenarios (parent text-paste suppressing native xterm, unconditional drop `preventDefault`, ^V bypassing `term.paste`) each fail on the broken code and pass once fixed. jsdom was enough; Playwright/mobile-emulation was the fallback if jsdom couldn't model the clipboard/focus quirks, and proved unnecessary.
+- **Runtime app stays stdlib/npm-free.** jsdom lives only in `devDependencies`; `node_modules/` is gitignored; nothing in `app/` imports it. `package-lock.json` is committed for reproducibility.
+- `tests/js/harness.mjs` extracts the `<script>` from an asset, runs it in jsdom, and provides fakes (`makeFakeTerm` records `term.paste`, `makeFakeSocket` records ttyd frames, `makeDataTransfer`/`makeImageItems` model clipboard payloads incl. the iOS empty-`getData` quirk). Parent-page tests boot the **real** `tab_fix_script.html` inside the iframe's `contentWindow` (`bootIframeScript`) so the parent forwards into genuine triage logic, not a stub.
+- These tests do not run under pytest; run `npm test` separately. Both suites must be green before pushing.
+
 **Manual smoke test:** build image, run container, verify logs show "Hapi runner startup complete" (or fallback message) and sshd stays running. Web terminal: open http://localhost:8080, login with system credentials.
 
 ## Architecture
