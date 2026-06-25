@@ -53,13 +53,14 @@ function dispatchDrop(window, dataTransfer) {
   return ev;
 }
 
-test('iframe paste of plain text reaches the terminal (desktop Ctrl/Cmd+V)', () => {
+test('iframe paste of plain text falls through to native xterm (desktop Ctrl/Cmd+V)', () => {
+  // The iframe paste listener consumes ONLY images; plain text must stay on
+  // xterm's own paste path (bracketed paste, IME). The script must neither
+  // preventDefault nor type the text itself (regression #66).
   const { window, term } = bootIframe();
-  // __handleDataTransfer is the entry the parent forwards to AND models a
-  // text paste that the iframe must not drop.
-  const consumed = window.__handleDataTransfer(makeDataTransfer({ text: 'hello world' }));
-  assert.equal(consumed, true, 'text transfer must be consumed');
-  assert.deepEqual(term.pasted, ['hello world'], 'text must be typed into term');
+  const ev = dispatchPaste(window, makeDataTransfer({ text: 'hello world' }));
+  assert.equal(ev.defaultPrevented, false, 'text paste must reach the native handler');
+  assert.deepEqual(term.pasted, [], 'the script must not intercept/type the text');
 });
 
 test('iframe drop of plain text falls through to native xterm (not preventDefault)', () => {
@@ -81,25 +82,33 @@ test('pasted image still uploads to /upload (regression guard for #53)', () => {
   assert.ok(ev.defaultPrevented, 'image paste must preventDefault to stop xterm');
 });
 
-test('non-image file paste is skipped, never typed as a file URL', () => {
+test('iframe drop of a non-image file is blocked but never typed as a file URL', () => {
+  // A dropped non-image file would navigate the iframe away, so the drop is
+  // preventDefault'd — but the script must NOT type its file:// text either.
   const { window, term } = bootIframe();
   const pdf = { type: 'application/pdf', name: 'doc.pdf' };
-  // Browser exposes both a file and a text/plain (file:// URL) representation.
   const dt = makeDataTransfer({
     text: 'file:///private/var/doc.pdf',
     files: [pdf],
     items: makeImageItems([pdf]),
   });
-  const consumed = window.__handleDataTransfer(dt);
-  assert.equal(consumed, false, 'non-image file transfer must not be consumed');
+  const ev = dispatchDrop(window, dt);
+  assert.equal(ev.defaultPrevented, true, 'a dropped file must be blocked from navigating');
   assert.deepEqual(term.pasted, [], 'the file:// URL must NOT be typed');
 });
 
-test('empty clipboard text is a no-op (iOS Safari getData quirk)', () => {
-  const { window, term } = bootIframe();
-  const consumed = window.__handleDataTransfer(makeDataTransfer({ text: '' }));
-  assert.equal(consumed, false);
+test('iframe image-only entry point consumes images and ignores text', () => {
+  // __handleImageTransfer is what the parent forwards; it must consume images
+  // and never touch text (so parent text-paste reaches xterm natively).
+  const { window, term, uploads } = bootIframe();
+  assert.equal(window.__handleImageTransfer(makeDataTransfer({ text: 'just text' })), false,
+    'text-only transfer is not an image and must not be consumed');
   assert.deepEqual(term.pasted, []);
+  const img = makeImageFile('image/png');
+  assert.equal(
+    window.__handleImageTransfer(makeDataTransfer({ files: [img], items: makeImageItems([img]) })),
+    true, 'an image transfer is consumed');
+  assert.equal(uploads.length, 1);
 });
 
 // --- Drop preventDefault must be conditional (adjacent bug from the diagnosis) ---

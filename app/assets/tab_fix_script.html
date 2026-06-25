@@ -113,15 +113,6 @@
     });
   }
 
-  function pasteTextToTerminal(text) {
-    // term.paste honours bracketed-paste mode; raw socket send is the fallback.
-    if (window.term && window.term.paste) {
-      window.term.paste(text);
-    } else if (!sendToTTYD(text)) {
-      console.warn('text transfer dropped: terminal not ready');
-    }
-  }
-
   function containsFiles(source) {
     // Same items/files coverage as extractImageFiles, but deliberately WITHOUT
     // a MIME filter: any file (e.g. a dropped PDF) must block the text branch
@@ -144,27 +135,11 @@
     return true;
   }
 
-  // Full triage of a paste/drop payload: images upload, plain text types
-  // into the prompt, anything else (non-image files) is silently skipped.
-  // Returns true when the transfer was consumed.
-  function handleDataTransfer(source) {
-    if (handleImageTransfer(source)) return true;
-    // A non-image file transfer is skipped entirely, even when the browser
-    // also exposes a text representation of it (e.g. a file:// URL).
-    if (!source || containsFiles(source) || !source.getData) return false;
-    var text = source.getData('text/plain');
-    if (!text) return false;
-    pasteTextToTerminal(text);
-    return true;
-  }
-
-  // The parent page delegates its paste/drop events through these globals
-  // instead of duplicating the triage logic in its own document.
-  // __handleDataTransfer runs the full triage (images + text + skip);
-  // __handleImageTransfer consumes ONLY images and leaves text alone, which
-  // is what the parent forwards so that text paste keeps reaching xterm's
-  // native handler (regression #66).
-  window.__handleDataTransfer = handleDataTransfer;
+  // The parent page (terminal_parent_tab_handler.html) delegates its paste/drop
+  // events through this global instead of duplicating the upload logic. It
+  // forwards ONLY images: text is deliberately left to xterm's native paste/drop
+  // path so it keeps working on mobile, where the parent receives the event and
+  // the iOS gesture exposes an empty getData('text/plain') (regression #66).
   window.__handleImageTransfer = handleImageTransfer;
 
   document.addEventListener('paste', function(e) {
