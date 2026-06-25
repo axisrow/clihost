@@ -66,10 +66,11 @@ RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
     echo 'export LANG=en_US.UTF-8' >> /home/hapi/.bashrc && \
     echo 'export LC_ALL=en_US.UTF-8' >> /home/hapi/.bashrc
 
-# Invalidate the CLI install layer when enabled packages publish new versions.
-# The selected manifest stages keep remote ADD cache-busting for enabled tools,
-# while disabled tools copy a stable local file and never fetch their manifest.
-# Keep in sync with cli-packages.txt.
+# Per-tool npm manifest stages (issue #57). For each tool a selector stage
+# resolves to either its remote manifest ADD (enabled → cache-busts on a new
+# published version) or the stable disabled placeholder below (disabled → never
+# fetches, never invalidates the shared install layer). Keep in sync with
+# cli-packages.txt.
 FROM scratch AS npm-manifest-disabled
 # Stable, constant placeholder (NOT cli-packages.txt): editing a disabled tool's
 # row must not change this stage's output, or it would invalidate the shared
