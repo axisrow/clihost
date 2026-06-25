@@ -156,6 +156,90 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertIn(': "${TTYD_SANDBOX:=false}"', self.text)
         self.assertIn('TTYD_SANDBOX="${TTYD_SANDBOX}"', self.text)
 
+    def test_home_owned_before_subdirs(self):
+        # issue #65: on a fresh /home volume the first `mkdir -p .../.config/gh`
+        # creates /home/hapi as root and a later chown -R only touches the leaf.
+        # The home dir itself must be chowned before any subdir is created.
+        home_pos = self.text.find("ensure_home_owned\n")
+        first_subdir_pos = self.text.find('ensure_dir_owned "${HAPI_USER_HOME}/.config/gh"')
+        self.assertGreater(home_pos, -1, "ensure_home_owned is not called")
+        self.assertLess(home_pos, first_subdir_pos,
+                        "home must be chowned before subdirs are created")
+        self.assertIn('chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}"', self.text)
+
+
+class TestEntrypointHomeOwnershipBehaviour(unittest.TestCase):
+    """Behavioural regression for issue #65: hapi must own its own $HOME.
+
+    Sources the ensure_home_owned / ensure_dir_owned helpers from entrypoint.sh
+    with a fake `chown` (records its targets) and a temp HAPI_USER_HOME, so the
+    bug — /home/hapi and .config left root-owned after the first `mkdir -p
+    .config/gh` — is reproduced without needing root or Docker.
+    """
+
+    def _extract_helpers(self):
+        text = ENTRYPOINT.read_text()
+        # Pull the two function definitions verbatim so the test exercises the
+        # real implementation, not a paraphrase of it.
+        helpers = []
+        for name in ("ensure_home_owned", "ensure_dir_owned"):
+            match = re.search(
+                rf"^{name}\(\) \{{\n.*?^\}}", text, re.MULTILINE | re.DOTALL
+            )
+            self.assertIsNotNone(match, f"{name} not found in entrypoint.sh")
+            helpers.append(match.group(0))
+        return "\n\n".join(helpers)
+
+    def _run(self):
+        helpers = self._extract_helpers()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            home = tmp_path / "home" / "hapi"
+            chown_log = tmp_path / "chown.log"
+            # Fake chown: record (target) of every invocation, ignore flags/owner.
+            fake_chown = tmp_path / "chown"
+            fake_chown.write_text(
+                "#!/bin/bash\n"
+                'for a in "$@"; do case "$a" in -*) ;; *:*) ;; '
+                f'*) echo "$a" >> "{chown_log}" ;; esac; done\n'
+            )
+            fake_chown.chmod(0o755)
+            script = (
+                "set -euo pipefail\n"
+                f'HAPI_USER="hapi"\n'
+                f'HAPI_USER_HOME="{home}"\n'
+                f"{helpers}\n"
+                "ensure_home_owned\n"
+                'ensure_dir_owned "${HAPI_USER_HOME}/.config/gh"\n'
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            targets = chown_log.read_text().splitlines() if chown_log.exists() else []
+            return str(home), targets
+
+    def test_home_and_config_are_chowned(self):
+        home, targets = self._run()
+        # The bug: /home/hapi (the home root) and .config (an intermediate parent
+        # created by `mkdir -p .config/gh`) were never chowned. Both must appear.
+        self.assertIn(home, targets, "/home/hapi itself was never chowned (issue #65)")
+        self.assertIn(f"{home}/.config", targets,
+                      ".config parent was never chowned (issue #65)")
+        self.assertIn(f"{home}/.config/gh", targets, "leaf subdir was not chowned")
+
+    def test_chown_stays_within_home(self):
+        home, targets = self._run()
+        # The parent walk must stop at HAPI_USER_HOME and never chown /home or /.
+        for target in targets:
+            with self.subTest(target=target):
+                self.assertTrue(
+                    target == home or target.startswith(f"{home}/"),
+                    f"chown escaped HAPI_USER_HOME: {target}",
+                )
+
 
 class TestTmuxWrapperSandboxRegressions(unittest.TestCase):
     def setUp(self):

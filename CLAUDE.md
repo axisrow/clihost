@@ -90,6 +90,10 @@ hapi Client → HTTP API (HAPI_PORT) → hapi runner
 
 **Volume mount:** `/home/hapi` — persistent runner state, logs, configs. The mount overwrites permissions, hence the permission fixes in entrypoint.sh.
 
+**`bin/` helper scripts:**
+- `tmux-wrapper.sh` — wraps each ttyd's shell in a tmux session `ttyd-{id}` (and, when `TTYD_SANDBOX=true`, inside the bwrap jail). ttyd is launched against this script by `manager.py`.
+- `glm` — convenience wrapper that runs `claude` against the z.ai Anthropic-compatible endpoint (`ANTHROPIC_BASE_URL=https://api.z.ai/...`) with GLM models (`glm-4.6` for Sonnet/Opus, `glm-4.5-air` for Haiku). Requires `ZAI_TOKEN`.
+
 ### ttyd proxy package (app/)
 
 `app/ttyd_proxy.py` is only a **thin process entry point** (imports `main` from `ttydproxy.app`; referenced by entrypoint.sh as `python3 /app/ttyd_proxy.py`); all logic lives in the `app/ttydproxy/` package:
@@ -99,6 +103,7 @@ hapi Client → HTTP API (HAPI_PORT) → hapi runner
 - `manager.py` — `TTYDManager`: spawn/kill ttyd processes, port allocation from TTYD_BASE_PORT (7681), dead-process reaping, tmux session cleanup
 - `proxy.py` — HTTP/WebSocket proxying to ttyd, gzip-aware HTML injection (`inject_tab_fix_script`)
 - `ratelimit.py` — in-memory `RateLimiter`
+- `uploads.py` — `save_upload` for pasted/dropped images: validates by **magic bytes** (`detect_image_extension`: png/jpg/gif/webp; SVG rejected), then writes the file. Hardened against symlink/TOCTOU attacks because the proxy may run as root while `UPLOAD_DIR` lives under a user-controlled home: it descends the directory tree component-by-component with `O_NOFOLLOW`/`O_DIRECTORY` (`_open_upload_dir_nofollow`), binds every privileged op to an open fd (never re-resolves the string path), and writes via `O_CREAT|O_EXCL|O_NOFOLLOW`. All this hardening only matters in root mode; if root mode is dropped it collapses to `os.makedirs` + an `O_EXCL` open.
 - `views.py` — render login/menu/terminal pages from templates (`render_template`; shared favicon `<link>` block injected via the `{{FAVICON}}` placeholder from `FAVICON_LINKS`)
 - `cleanup.py` — disk cleanup targets listing/deletion for the dashboard
 - `assets.py` — loads static assets from `app/assets/` **at import time** into module constants (editing an asset requires proxy restart)
@@ -182,6 +187,8 @@ Terminal list and controls are built **dynamically in JavaScript**, not static H
 Update `.env.example` when adding/changing variables.
 
 ## Coding Conventions
+
+> A shorter `AGENTS.md` exists at the repo root for non-Claude agents. It overlaps with this file but is less detailed and partially stale (e.g. it still lists a `volume/hapi/` dir and a `3006` port mapping). When the two disagree, **CLAUDE.md is authoritative**; keep `AGENTS.md` roughly in sync when you change conventions here.
 
 - Shell scripts use Bash with `set -euo pipefail`
 - Environment variables are UPPERCASE with defaults via `${VAR:=default}`

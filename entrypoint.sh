@@ -31,10 +31,31 @@ HAPI_RUN_PATH="/usr/local/bin:/usr/bin:/bin"
 
 echo "Starting clihost container..."
 
+# Guarantee HAPI_USER owns its own $HOME (issue #65). On a fresh/empty /home
+# volume the very first `mkdir -p` of a subdir (e.g. .config/gh) creates the
+# parent /home/hapi as root, and a later `chown -R` on the subdir never touches
+# the parent — leaving /home/hapi root:root (755) so hapi cannot write into its
+# own home. Fix the home dir itself before creating anything underneath it.
+# Non-recursive on purpose: subdirs may legitimately be owned by other UIDs.
+ensure_home_owned() {
+  mkdir -p "${HAPI_USER_HOME}"
+  chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_USER_HOME}"
+}
+
 ensure_dir_owned() {
   local path="$1"
   mkdir -p "${path}"
   chown -R "${HAPI_USER}:${HAPI_USER}" "${path}"
+  # `mkdir -p path/to/leaf` creates intermediate parents as root; chown -R above
+  # only reaches the leaf. Walk back up to HAPI_USER_HOME so parents created by
+  # this call (e.g. .config when making .config/gh) end up hapi-owned too.
+  local parent="${path}"
+  while parent="$(dirname "${parent}")"; do
+    case "${parent}" in
+      "${HAPI_USER_HOME}"/*) chown "${HAPI_USER}:${HAPI_USER}" "${parent}" ;;
+      *) break ;;
+    esac
+  done
 }
 
 ensure_local_bin_env() {
@@ -75,6 +96,7 @@ cleanup_runner_state() {
   done
 }
 
+ensure_home_owned
 ensure_dir_owned "${HAPI_USER_HOME}/.config/gh"
 ensure_dir_owned "${HAPI_USER_HOME}/.claude"
 ensure_local_bin_env
