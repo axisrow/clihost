@@ -28,7 +28,26 @@ curl http://localhost:8080/health
 # {"status": "ok", "uptime": N, "ttyd": "running", "terminal_count": N, "terminals": [...], "memory_mb": N}
 ```
 
-To add a new bundled npm CLI tool: add a line to `cli-packages.txt` and the corresponding install step in `Dockerfile`. `build.sh` reads `cli-packages.txt` to compute the cache-busting hash. Hermes Agent is installed via pip from GitHub (not npm) and auto-updates at container start unless `HERMES_AUTO_UPDATE=false`.
+To add a new bundled npm CLI tool: add a line `COMPONENT_KEY pkg@latest` to `cli-packages.txt`, a matching `ADD https://registry.npmjs.org/<pkg>/latest ...` cache-bust manifest, and an `ARG INSTALL_<COMPONENT_KEY>=true` to `Dockerfile`. The actual `npm install -g` is centralized in `bin/install-cli.sh` (no per-tool install step needed). `build.sh` parses `cli-packages.txt` (first token = key, second = npm spec) to compute the cache-busting hash. Hermes Agent is installed via pip from GitHub (not npm) and auto-updates at container start unless `HERMES_AUTO_UPDATE=false`.
+
+### Modular image composition (build-time, issue #57)
+
+Each bundled CLI tool can be dropped from the image to build a lighter, deploy-specific image. This is a **build-time** mechanism (the tools install during `docker build`), driven by `INSTALL_<KEY>` build args that default to `true`:
+
+- `bin/install-cli.sh` reads `cli-packages.txt` and installs only the npm tools whose `INSTALL_<KEY>` env var is not `false`. The `Dockerfile` declares one `ARG INSTALL_<KEY>=true` per component and promotes them into the env for that `RUN`. Hermes has its own `INSTALL_HERMES`-gated `RUN`.
+- `build.sh` forwards every `INSTALL_<KEY>` (read from the shell environment, default `true`) to `docker build` as `--build-arg`, and excludes disabled tools from the cache-busting hash (so bumping a disabled tool's version no longer invalidates the cache).
+- Keys: `INSTALL_CLAUDE_CODE`, `INSTALL_CODEX`, `INSTALL_GEMINI`, `INSTALL_COPILOT`, `INSTALL_OPENCODE`, `INSTALL_DROID`, `INSTALL_HAPI`, `INSTALL_HERMES`. Disabling `INSTALL_HAPI` removes the runtime core (tunnel/runner/dashboard URL); the entrypoint skips hapi startup when the binary is absent and warns if `HAPI_RUNNER_ENABLED=true`.
+- Every `INSTALL_<KEY>` must be exactly `true` or `false` — `install-cli.sh`, `build.sh`, and the Hermes `RUN` all fail closed on anything else (`False`, `0`, typos) so a misconfigured build never silently ships a tool. Caveat: an invalid value passed straight to `docker build` (bypassing `build.sh`) still fails the build, but for an npm tool the manifest stage `FROM npm-manifest-<tool>-${INSTALL_<KEY>}` errors first with an opaque "base name not found" instead of the friendly message — the strict check in `install-cli.sh` is the readable one.
+
+Examples — drop Codex and Gemini:
+```bash
+docker build --build-arg INSTALL_CODEX=false --build-arg INSTALL_GEMINI=false -t clihost .
+# or, with npm version auto-detection for the cache hash:
+INSTALL_CODEX=false INSTALL_GEMINI=false ./build.sh
+```
+On Railway, set these names as **Build-time variables** on the service (not regular runtime env vars) — Railway passes them into `docker build` as build args. They have no effect at `docker run` time.
+
+Keep the `INSTALL_<KEY>` keys in sync across `cli-packages.txt`, `Dockerfile`, `build.sh`, and `.env.example`.
 
 ## Testing
 
@@ -67,7 +86,7 @@ SSH Client → sshd (22) → shell
 hapi Client → HTTP API (HAPI_PORT) → hapi runner
 ```
 
-**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → start `hapi server --relay` and extract connection URL → optionally start hapi runner → `exec sshd`.
+**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → drop any stale dashboard URL → if `hapi` is installed, start `hapi server --relay`, extract connection URL, and optionally start hapi runner (otherwise warn and skip) → `exec sshd`.
 
 **Volume mount:** `/home/hapi` — persistent runner state, logs, configs. The mount overwrites permissions, hence the permission fixes in entrypoint.sh.
 

@@ -1,7 +1,13 @@
-@anthropic-ai/claude-code@latest
-@openai/codex@latest
-@google/gemini-cli@latest
-@github/copilot@latest
-opencode-ai@latest
-droid@latest
-@twsxtd/hapi@latest
+# Bundled npm CLI tools, one per line: "<COMPONENT_KEY> <npm-spec>".
+# The COMPONENT_KEY maps to an INSTALL_<KEY> build arg (see Dockerfile): set
+# INSTALL_CODEX=false (etc.) at build time to drop that tool from the image.
+# Lines starting with '#' and blank lines are ignored.
+# bin/install-cli.sh parses this file; build.sh hashes only the enabled rows.
+# Keep the keys in sync with the ARG block in Dockerfile and .env.example.
+CLAUDE_CODE @anthropic-ai/claude-code@latest
+CODEX @openai/codex@latest
+GEMINI @google/gemini-cli@latest
+COPILOT @github/copilot@latest
+OPENCODE opencode-ai@latest
+DROID droid@latest
+HAPI @twsxtd/hapi@latest

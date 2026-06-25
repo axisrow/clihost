@@ -1,0 +1,1 @@
+{"clihost":"disabled-npm-manifest-placeholder","note":"Stable placeholder copied into disabled npm-manifest build stages so a disabled tool's cli-packages.txt row never invalidates the install layer (issue #57). Do not edit — its content is intentionally constant."}

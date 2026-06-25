@@ -1,4 +1,12 @@
-FROM debian:bookworm-slim
+ARG INSTALL_CLAUDE_CODE=true
+ARG INSTALL_CODEX=true
+ARG INSTALL_GEMINI=true
+ARG INSTALL_COPILOT=true
+ARG INSTALL_OPENCODE=true
+ARG INSTALL_DROID=true
+ARG INSTALL_HAPI=true
+
+FROM debian:bookworm-slim AS runtime-base
 
 # Install Node.js 22.x directly from Node.js official binary
 RUN NODE_VERSION="22.14.0" && \
@@ -58,34 +66,111 @@ RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
     echo 'export LANG=en_US.UTF-8' >> /home/hapi/.bashrc && \
     echo 'export LC_ALL=en_US.UTF-8' >> /home/hapi/.bashrc
 
-# Invalidate the CLI install layer when any package publishes a new version.
-# Docker refetches these URLs every build; the manifest JSON changes only when
-# the package's latest version changes, so the cache survives unchanged packages.
-# Keep in sync with cli-packages.txt.
-ADD https://registry.npmjs.org/@anthropic-ai/claude-code/latest /tmp/npm-manifests/claude-code.json
-ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-manifests/codex.json
-ADD https://registry.npmjs.org/@google/gemini-cli/latest /tmp/npm-manifests/gemini-cli.json
-ADD https://registry.npmjs.org/@github/copilot/latest /tmp/npm-manifests/copilot.json
-ADD https://registry.npmjs.org/opencode-ai/latest /tmp/npm-manifests/opencode-ai.json
-ADD https://registry.npmjs.org/droid/latest /tmp/npm-manifests/droid.json
-ADD https://registry.npmjs.org/@twsxtd/hapi/latest /tmp/npm-manifests/hapi.json
+# Per-tool npm manifest stages (issue #57). For each tool a selector stage
+# resolves to either its remote manifest ADD (enabled → cache-busts on a new
+# published version) or the stable disabled placeholder below (disabled → never
+# fetches, never invalidates the shared install layer). Keep in sync with
+# cli-packages.txt.
+FROM scratch AS npm-manifest-disabled
+# Stable, constant placeholder (NOT cli-packages.txt): editing a disabled tool's
+# row must not change this stage's output, or it would invalidate the shared
+# install layer for the enabled tools.
+COPY bin/npm-manifest-placeholder.json /manifest.json
+
+FROM scratch AS npm-manifest-claude-code-true
+ADD https://registry.npmjs.org/@anthropic-ai/claude-code/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-claude-code-false
+FROM npm-manifest-claude-code-${INSTALL_CLAUDE_CODE} AS npm-manifest-claude-code
+
+FROM scratch AS npm-manifest-codex-true
+ADD https://registry.npmjs.org/@openai/codex/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-codex-false
+FROM npm-manifest-codex-${INSTALL_CODEX} AS npm-manifest-codex
+
+FROM scratch AS npm-manifest-gemini-true
+ADD https://registry.npmjs.org/@google/gemini-cli/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-gemini-false
+FROM npm-manifest-gemini-${INSTALL_GEMINI} AS npm-manifest-gemini
+
+FROM scratch AS npm-manifest-copilot-true
+ADD https://registry.npmjs.org/@github/copilot/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-copilot-false
+FROM npm-manifest-copilot-${INSTALL_COPILOT} AS npm-manifest-copilot
+
+FROM scratch AS npm-manifest-opencode-true
+ADD https://registry.npmjs.org/opencode-ai/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-opencode-false
+FROM npm-manifest-opencode-${INSTALL_OPENCODE} AS npm-manifest-opencode
+
+FROM scratch AS npm-manifest-droid-true
+ADD https://registry.npmjs.org/droid/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-droid-false
+FROM npm-manifest-droid-${INSTALL_DROID} AS npm-manifest-droid
+
+FROM scratch AS npm-manifest-hapi-true
+ADD https://registry.npmjs.org/@twsxtd/hapi/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-hapi-false
+FROM npm-manifest-hapi-${INSTALL_HAPI} AS npm-manifest-hapi
+
+FROM runtime-base
+
+# Modular install flags (issue #57): set any to "false" at build time to drop
+# that CLI tool from the image, e.g. `docker build --build-arg INSTALL_CODEX=false`.
+# Defaults are "true", so an unspecified build installs everything (unchanged).
+# Keep the keys in sync with cli-packages.txt and .env.example.
+ARG INSTALL_CLAUDE_CODE=true
+ARG INSTALL_CODEX=true
+ARG INSTALL_GEMINI=true
+ARG INSTALL_COPILOT=true
+ARG INSTALL_OPENCODE=true
+ARG INSTALL_DROID=true
+ARG INSTALL_HAPI=true
+ARG INSTALL_HERMES=true
+
+COPY --from=npm-manifest-claude-code /manifest.json /tmp/npm-manifests/claude-code.json
+COPY --from=npm-manifest-codex /manifest.json /tmp/npm-manifests/codex.json
+COPY --from=npm-manifest-gemini /manifest.json /tmp/npm-manifests/gemini-cli.json
+COPY --from=npm-manifest-copilot /manifest.json /tmp/npm-manifests/copilot.json
+COPY --from=npm-manifest-opencode /manifest.json /tmp/npm-manifests/opencode-ai.json
+COPY --from=npm-manifest-droid /manifest.json /tmp/npm-manifests/droid.json
+COPY --from=npm-manifest-hapi /manifest.json /tmp/npm-manifests/hapi.json
 
 COPY cli-packages.txt /tmp/cli-packages.txt
+COPY bin/install-cli.sh /tmp/install-cli.sh
 
-# Install all CLI tools in one layer, then fix permissions and clean up
-RUN for i in 1 2 3 4 5; do \
-      xargs npm install -g < /tmp/cli-packages.txt && break || sleep 10; \
-    done && \
+# Install the enabled CLI tools in one layer, then fix permissions and clean up.
+# install-cli.sh reads the INSTALL_<KEY> values from the environment, so promote
+# the build args to env vars for the duration of this RUN.
+RUN chmod +x /tmp/install-cli.sh && \
+    INSTALL_CLAUDE_CODE="${INSTALL_CLAUDE_CODE}" \
+    INSTALL_CODEX="${INSTALL_CODEX}" \
+    INSTALL_GEMINI="${INSTALL_GEMINI}" \
+    INSTALL_COPILOT="${INSTALL_COPILOT}" \
+    INSTALL_OPENCODE="${INSTALL_OPENCODE}" \
+    INSTALL_DROID="${INSTALL_DROID}" \
+    INSTALL_HAPI="${INSTALL_HAPI}" \
+    /tmp/install-cli.sh /tmp/cli-packages.txt && \
     chown -R hapi:hapi /usr/local/lib/node_modules && \
     npm cache clean --force && \
     rm -rf /tmp/*
 
-# Install Hermes Agent (Nous Research) — git clone + pip, no venv/uv
-RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
-    cd /tmp/hermes-agent && \
-    pip install --break-system-packages '.[all,messaging]' && \
-    which hermes && \
-    rm -rf /tmp/hermes-agent
+# Install Hermes Agent (Nous Research) — git clone + pip, no venv/uv.
+# Gated by INSTALL_HERMES so it can be dropped from lighter images (issue #57).
+# Strict boolean: only true/false accepted; fail closed on anything else (e.g.
+# "False", "0") so a misconfigured build never silently ships Hermes.
+RUN case "${INSTALL_HERMES}" in \
+      false) \
+        echo "Skipping Hermes Agent (INSTALL_HERMES=false)" ;; \
+      true) \
+        git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
+        cd /tmp/hermes-agent && \
+        pip install --break-system-packages '.[all,messaging]' && \
+        which hermes && \
+        rm -rf /tmp/hermes-agent ;; \
+      *) \
+        echo "ERROR: INSTALL_HERMES='${INSTALL_HERMES}' is invalid; must be 'true' or 'false'" >&2; \
+        exit 1 ;; \
+    esac
 
 # Create app directory for TTYD proxy
 RUN mkdir -p /app /bin

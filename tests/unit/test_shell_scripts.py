@@ -1,7 +1,9 @@
 """Static checks for shell scripts (syntax + known-bug regressions)."""
+import os
 import pathlib
 import re
 import subprocess
+import tempfile
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -9,12 +11,28 @@ ENTRYPOINT = REPO_ROOT / "entrypoint.sh"
 BUILD_SH = REPO_ROOT / "build.sh"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 CLI_PACKAGES = REPO_ROOT / "cli-packages.txt"
+INSTALL_CLI = REPO_ROOT / "bin/install-cli.sh"
 TMUX_WRAPPER = REPO_ROOT / "bin/tmux-wrapper.sh"
+
+# Component keys whose INSTALL_<KEY> build args gate the modular image (issue #57).
+NPM_COMPONENT_KEYS = (
+    "CLAUDE_CODE", "CODEX", "GEMINI", "COPILOT", "OPENCODE", "DROID", "HAPI",
+)
+ALL_COMPONENT_KEYS = NPM_COMPONENT_KEYS + ("HERMES",)
+NPM_MANIFEST_SLUGS = {
+    "CLAUDE_CODE": "claude-code",
+    "CODEX": "codex",
+    "GEMINI": "gemini",
+    "COPILOT": "copilot",
+    "OPENCODE": "opencode",
+    "DROID": "droid",
+    "HAPI": "hapi",
+}
 
 
 class TestShellSyntax(unittest.TestCase):
     def test_scripts_parse(self):
-        for script in (ENTRYPOINT, BUILD_SH, TMUX_WRAPPER):
+        for script in (ENTRYPOINT, BUILD_SH, INSTALL_CLI, TMUX_WRAPPER):
             with self.subTest(script=script.name):
                 result = subprocess.run(
                     ["bash", "-n", str(script)], capture_output=True, text=True
@@ -93,6 +111,30 @@ class TestEntrypointRegressions(unittest.TestCase):
         server_start_pos = self.text.find("hapi server --relay 2>&1")
         self.assertGreater(touch_pos, -1, "HAPI_SERVER_LOG is not pre-created")
         self.assertLess(touch_pos, server_start_pos)
+
+    def test_hapi_commands_are_skipped_when_cli_missing(self):
+        guard_pos = self.text.find(
+            'if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then'
+        )
+        warning_pos = self.text.find(
+            "WARNING: hapi CLI not found; skipping hapi server --relay startup"
+        )
+        self.assertGreater(guard_pos, -1, "hapi command guard is missing")
+        self.assertGreater(warning_pos, guard_pos)
+        for marker in (
+            'run_as_hapi "HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay',
+            'run_as_hapi "hapi runner start 2>&1"',
+            'run_as_hapi "hapi runner status 2>&1"',
+            'run_as_hapi "hapi doctor 2>&1"',
+        ):
+            with self.subTest(marker=marker):
+                pos = self.text.find(marker)
+                self.assertGreater(pos, guard_pos)
+                self.assertLess(pos, warning_pos)
+        self.assertIn(
+            "WARNING: HAPI_RUNNER_ENABLED=true but hapi CLI is not installed",
+            self.text,
+        )
 
     def test_droid_daemon_started_as_hapi_with_log(self):
         self.assertIn(': "${DROID_DAEMON_ENABLED:=false}"', self.text)
@@ -180,9 +222,184 @@ class TestDockerPackageRegressions(unittest.TestCase):
         dockerfile = DOCKERFILE.read_text()
         self.assertIn("droid@latest", packages)
         self.assertIn(
-            "https://registry.npmjs.org/droid/latest /tmp/npm-manifests/droid.json",
+            "https://registry.npmjs.org/droid/latest /manifest.json",
             dockerfile,
         )
+        self.assertIn(
+            "FROM npm-manifest-droid-${INSTALL_DROID} AS npm-manifest-droid",
+            dockerfile,
+        )
+
+
+def _parse_cli_packages():
+    """Mirror install-cli.sh / build.sh parsing: (KEY, npm-spec) per real line."""
+    rows = []
+    for line in CLI_PACKAGES.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        rows.append((parts[0], parts[1] if len(parts) > 1 else ""))
+    return rows
+
+
+class TestCliPackagesFormat(unittest.TestCase):
+    """cli-packages.txt is now '<COMPONENT_KEY> <npm-spec>' (issue #57)."""
+
+    def test_every_line_has_key_and_spec(self):
+        rows = _parse_cli_packages()
+        self.assertTrue(rows, "cli-packages.txt has no package rows")
+        for key, spec in rows:
+            with self.subTest(key=key):
+                self.assertRegex(key, r"^[A-Z0-9_]+$", "key must be UPPER_SNAKE")
+                self.assertTrue(spec.endswith("@latest"), f"{spec} should pin @latest")
+
+    def test_keys_match_expected_components(self):
+        keys = [key for key, _ in _parse_cli_packages()]
+        self.assertEqual(sorted(keys), sorted(NPM_COMPONENT_KEYS))
+
+
+class TestModularInstallFlags(unittest.TestCase):
+    """Build-time INSTALL_<KEY> flags wired through Dockerfile and build.sh."""
+
+    def test_dockerfile_declares_every_install_arg(self):
+        dockerfile = DOCKERFILE.read_text()
+        for key in ALL_COMPONENT_KEYS:
+            with self.subTest(key=key):
+                self.assertIn(f"ARG INSTALL_{key}=true", dockerfile)
+
+    def test_dockerfile_uses_install_script_not_bare_xargs(self):
+        dockerfile = DOCKERFILE.read_text()
+        # Install is centralized in install-cli.sh; the old unconditional
+        # `xargs npm install -g < cli-packages.txt` must be gone.
+        self.assertIn("install-cli.sh", dockerfile)
+        self.assertNotRegex(dockerfile, r"xargs\s+npm\s+install")
+
+    def test_dockerfile_promotes_npm_flags_into_install_run(self):
+        dockerfile = DOCKERFILE.read_text()
+        for key in NPM_COMPONENT_KEYS:
+            with self.subTest(key=key):
+                self.assertIn(f'INSTALL_{key}="${{INSTALL_{key}}}"', dockerfile)
+
+    def test_dockerfile_gates_manifest_fetches_by_install_args(self):
+        dockerfile = DOCKERFILE.read_text()
+        self.assertNotRegex(
+            dockerfile,
+            re.compile(r"^ADD https://registry\.npmjs\.org/.+ /tmp/npm-manifests/", re.MULTILINE),
+        )
+        self.assertIn("FROM scratch AS npm-manifest-disabled", dockerfile)
+        for key, slug in NPM_MANIFEST_SLUGS.items():
+            with self.subTest(key=key):
+                self.assertIn(
+                    f"FROM npm-manifest-disabled AS npm-manifest-{slug}-false",
+                    dockerfile,
+                )
+                self.assertIn(
+                    f"FROM npm-manifest-{slug}-${{INSTALL_{key}}} AS npm-manifest-{slug}",
+                    dockerfile,
+                )
+                self.assertIn(
+                    f"COPY --from=npm-manifest-{slug} /manifest.json "
+                    f"/tmp/npm-manifests/{slug}",
+                    dockerfile,
+                )
+
+    def test_hermes_install_is_gated(self):
+        dockerfile = DOCKERFILE.read_text()
+        # Strict true|false case gate (fails closed on invalid values).
+        self.assertIn('case "${INSTALL_HERMES}" in', dockerfile)
+        self.assertIn("Skipping Hermes Agent (INSTALL_HERMES=false)", dockerfile)
+        self.assertIn(
+            "INSTALL_HERMES='${INSTALL_HERMES}' is invalid", dockerfile
+        )
+
+    def test_disabled_manifest_placeholder_is_independent_of_cli_packages(self):
+        # The disabled-manifest stage must copy a stable placeholder, NOT
+        # cli-packages.txt — otherwise editing a disabled tool's row would change
+        # the stage output and invalidate the shared install layer (issue #57).
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn(
+            "COPY bin/npm-manifest-placeholder.json /manifest.json", dockerfile
+        )
+        self.assertNotIn("COPY cli-packages.txt /manifest.json", dockerfile)
+        self.assertTrue(
+            (REPO_ROOT / "bin/npm-manifest-placeholder.json").is_file(),
+            "placeholder file is missing",
+        )
+
+    def test_install_cli_rejects_invalid_boolean(self):
+        # Strict boolean: a non true/false flag must fail the build, not silently
+        # install (or skip) the tool.
+        result = subprocess.run(
+            ["bash", str(INSTALL_CLI), str(CLI_PACKAGES)],
+            capture_output=True, text=True,
+            env={**os.environ, "INSTALL_CODEX": "False"},
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("INSTALL_CODEX='False' is invalid", result.stderr)
+
+    def test_build_sh_validates_boolean_flags(self):
+        text = BUILD_SH.read_text()
+        self.assertIn("validate_bool", text)
+        self.assertIn("must be 'true' or 'false'", text)
+
+    def test_entrypoint_clears_stale_url_before_hapi_check(self):
+        # On a persistent volume a URL from a previous hapi-enabled image must not
+        # leak into a hapi-disabled run; the entrypoint removes it up front.
+        text = ENTRYPOINT.read_text()
+        rm_pos = text.find('rm -f "${HAPI_URL_FILE}"')
+        guard_pos = text.find(
+            'if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then'
+        )
+        self.assertGreater(rm_pos, -1, "stale URL is not cleared")
+        self.assertLess(rm_pos, guard_pos, "URL must be cleared before the hapi check")
+
+    def test_build_sh_forwards_flags_as_build_args(self):
+        text = BUILD_SH.read_text()
+        self.assertIn('--build-arg', text)
+        self.assertIn('flag_var="INSTALL_${key}"', text)
+        # Disabled tools must drop out of the cache-busting hash.
+        self.assertIn('Skipping', text)
+
+
+class TestInstallCliScript(unittest.TestCase):
+    """Behavioural test of bin/install-cli.sh with a fake npm on PATH."""
+
+    def _run(self, env_overrides):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_npm = pathlib.Path(tmp) / "npm"
+            fake_npm.write_text("#!/bin/bash\necho \"NPM $*\"\n")
+            fake_npm.chmod(0o755)
+            env = dict(os.environ)
+            env["PATH"] = f"{tmp}{os.pathsep}{env['PATH']}"
+            env.update(env_overrides)
+            return subprocess.run(
+                ["bash", str(INSTALL_CLI), str(CLI_PACKAGES)],
+                capture_output=True, text=True, env=env,
+            )
+
+    def test_all_enabled_by_default_installs_everything(self):
+        result = self._run({})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for _, spec in _parse_cli_packages():
+            with self.subTest(spec=spec):
+                self.assertIn(spec, result.stdout)
+
+    def test_disabled_tool_is_skipped(self):
+        result = self._run({"INSTALL_CODEX": "false", "INSTALL_GEMINI": "false"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        npm_line = [l for l in result.stdout.splitlines() if l.startswith("NPM ")]
+        self.assertEqual(len(npm_line), 1, result.stdout)
+        self.assertNotIn("@openai/codex", npm_line[0])
+        self.assertNotIn("@google/gemini-cli", npm_line[0])
+        self.assertIn("@anthropic-ai/claude-code", npm_line[0])
+
+    def test_all_disabled_installs_nothing(self):
+        overrides = {f"INSTALL_{k}": "false" for k in NPM_COMPONENT_KEYS}
+        result = self._run(overrides)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("NPM ", result.stdout)
+        self.assertIn("nothing to install", result.stdout)
 
 
 class TestBuildShRegressions(unittest.TestCase):
