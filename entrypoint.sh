@@ -190,59 +190,68 @@ HAPI_HOME="${HAPI_HOME}" \
 TTYD_SANDBOX="${TTYD_SANDBOX}" \
 runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &
 
-# Start hapi server with relay in background (logs to file, force TCP relay)
-HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
-# Pre-create the log so the URL-extraction loop's -f check passes immediately
-touch "${HAPI_SERVER_LOG}"
-chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_SERVER_LOG}"
-echo "Starting hapi server --relay in background (logs: ${HAPI_SERVER_LOG})..."
-run_as_hapi "HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay 2>&1 | tee \"${HAPI_SERVER_LOG}\"" &
-HAPI_SERVER_PID=$!
-echo "Hapi server started with PID: ${HAPI_SERVER_PID}"
+if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then
+  # Start hapi server with relay in background (logs to file, force TCP relay)
+  HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
+  # Pre-create the log so the URL-extraction loop's -f check passes immediately
+  touch "${HAPI_SERVER_LOG}"
+  chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_SERVER_LOG}"
+  echo "Starting hapi server --relay in background (logs: ${HAPI_SERVER_LOG})..."
+  run_as_hapi "HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay 2>&1 | tee \"${HAPI_SERVER_LOG}\"" &
+  HAPI_SERVER_PID=$!
+  echo "Hapi server started with PID: ${HAPI_SERVER_PID}"
 
-# Extract tunnel URL and token, build full connection URL
-HAPI_URL_FILE="${HAPI_USER_HOME}/url"
-HAPI_SETTINGS_FILE="${HAPI_HOME}/settings.json"
-(
-  for i in $(seq 1 60); do
-    if [ -f "${HAPI_SERVER_LOG}" ] && [ -f "${HAPI_SETTINGS_FILE}" ]; then
-      # Extract relay URL from log: https://xxx.relay.hapi.run
-      RELAY_URL=$(grep -oE 'https://[a-z0-9]+\.relay\.hapi\.run' "${HAPI_SERVER_LOG}" 2>/dev/null | head -1 || true)
-      # Extract token from settings.json
-      TOKEN=$(grep -oE '"cliApiToken":\s*"[^"]+"' "${HAPI_SETTINGS_FILE}" 2>/dev/null | sed 's/.*"cliApiToken":\s*"\([^"]*\)".*/\1/' || true)
-      if [ -n "$RELAY_URL" ] && [ -n "$TOKEN" ]; then
-        # URL-encode the relay URL (replace : with %3A, / with %2F)
-        ENCODED_URL=$(echo "$RELAY_URL" | sed 's/:/%3A/g; s/\//%2F/g')
-        # Build full connection URL
-        FULL_URL="https://app.hapi.run/?hub=${ENCODED_URL}&token=${TOKEN}"
-        echo "$FULL_URL" > "${HAPI_URL_FILE}"
-        chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_URL_FILE}"
-        echo "Hapi connection URL: ${FULL_URL}"
-        break
+  # Extract tunnel URL and token, build full connection URL
+  HAPI_URL_FILE="${HAPI_USER_HOME}/url"
+  HAPI_SETTINGS_FILE="${HAPI_HOME}/settings.json"
+  (
+    for i in $(seq 1 60); do
+      if [ -f "${HAPI_SERVER_LOG}" ] && [ -f "${HAPI_SETTINGS_FILE}" ]; then
+        # Extract relay URL from log: https://xxx.relay.hapi.run
+        RELAY_URL=$(grep -oE 'https://[a-z0-9]+\.relay\.hapi\.run' "${HAPI_SERVER_LOG}" 2>/dev/null | head -1 || true)
+        # Extract token from settings.json
+        TOKEN=$(grep -oE '"cliApiToken":\s*"[^"]+"' "${HAPI_SETTINGS_FILE}" 2>/dev/null | sed 's/.*"cliApiToken":\s*"\([^"]*\)".*/\1/' || true)
+        if [ -n "$RELAY_URL" ] && [ -n "$TOKEN" ]; then
+          # URL-encode the relay URL (replace : with %3A, / with %2F)
+          ENCODED_URL=$(echo "$RELAY_URL" | sed 's/:/%3A/g; s/\//%2F/g')
+          # Build full connection URL
+          FULL_URL="https://app.hapi.run/?hub=${ENCODED_URL}&token=${TOKEN}"
+          echo "$FULL_URL" > "${HAPI_URL_FILE}"
+          chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_URL_FILE}"
+          echo "Hapi connection URL: ${FULL_URL}"
+          break
+        fi
       fi
+      sleep 1
+    done
+  ) &
+
+  # Start hapi runner if enabled (reads config from volume)
+  if [ "${HAPI_RUNNER_ENABLED}" = "true" ]; then
+    echo "Starting hapi runner..."
+    if ! run_as_hapi "hapi runner start 2>&1"; then
+      echo '=== RUNNER START FAILED ===' >&2
     fi
-    sleep 1
-  done
-) &
 
-# Start hapi runner if enabled (reads config from volume)
-if [ "${HAPI_RUNNER_ENABLED}" = "true" ]; then
-  echo "Starting hapi runner..."
-  if ! run_as_hapi "hapi runner start 2>&1"; then
-    echo '=== RUNNER START FAILED ===' >&2
+    # Verify runner is running
+    echo "Checking hapi runner status..."
+    if ! run_as_hapi "hapi runner status 2>&1"; then
+      echo '=== RUNNER NOT RUNNING ===' >&2
+      echo 'Running hapi doctor for diagnostics:' >&2
+      run_as_hapi "hapi doctor 2>&1" || true
+    fi
+    echo "Hapi runner startup complete"
+  else
+    echo "Hapi runner disabled (set HAPI_RUNNER_ENABLED=true to enable)"
+    echo "Config created by 'hapi server --relay' - run 'hapi runner start' manually if needed"
   fi
-
-  # Verify runner is running
-  echo "Checking hapi runner status..."
-  if ! run_as_hapi "hapi runner status 2>&1"; then
-    echo '=== RUNNER NOT RUNNING ===' >&2
-    echo 'Running hapi doctor for diagnostics:' >&2
-    run_as_hapi "hapi doctor 2>&1" || true
-  fi
-  echo "Hapi runner startup complete"
 else
-  echo "Hapi runner disabled (set HAPI_RUNNER_ENABLED=true to enable)"
-  echo "Config created by 'hapi server --relay' - run 'hapi runner start' manually if needed"
+  echo "WARNING: hapi CLI not found; skipping hapi server --relay startup" >&2
+  if [ "${HAPI_RUNNER_ENABLED}" = "true" ]; then
+    echo "WARNING: HAPI_RUNNER_ENABLED=true but hapi CLI is not installed; skipping hapi runner startup" >&2
+  else
+    echo "Hapi runner disabled (set HAPI_RUNNER_ENABLED=true to enable)"
+  fi
 fi
 
 # sshd is now the main process (via CMD in Dockerfile)

@@ -1,4 +1,12 @@
-FROM debian:bookworm-slim
+ARG INSTALL_CLAUDE_CODE=true
+ARG INSTALL_CODEX=true
+ARG INSTALL_GEMINI=true
+ARG INSTALL_COPILOT=true
+ARG INSTALL_OPENCODE=true
+ARG INSTALL_DROID=true
+ARG INSTALL_HAPI=true
+
+FROM debian:bookworm-slim AS runtime-base
 
 # Install Node.js 22.x directly from Node.js official binary
 RUN NODE_VERSION="22.14.0" && \
@@ -58,17 +66,49 @@ RUN echo 'export TERM=xterm-256color' >> /home/hapi/.bashrc && \
     echo 'export LANG=en_US.UTF-8' >> /home/hapi/.bashrc && \
     echo 'export LC_ALL=en_US.UTF-8' >> /home/hapi/.bashrc
 
-# Invalidate the CLI install layer when any package publishes a new version.
-# Docker refetches these URLs every build; the manifest JSON changes only when
-# the package's latest version changes, so the cache survives unchanged packages.
+# Invalidate the CLI install layer when enabled packages publish new versions.
+# The selected manifest stages keep remote ADD cache-busting for enabled tools,
+# while disabled tools copy a stable local file and never fetch their manifest.
 # Keep in sync with cli-packages.txt.
-ADD https://registry.npmjs.org/@anthropic-ai/claude-code/latest /tmp/npm-manifests/claude-code.json
-ADD https://registry.npmjs.org/@openai/codex/latest /tmp/npm-manifests/codex.json
-ADD https://registry.npmjs.org/@google/gemini-cli/latest /tmp/npm-manifests/gemini-cli.json
-ADD https://registry.npmjs.org/@github/copilot/latest /tmp/npm-manifests/copilot.json
-ADD https://registry.npmjs.org/opencode-ai/latest /tmp/npm-manifests/opencode-ai.json
-ADD https://registry.npmjs.org/droid/latest /tmp/npm-manifests/droid.json
-ADD https://registry.npmjs.org/@twsxtd/hapi/latest /tmp/npm-manifests/hapi.json
+FROM scratch AS npm-manifest-disabled
+COPY cli-packages.txt /manifest.json
+
+FROM scratch AS npm-manifest-claude-code-true
+ADD https://registry.npmjs.org/@anthropic-ai/claude-code/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-claude-code-false
+FROM npm-manifest-claude-code-${INSTALL_CLAUDE_CODE} AS npm-manifest-claude-code
+
+FROM scratch AS npm-manifest-codex-true
+ADD https://registry.npmjs.org/@openai/codex/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-codex-false
+FROM npm-manifest-codex-${INSTALL_CODEX} AS npm-manifest-codex
+
+FROM scratch AS npm-manifest-gemini-true
+ADD https://registry.npmjs.org/@google/gemini-cli/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-gemini-false
+FROM npm-manifest-gemini-${INSTALL_GEMINI} AS npm-manifest-gemini
+
+FROM scratch AS npm-manifest-copilot-true
+ADD https://registry.npmjs.org/@github/copilot/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-copilot-false
+FROM npm-manifest-copilot-${INSTALL_COPILOT} AS npm-manifest-copilot
+
+FROM scratch AS npm-manifest-opencode-true
+ADD https://registry.npmjs.org/opencode-ai/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-opencode-false
+FROM npm-manifest-opencode-${INSTALL_OPENCODE} AS npm-manifest-opencode
+
+FROM scratch AS npm-manifest-droid-true
+ADD https://registry.npmjs.org/droid/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-droid-false
+FROM npm-manifest-droid-${INSTALL_DROID} AS npm-manifest-droid
+
+FROM scratch AS npm-manifest-hapi-true
+ADD https://registry.npmjs.org/@twsxtd/hapi/latest /manifest.json
+FROM npm-manifest-disabled AS npm-manifest-hapi-false
+FROM npm-manifest-hapi-${INSTALL_HAPI} AS npm-manifest-hapi
+
+FROM runtime-base
 
 # Modular install flags (issue #57): set any to "false" at build time to drop
 # that CLI tool from the image, e.g. `docker build --build-arg INSTALL_CODEX=false`.
@@ -82,6 +122,14 @@ ARG INSTALL_OPENCODE=true
 ARG INSTALL_DROID=true
 ARG INSTALL_HAPI=true
 ARG INSTALL_HERMES=true
+
+COPY --from=npm-manifest-claude-code /manifest.json /tmp/npm-manifests/claude-code.json
+COPY --from=npm-manifest-codex /manifest.json /tmp/npm-manifests/codex.json
+COPY --from=npm-manifest-gemini /manifest.json /tmp/npm-manifests/gemini-cli.json
+COPY --from=npm-manifest-copilot /manifest.json /tmp/npm-manifests/copilot.json
+COPY --from=npm-manifest-opencode /manifest.json /tmp/npm-manifests/opencode-ai.json
+COPY --from=npm-manifest-droid /manifest.json /tmp/npm-manifests/droid.json
+COPY --from=npm-manifest-hapi /manifest.json /tmp/npm-manifests/hapi.json
 
 COPY cli-packages.txt /tmp/cli-packages.txt
 COPY bin/install-cli.sh /tmp/install-cli.sh

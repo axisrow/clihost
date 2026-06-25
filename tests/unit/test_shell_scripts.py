@@ -19,6 +19,15 @@ NPM_COMPONENT_KEYS = (
     "CLAUDE_CODE", "CODEX", "GEMINI", "COPILOT", "OPENCODE", "DROID", "HAPI",
 )
 ALL_COMPONENT_KEYS = NPM_COMPONENT_KEYS + ("HERMES",)
+NPM_MANIFEST_SLUGS = {
+    "CLAUDE_CODE": "claude-code",
+    "CODEX": "codex",
+    "GEMINI": "gemini",
+    "COPILOT": "copilot",
+    "OPENCODE": "opencode",
+    "DROID": "droid",
+    "HAPI": "hapi",
+}
 
 
 class TestShellSyntax(unittest.TestCase):
@@ -102,6 +111,30 @@ class TestEntrypointRegressions(unittest.TestCase):
         server_start_pos = self.text.find("hapi server --relay 2>&1")
         self.assertGreater(touch_pos, -1, "HAPI_SERVER_LOG is not pre-created")
         self.assertLess(touch_pos, server_start_pos)
+
+    def test_hapi_commands_are_skipped_when_cli_missing(self):
+        guard_pos = self.text.find(
+            'if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then'
+        )
+        warning_pos = self.text.find(
+            "WARNING: hapi CLI not found; skipping hapi server --relay startup"
+        )
+        self.assertGreater(guard_pos, -1, "hapi command guard is missing")
+        self.assertGreater(warning_pos, guard_pos)
+        for marker in (
+            'run_as_hapi "HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay',
+            'run_as_hapi "hapi runner start 2>&1"',
+            'run_as_hapi "hapi runner status 2>&1"',
+            'run_as_hapi "hapi doctor 2>&1"',
+        ):
+            with self.subTest(marker=marker):
+                pos = self.text.find(marker)
+                self.assertGreater(pos, guard_pos)
+                self.assertLess(pos, warning_pos)
+        self.assertIn(
+            "WARNING: HAPI_RUNNER_ENABLED=true but hapi CLI is not installed",
+            self.text,
+        )
 
     def test_droid_daemon_started_as_hapi_with_log(self):
         self.assertIn(': "${DROID_DAEMON_ENABLED:=false}"', self.text)
@@ -189,7 +222,11 @@ class TestDockerPackageRegressions(unittest.TestCase):
         dockerfile = DOCKERFILE.read_text()
         self.assertIn("droid@latest", packages)
         self.assertIn(
-            "https://registry.npmjs.org/droid/latest /tmp/npm-manifests/droid.json",
+            "https://registry.npmjs.org/droid/latest /manifest.json",
+            dockerfile,
+        )
+        self.assertIn(
+            "FROM npm-manifest-droid-${INSTALL_DROID} AS npm-manifest-droid",
             dockerfile,
         )
 
@@ -243,6 +280,29 @@ class TestModularInstallFlags(unittest.TestCase):
         for key in NPM_COMPONENT_KEYS:
             with self.subTest(key=key):
                 self.assertIn(f'INSTALL_{key}="${{INSTALL_{key}}}"', dockerfile)
+
+    def test_dockerfile_gates_manifest_fetches_by_install_args(self):
+        dockerfile = DOCKERFILE.read_text()
+        self.assertNotRegex(
+            dockerfile,
+            re.compile(r"^ADD https://registry\.npmjs\.org/.+ /tmp/npm-manifests/", re.MULTILINE),
+        )
+        self.assertIn("FROM scratch AS npm-manifest-disabled", dockerfile)
+        for key, slug in NPM_MANIFEST_SLUGS.items():
+            with self.subTest(key=key):
+                self.assertIn(
+                    f"FROM npm-manifest-disabled AS npm-manifest-{slug}-false",
+                    dockerfile,
+                )
+                self.assertIn(
+                    f"FROM npm-manifest-{slug}-${{INSTALL_{key}}} AS npm-manifest-{slug}",
+                    dockerfile,
+                )
+                self.assertIn(
+                    f"COPY --from=npm-manifest-{slug} /manifest.json "
+                    f"/tmp/npm-manifests/{slug}",
+                    dockerfile,
+                )
 
     def test_hermes_install_is_gated(self):
         dockerfile = DOCKERFILE.read_text()
