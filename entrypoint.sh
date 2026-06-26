@@ -237,7 +237,9 @@ if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then
     for i in $(seq 1 60); do
       if [ -f "${HAPI_SERVER_LOG}" ] && [ -f "${HAPI_SETTINGS_FILE}" ]; then
         # Extract relay URL from log: https://xxx.relay.hapi.run
-        RELAY_URL=$(grep -oE 'https://[a-z0-9]+\.relay\.hapi\.run' "${HAPI_SERVER_LOG}" 2>/dev/null | head -1 || true)
+        # Allow valid DNS-label chars (hyphen + mixed case): a subdomain like
+        # my-sub-01.relay.hapi.run must match or the URL is never built (B12).
+        RELAY_URL=$(grep -oE 'https://[A-Za-z0-9-]+\.relay\.hapi\.run' "${HAPI_SERVER_LOG}" 2>/dev/null | head -1 || true)
         # Extract token from settings.json
         TOKEN=$(grep -oE '"cliApiToken":\s*"[^"]+"' "${HAPI_SETTINGS_FILE}" 2>/dev/null | sed 's/.*"cliApiToken":\s*"\([^"]*\)".*/\1/' || true)
         if [ -n "$RELAY_URL" ] && [ -n "$TOKEN" ]; then
@@ -253,6 +255,11 @@ if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then
       fi
       sleep 1
     done
+    # Visible failure path: if the loop ran out without writing the URL file,
+    # the relay log never produced a matching URL (B12) — don't fail silently.
+    if [ ! -f "${HAPI_URL_FILE}" ]; then
+      echo "WARNING: could not build hapi connection URL after 60s; relay log did not contain a matching URL" >&2
+    fi
   ) &
 
   # Start hapi runner if enabled (reads config from volume)

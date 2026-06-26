@@ -9,7 +9,10 @@ PACKAGE_FILE="cli-packages.txt"
 # Получаем версию пакета с retry (соответствует паттерну из CLAUDE.md)
 get_version() {
   for i in 1 2 3 4 5; do
-    ver=$(npm view "$1" version 2>/dev/null) && echo "$ver" && return || sleep 10
+    # Require non-empty output: an empty `npm view` (exit 0 but blank — transient
+    # registry response or a missing version field) must fall through to a retry
+    # and ultimately "unknown", so the unknown-count guard/warning engage (B14).
+    ver=$(npm view "$1" version 2>/dev/null) && [ -n "$ver" ] && echo "$ver" && return || sleep 10
   done
   echo "unknown"
 }

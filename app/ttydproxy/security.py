@@ -26,20 +26,33 @@ def env_bool(value, default=False):
     return default
 
 
-def env_int(value, default, name=None):
-    """Parse an integer env var value, falling back to default on garbage."""
+def env_int(value, default, name=None, minimum=None):
+    """Parse an integer env var value, falling back to default on garbage.
+
+    When `minimum` is given, a parsed value below it is rejected (warning +
+    default). This guards time-to-live settings against a non-positive value
+    that would otherwise issue already-expired tokens and lock out logins (B1).
+    """
     if value is None or str(value).strip() == "":
         return default
+    label = name or "env var"
     try:
-        return int(str(value).strip())
+        result = int(str(value).strip())
     except ValueError:
-        label = name or "env var"
         print(
             f"Invalid integer for {label}: {value!r}, using default {default}",
             file=sys.stderr,
             flush=True,
         )
         return default
+    if minimum is not None and result < minimum:
+        print(
+            f"{label}: {result} below minimum {minimum}, using default {default}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return default
+    return result
 
 
 def env_secret(name, default):

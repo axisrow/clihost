@@ -6,7 +6,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ttydproxy.cleanup import _format_size, delete_cleanup_targets, list_cleanup_targets, summarize_cleanup_targets
+from ttydproxy.cleanup import (
+    _format_size,
+    _resolve_within_root,
+    delete_cleanup_targets,
+    list_cleanup_targets,
+    summarize_cleanup_targets,
+)
 
 
 def write_file(path, size):
@@ -250,6 +256,34 @@ class TestCleanupDeletion(unittest.TestCase):
         self.assertEqual(len(result["errors"]), 1)
         self.assertFalse(good_dir.exists())
         self.assertTrue(bad_dir.exists())
+
+
+class TestCleanupIllegalPathBytes(unittest.TestCase):
+    """A target id with a NUL (or other path-illegal) byte must not crash the
+    handler: pathlib.resolve() raises ValueError('embedded null byte'), which
+    must be treated as an unknown target, not propagated (B9).
+    """
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.hapi_home = self.root / ".hapi"
+        self.hapi_home.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def test_resolve_within_root_rejects_nul_byte(self):
+        # The unit-level cause: ValueError must yield None, not propagate.
+        self.assertIsNone(_resolve_within_root(Path("foo\x00bar"), self.root))
+
+    def test_nul_byte_id_treated_as_unknown(self):
+        result = delete_cleanup_targets(
+            ["project:foo\x00bar"], str(self.root), str(self.hapi_home)
+        )
+        self.assertEqual(result["deleted"], [])
+        skipped_ids = [entry["id"] for entry in result["skipped"]]
+        self.assertIn("project:foo\x00bar", skipped_ids)
 
 
 if __name__ == "__main__":

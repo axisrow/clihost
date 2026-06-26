@@ -183,6 +183,31 @@ class TestSaveUpload(unittest.TestCase):
         second = save_upload(PNG_BYTES, self.dir, "hapi")
         self.assertNotEqual(first, second)
 
+    def test_collision_retries_and_succeeds(self):
+        # A generated-name collision (O_EXCL FileExistsError) must regenerate a
+        # fresh name and retry, not surface as a failed upload (B5). The first
+        # token collides with an existing file; the second succeeds.
+        with patch("ttydproxy.uploads.time.strftime", return_value="20260101-000000"):
+            with patch("ttydproxy.uploads.secrets.token_hex", return_value="deadbeef"):
+                first = save_upload(PNG_BYTES, self.dir, "hapi")
+            with patch(
+                "ttydproxy.uploads.secrets.token_hex",
+                side_effect=["deadbeef", "cafe1234"],
+            ):
+                second = save_upload(PNG_BYTES, self.dir, "hapi")
+        self.assertNotEqual(first, second)
+        self.assertTrue(second.endswith("img-20260101-000000-cafe1234.png"))
+        self.assertEqual(len(os.listdir(self.dir)), 2)
+
+    def test_exhausted_retries_raises(self):
+        # If every generated name collides, the bounded retry eventually gives
+        # up and raises FileExistsError (rather than looping forever).
+        with patch("ttydproxy.uploads.time.strftime", return_value="20260101-000000"):
+            with patch("ttydproxy.uploads.secrets.token_hex", return_value="deadbeef"):
+                save_upload(PNG_BYTES, self.dir, "hapi")
+                with self.assertRaises(FileExistsError):
+                    save_upload(PNG_BYTES, self.dir, "hapi")
+
     def test_concurrent_uploads_into_missing_dir_all_succeed(self):
         # ThreadingHTTPServer runs one thread per request and the client sends
         # up to 5 images per gesture; when uploads/ does not exist yet (fresh

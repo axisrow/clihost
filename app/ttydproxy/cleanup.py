@@ -103,7 +103,10 @@ def _resolve_within_root(path, root):
     try:
         resolved_root = root.resolve()
         resolved_path = path.resolve()
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers a path with an embedded NUL/illegal byte
+        # (pathlib raises 'embedded null byte'); treat it as an unknown
+        # target rather than letting it crash the handler (B9).
         return None
     try:
         resolved_path.relative_to(resolved_root)
