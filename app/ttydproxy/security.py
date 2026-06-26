@@ -29,9 +29,11 @@ def env_bool(value, default=False):
 def env_int(value, default, name=None, minimum=None):
     """Parse an integer env var value, falling back to default on garbage.
 
-    When `minimum` is given, a parsed value below it is rejected (warning +
-    default). This guards time-to-live settings against a non-positive value
-    that would otherwise issue already-expired tokens and lock out logins (B1).
+    When `minimum` is given, a parsed value below it is clamped UP to the
+    minimum (warning + minimum). This guards time-to-live settings against a
+    non-positive value that would otherwise issue already-expired tokens and
+    lock out logins (B1) — clamping fails CLOSED (the access window shrinks to
+    the minimum) rather than expanding to a possibly-large default.
     """
     if value is None or str(value).strip() == "":
         return default
@@ -47,11 +49,11 @@ def env_int(value, default, name=None, minimum=None):
         return default
     if minimum is not None and result < minimum:
         print(
-            f"{label}: {result} below minimum {minimum}, using default {default}",
+            f"{label}: {result} below minimum {minimum}, clamping to {minimum}",
             file=sys.stderr,
             flush=True,
         )
-        return default
+        return minimum
     return result
 
 

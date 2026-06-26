@@ -48,13 +48,15 @@ class TestEnvIntDefault(unittest.TestCase):
 class TestEnvIntMinimum(unittest.TestCase):
     """A lower bound for time-to-live settings: a non-positive value must not be
     accepted verbatim (it would issue already-expired tokens / lock out logins).
+    Below-minimum values clamp UP to the minimum (fail-closed) rather than
+    expanding to a possibly-large default.
     """
 
-    def test_below_minimum_returns_default(self):
-        self.assertEqual(env_int("-1", 604800, minimum=1), 604800)
+    def test_below_minimum_clamps_to_minimum(self):
+        self.assertEqual(env_int("-1", 604800, minimum=1), 1)
 
-    def test_zero_below_minimum_returns_default(self):
-        self.assertEqual(env_int("0", 100, minimum=1), 100)
+    def test_zero_below_minimum_clamps_to_minimum(self):
+        self.assertEqual(env_int("0", 100, minimum=1), 1)
 
     def test_at_minimum_is_kept(self):
         self.assertEqual(env_int("1", 100, minimum=1), 1)
@@ -68,7 +70,8 @@ class TestEnvIntMinimum(unittest.TestCase):
             env_int("-1", 604800, name="SESSION_TIMEOUT", minimum=1)
         message = buf.getvalue()
         self.assertIn("SESSION_TIMEOUT", message)
-        self.assertIn("604800", message)
+        # The warning must surface the clamp target (the minimum), not silence.
+        self.assertIn("1", message)
 
     def test_no_minimum_keeps_negative(self):
         # Backwards compatible: without a minimum, a negative value is returned

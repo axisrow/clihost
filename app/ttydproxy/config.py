@@ -14,7 +14,8 @@ CLEANUP_ROOT = os.environ.get("CLEANUP_ROOT", "/home/hapi")
 HAPI_HOME = os.environ.get("HAPI_HOME", f"{CLEANUP_ROOT}/.hapi")
 MAX_TERMINALS = env_int(os.environ.get("MAX_TERMINALS"), 100, name="MAX_TERMINALS")
 # minimum=1: a non-positive TTL would issue already-expired tokens and lock out
-# every login / reject every CSRF check (B1).
+# every login / reject every CSRF check. A bad value clamps to 1s (fail-closed),
+# never expands to the week-long default (B1).
 SESSION_TIMEOUT = env_int(os.environ.get("SESSION_TIMEOUT"), 604800, name="SESSION_TIMEOUT", minimum=1)
 VIRTUAL_KEYBOARD = env_bool(os.environ.get("VIRTUAL_KEYBOARD"), default=True)
 CSRF_TOKEN_TTL = env_int(os.environ.get("CSRF_TOKEN_TTL"), 604800, name="CSRF_TOKEN_TTL", minimum=1)

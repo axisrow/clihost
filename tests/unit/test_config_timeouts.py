@@ -3,7 +3,8 @@
 A negative SESSION_TIMEOUT (operator typo) otherwise produces session tokens
 that are already expired at issue time, locking out every successful login. The
 fix applies minimum=1 to the TTL settings in config.py, so a non-positive value
-falls back to the default instead.
+is clamped UP to the minimum (1s) — fail-closed: the access window shrinks to
+almost nothing rather than silently expanding to the week-long default.
 """
 import importlib
 import os
@@ -27,13 +28,15 @@ class TestConfigTimeoutFloor(unittest.TestCase):
                 os.environ.pop(key, None)
             importlib.reload(config)
 
-    def test_negative_session_timeout_falls_back_to_default(self):
+    def test_negative_session_timeout_clamps_to_minimum(self):
+        # Fail-closed: a non-positive auth TTL shrinks to 1s, NOT the week-long
+        # default — a typo must not silently widen the access window.
         config = self._reload_config_with(SESSION_TIMEOUT="-1")
-        self.assertEqual(config.SESSION_TIMEOUT, 604800)
+        self.assertEqual(config.SESSION_TIMEOUT, 1)
 
-    def test_zero_csrf_ttl_falls_back_to_default(self):
+    def test_zero_csrf_ttl_clamps_to_minimum(self):
         config = self._reload_config_with(CSRF_TOKEN_TTL="0")
-        self.assertEqual(config.CSRF_TOKEN_TTL, 604800)
+        self.assertEqual(config.CSRF_TOKEN_TTL, 1)
 
     def test_positive_values_are_kept(self):
         config = self._reload_config_with(
