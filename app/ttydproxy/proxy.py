@@ -27,6 +27,10 @@ TUNNEL_RECV_SIZE = 8192
 TUNNEL_MAX_PENDING = 1048576  # 1 MiB per direction before backpressure kicks in
 TUNNEL_SELECT_TIMEOUT = 60
 
+# Largest request body forwarded to ttyd. A client body above this is rejected
+# with 413 rather than silently dropped (B4).
+TTYD_MAX_BODY = 10485760  # 10 MiB
+
 
 def is_websocket_request(handler):
     """Check if the current request is a WebSocket upgrade request."""
@@ -46,7 +50,13 @@ def build_ttyd_headers(handler, port):
 
 
 def inject_tab_fix_script(data):
-    """Inject the Tab fix script into ttyd HTML responses."""
+    """Inject the Tab fix script into ttyd HTML responses.
+
+    On any failure the ORIGINAL input bytes are returned unchanged, so a caller
+    forwarding Content-Encoding: gzip stays consistent even when the
+    decompressed payload can't be decoded (B3).
+    """
+    original = data
     try:
         is_gzipped = False
         if len(data) >= 2 and data[0:2] == b"\x1f\x8b":
@@ -54,7 +64,7 @@ def inject_tab_fix_script(data):
                 data = gzip.decompress(data)
                 is_gzipped = True
             except Exception:
-                return data
+                return original
 
         html = data.decode("utf-8")
         script = TAB_FIX_SCRIPT
@@ -76,7 +86,7 @@ def inject_tab_fix_script(data):
             result = gzip.compress(result)
         return result
     except Exception:
-        return data
+        return original
 
 
 def tunnel_sockets(handler, upstream):
@@ -203,13 +213,24 @@ def proxy_ttyd_http(handler, upstream_path, port):
     """Proxy an HTTP request to ttyd."""
     body = None
     content_length = handler.headers.get("Content-Length")
-    if content_length:
+    if content_length is not None:
+        # A malformed/oversized body must be rejected with an explicit 4xx, not
+        # silently dropped while the request is forwarded body-less (B4).
         try:
             length = int(content_length)
         except ValueError:
-            length = 0
-        if 0 < length <= 10485760:
+            handler.send_json(400, {"error": "Invalid Content-Length"})
+            return
+        if length < 0 or length > TTYD_MAX_BODY:
+            handler.send_json(413, {"error": "Request too large"})
+            return
+        if length > 0:
             body = handler.rfile.read(length)
+    elif handler.headers.get("Transfer-Encoding"):
+        # No Content-Length but the client framed a body (e.g. chunked). We do
+        # not de-chunk; forwarding an empty body would silently lose it (B4).
+        handler.send_json(411, {"error": "Length required"})
+        return
 
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     try:
@@ -223,6 +244,9 @@ def proxy_ttyd_http(handler, upstream_path, port):
             if key.lower() == "content-type":
                 content_type = value
                 break
+        # Normalize the value so injection + CSP hardening fire regardless of
+        # upstream header casing (e.g. 'Text/HTML') (B6).
+        content_type = content_type.lower()
 
         if "text/html" in content_type and data:
             data = inject_tab_fix_script(data)

@@ -14,6 +14,12 @@ _SIGNATURES = (
     (b"GIF89a", "gif"),
 )
 
+# How many times to regenerate the random filename on an O_EXCL collision before
+# giving up. The name is a per-second timestamp plus 32 bits of randomness, so a
+# collision needs the same second AND the same nonce — astronomically unlikely;
+# a handful of attempts is plenty (B5).
+_MAX_NAME_ATTEMPTS = 5
+
 
 def detect_image_extension(data):
     """Return the file extension for known image magic bytes, else None."""
@@ -140,16 +146,29 @@ def save_upload(data, upload_dir, owner):
     # recreate it (and any missing parents) on every save.
     dir_fd = _open_upload_dir_nofollow(upload_dir, ids)
     try:
-        name = f"img-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}.{extension}"
-        # Resolve `name` relative to the open directory inode (dir_fd), not by
-        # walking upload_dir again; O_EXCL keeps the "xb" semantics and
-        # O_NOFOLLOW rejects a symlink someone planted under that name.
-        file_fd = os.open(
-            name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=dir_fd,
-        )
+        # Bounded retry: a generated-name collision (O_EXCL FileExistsError —
+        # a token_hex collision in the same second, or a pre-created
+        # predictable-prefix name) regenerates a fresh suffix rather than
+        # failing the upload (B5). The O_EXCL/O_NOFOLLOW atomicity is preserved.
+        for _ in range(_MAX_NAME_ATTEMPTS):
+            name = f"img-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}.{extension}"
+            # Resolve `name` relative to the open directory inode (dir_fd), not
+            # by walking upload_dir again; O_EXCL keeps the "xb" semantics and
+            # O_NOFOLLOW rejects a symlink someone planted under that name.
+            try:
+                file_fd = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=dir_fd,
+                )
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise FileExistsError(
+                f"could not allocate a unique upload filename after {_MAX_NAME_ATTEMPTS} attempts"
+            )
         try:
             _fchown_best_effort(file_fd, ids)
             with open(file_fd, "wb", closefd=False) as upload_file:

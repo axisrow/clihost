@@ -11,12 +11,11 @@ from ttydproxy.security import env_bool
 APP_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_DIR = APP_ROOT
 
-FAVICON_LINKS = "\n  ".join((
-    '<link rel="icon" href="/favicon.ico" sizes="any">',
-    '<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">',
-    '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">',
-    '<link rel="apple-touch-icon" href="/apple-touch-icon.png">',
-))
+# Only advertise a <link> for a favicon that actually loaded, so a missing
+# decorative PNG is not referenced by a dead route (B18).
+FAVICON_LINKS = "\n  ".join(
+    icon.link for icon in assets.FAVICONS if icon.body is not None
+)
 
 # Placeholders substituted into every rendered page.
 BASE_REPLACEMENTS = {"{{FAVICON}}": FAVICON_LINKS}

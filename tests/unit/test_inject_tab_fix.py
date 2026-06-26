@@ -81,6 +81,20 @@ class TestInjectSilentFailure(unittest.TestCase):
         data = b"\x1f\x8b" + b"\x00" * 10
         self.assertEqual(inject_tab_fix_script(data), data)
 
+    def test_gzip_valid_but_non_utf8_returns_original(self):
+        # Valid gzip whose DECOMPRESSED payload is not UTF-8: the function must
+        # return the ORIGINAL gzip bytes, not the decompressed buffer. Returning
+        # the latter breaks the forwarded Content-Encoding: gzip header (B3).
+        inner = b"<html><head></head><body>caf\xe9</body></html>"
+        with self.assertRaises(UnicodeDecodeError):
+            inner.decode("utf-8")  # premise: not valid UTF-8
+        original = gzip.compress(inner)
+        out = inject_tab_fix_script(original)
+        self.assertEqual(out, original)
+        self.assertEqual(out[0:2], b"\x1f\x8b")
+        # Still a valid gzip stream the browser can gunzip.
+        self.assertEqual(gzip.decompress(out), inner)
+
 
 class TestInjectTTYDRealistic(unittest.TestCase):
     def test_script_before_ttyd_scripts(self):

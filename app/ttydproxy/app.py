@@ -29,6 +29,7 @@ from ttydproxy.config import (
     MAX_UPLOAD_SIZE,
     UPLOAD_DIR,
     TTYD_ROUTE_PATTERN,
+    MAX_TERMINAL_ID_DIGITS,
 )
 from ttydproxy.manager import TTYDManager
 from ttydproxy.proxy import is_websocket_request, proxy_ttyd_http, proxy_ttyd_websocket
@@ -57,11 +58,12 @@ login_rate_limiter = RateLimiter(max_attempts=5, window_seconds=60)
 account_rate_limiter = RateLimiter(max_attempts=5, window_seconds=300)
 MAX_CLEANUP_DELETE_IDS = 50
 MAX_CLEANUP_TARGET_ID_LENGTH = 128
+# A favicon that failed to load (None) is dropped from the routes so one
+# missing decorative PNG never takes down login/terminal (B18).
 FAVICON_ROUTES = {
-    "/favicon.ico": ("image/x-icon", assets.FAVICON_ICO),
-    "/favicon-16x16.png": ("image/png", assets.FAVICON_16_PNG),
-    "/favicon-32x32.png": ("image/png", assets.FAVICON_32_PNG),
-    "/apple-touch-icon.png": ("image/png", assets.APPLE_TOUCH_ICON_PNG),
+    icon.path: (icon.content_type, icon.body)
+    for icon in assets.FAVICONS
+    if icon.body is not None
 }
 
 
@@ -123,7 +125,15 @@ class TTYDProxyHandler(BaseHandler):
     def do_DELETE(self):
         parsed = urlparse(self.path)
         parts = parsed.path.split("/")
-        if len(parts) == 3 and parts[1] == "terminals" and parts[2].isdigit():
+        # Bound the digit count (same cap as the GET route regex) so int() can
+        # never hit Python's 4300-digit string-conversion limit on this
+        # unauthenticated path (B8); an over-long id falls through to a 404.
+        if (
+            len(parts) == 3
+            and parts[1] == "terminals"
+            and parts[2].isdigit()
+            and len(parts[2]) <= MAX_TERMINAL_ID_DIGITS
+        ):
             self.handle_terminals_delete(int(parts[2]))
             return
         self.send_json(404, {"error": "Not found"})

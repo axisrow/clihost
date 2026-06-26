@@ -498,5 +498,114 @@ class TestBuildShRegressions(unittest.TestCase):
         self.assertLess(cd_match.start(), build_match.start())
 
 
+class TestEntrypointRelayUrlRegex(unittest.TestCase):
+    """B12: the relay-URL subdomain class must accept valid DNS-label chars.
+
+    A subdomain like my-sub-01.relay.hapi.run (hyphens, digits) must match so
+    the connection URL is built; the original [a-z0-9]+ silently dropped it.
+    """
+
+    def setUp(self):
+        self.text = ENTRYPOINT.read_text()
+
+    def _extract_grep_regex(self):
+        # Pull the actual grep -oE pattern out of the real script so the test
+        # cannot drift from the source.
+        match = re.search(
+            r"grep -oE '(https://[^']*relay\\.hapi\\.run)'", self.text
+        )
+        self.assertIsNotNone(match, "relay-URL grep pattern not found in entrypoint.sh")
+        return match.group(1)
+
+    def _grep_relay_url(self, log):
+        """Run the real entrypoint grep pattern over `log`, return the match."""
+        result = subprocess.run(
+            ["grep", "-oE", self._extract_grep_regex()],
+            input=log, capture_output=True, text=True,
+        )
+        return result.stdout.strip()
+
+    def test_regex_matches_hyphenated_subdomain(self):
+        self.assertEqual(
+            self._grep_relay_url("noise\nready at https://my-sub-01.relay.hapi.run now\n"),
+            "https://my-sub-01.relay.hapi.run",
+            "hyphenated relay subdomain was not matched (B12)",
+        )
+
+    def test_regex_matches_plain_lowercase_subdomain(self):
+        self.assertEqual(
+            self._grep_relay_url("x https://abc123.relay.hapi.run y\n"),
+            "https://abc123.relay.hapi.run",
+        )
+
+    def test_source_uses_dns_label_class(self):
+        self.assertIn("[A-Za-z0-9-]+\\.relay\\.hapi\\.run", self.text)
+        self.assertNotIn("[a-z0-9]+\\.relay\\.hapi\\.run", self.text)
+
+
+class TestDockerEntrypointSignals(unittest.TestCase):
+    """B13: tini must forward signals to the whole process group (-g).
+
+    entrypoint.sh `exec`s sshd after backgrounding the ttyd proxy / hapi server
+    / droid daemon, which are reparented to tini (PID 1). Without -g, tini only
+    SIGTERMs its direct child (sshd); the reparented children are SIGKILLed
+    after the grace period. -g makes `docker stop` reach them gracefully.
+
+    A full repro needs tini as PID 1 inside a container (out of unit scope), so
+    this pins the fix statically.
+    """
+
+    def test_tini_entrypoint_uses_group_signal_flag(self):
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn(
+            '["/usr/bin/tini", "-g", "--", "/entrypoint.sh"]',
+            dockerfile,
+            "tini must run with -g so SIGTERM reaches reparented children (B13)",
+        )
+
+
+class TestBuildShGetVersion(unittest.TestCase):
+    """B14: an empty `npm view` result must be treated as a fetch failure, not
+    accepted as a valid (empty) version that bypasses the unknown-count guard.
+    """
+
+    def _extract_get_version(self):
+        text = BUILD_SH.read_text()
+        match = re.search(r"^get_version\(\) \{\n.*?^\}", text, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(match, "get_version() not found in build.sh")
+        return match.group(0)
+
+    def _run_get_version(self, npm_body):
+        get_version = self._extract_get_version()
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_npm = pathlib.Path(tmp) / "npm"
+            fake_npm.write_text("#!/bin/bash\n" + npm_body)
+            fake_npm.chmod(0o755)
+            # sleep 0 so the retry loop doesn't actually wait.
+            script = (
+                "set -uo pipefail\n"
+                "sleep() { :; }\n"
+                f"{get_version}\n"
+                'get_version "somepkg"\n'
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{tmp}{os.pathsep}{env['PATH']}"
+            return subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, env=env
+            )
+
+    def test_empty_npm_view_becomes_unknown(self):
+        # npm view exits 0 but prints nothing (transient registry / missing field).
+        result = self._run_get_version('printf ""\nexit 0\n')
+        self.assertEqual(result.stdout.strip(), "unknown", result.stderr)
+
+    def test_nonempty_npm_view_passes_through(self):
+        result = self._run_get_version('echo "1.2.3"\nexit 0\n')
+        self.assertEqual(result.stdout.strip(), "1.2.3", result.stderr)
+
+    def test_source_requires_nonempty_version(self):
+        self.assertIn('[ -n "$ver" ]', BUILD_SH.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

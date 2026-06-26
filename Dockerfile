@@ -188,6 +188,9 @@ RUN chmod +x /entrypoint.sh
 
 EXPOSE 8080
 
-# tini as PID 1 reaps zombies (orphaned subshells) and forwards signals
-ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
+# tini as PID 1 reaps zombies (orphaned subshells) and forwards signals.
+# -g forwards SIGTERM to the whole process group so the ttyd proxy / hapi server
+# / droid daemon (reparented to tini after entrypoint.sh exec's sshd) shut down
+# gracefully on `docker stop` instead of being SIGKILLed after the grace period (B13).
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/entrypoint.sh"]
 CMD ["/usr/sbin/sshd", "-D", "-e"]
