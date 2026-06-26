@@ -16,6 +16,11 @@ FAVICON_LINKS = (
 
 class TestFavicon(unittest.TestCase):
     def test_favicon_assets_are_loaded(self):
+        # The aliases degrade to None when a file is missing (B18); assert they
+        # actually loaded first, so a missing asset reads as a clear failure
+        # rather than an AttributeError on the .startswith below.
+        for name in ("FAVICON_ICO", "FAVICON_16_PNG", "FAVICON_32_PNG", "APPLE_TOUCH_ICON_PNG"):
+            self.assertIsNotNone(getattr(assets, name), f"{name} failed to load")
         self.assertTrue(assets.FAVICON_ICO.startswith(b"\x00\x00\x01\x00"))
         self.assertTrue(assets.FAVICON_16_PNG.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(assets.FAVICON_32_PNG.startswith(b"\x89PNG\r\n\x1a\n"))

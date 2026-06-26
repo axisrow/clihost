@@ -15,7 +15,8 @@ _SIGNATURES = (
 )
 
 # How many times to regenerate the random filename on an O_EXCL collision before
-# giving up. 32 bits of randomness makes one collision astronomically unlikely;
+# giving up. The name is a per-second timestamp plus 32 bits of randomness, so a
+# collision needs the same second AND the same nonce — astronomically unlikely;
 # a handful of attempts is plenty (B5).
 _MAX_NAME_ATTEMPTS = 5
 

@@ -29,14 +29,20 @@ def env_bool(value, default=False):
 def env_int(value, default, name=None, minimum=None):
     """Parse an integer env var value, falling back to default on garbage.
 
-    When `minimum` is given, a parsed value below it is clamped UP to the
-    minimum (warning + minimum). This guards time-to-live settings against a
+    When `minimum` is given, the result is never returned below it: a parsed
+    value below the minimum (or a fallback `default` below it) is clamped UP to
+    the minimum (warning + minimum). This guards time-to-live settings against a
     non-positive value that would otherwise issue already-expired tokens and
     lock out logins (B1) — clamping fails CLOSED (the access window shrinks to
     the minimum) rather than expanding to a possibly-large default.
     """
+    def _floor(n):
+        # The minimum binds every return path, so even a sub-minimum default
+        # (no real caller passes one today) can't silently undercut the floor.
+        return n if minimum is None or n >= minimum else minimum
+
     if value is None or str(value).strip() == "":
-        return default
+        return _floor(default)
     label = name or "env var"
     try:
         result = int(str(value).strip())
@@ -46,7 +52,7 @@ def env_int(value, default, name=None, minimum=None):
             file=sys.stderr,
             flush=True,
         )
-        return default
+        return _floor(default)
     if minimum is not None and result < minimum:
         print(
             f"{label}: {result} below minimum {minimum}, clamping to {minimum}",

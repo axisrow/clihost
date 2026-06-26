@@ -78,6 +78,13 @@ class TestEnvIntMinimum(unittest.TestCase):
         # verbatim (e.g. settings where negative is meaningful).
         self.assertEqual(env_int("-5", 1), -5)
 
+    def test_sub_minimum_default_is_also_floored(self):
+        # The minimum binds the fallback paths too: a default below the minimum
+        # is clamped up, so the floor can never be silently undercut.
+        self.assertEqual(env_int(None, 0, minimum=1), 1)
+        self.assertEqual(env_int("", 0, minimum=1), 1)
+        self.assertEqual(env_int("abc", 0, minimum=1), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
