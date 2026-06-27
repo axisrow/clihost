@@ -115,6 +115,46 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertIn('TTYD_SANDBOX="${TTYD_SANDBOX}"', self.text)
 
 
+class TestClaudeConfigPersistence(unittest.TestCase):
+    """The 'Claude Code login keeps resetting' report (issue #59 tail) blamed
+    lost ~/.claude credentials. Root cause was a missing /home/hapi volume
+    mount, NOT the entrypoint deleting the config. These regressions pin the
+    entrypoint's contract so a future edit can't start wiping ~/.claude and
+    silently reintroduce the symptom on top of a correctly mounted volume.
+    """
+
+    def setUp(self):
+        self.text = ENTRYPOINT.read_text()
+
+    def test_claude_dir_is_ensured_owned_not_recreated(self):
+        # ~/.claude must be created+chowned (so a fresh volume is usable) but
+        # never deleted/recreated, or persisted credentials would vanish.
+        self.assertIn('ensure_dir_owned "${HAPI_USER_HOME}/.claude"', self.text)
+
+    def test_entrypoint_never_removes_claude_config(self):
+        # No rm/rm -rf may target ~/.claude (directly or via HAPI_USER_HOME).
+        for pattern in (
+            r'rm\s+[^\n]*\.claude\b',
+            r'rm\s+[^\n]*\$\{HAPI_USER_HOME\}/\.claude',
+            r'rm\s+[^\n]*HOME[^\n]*/\.claude',
+        ):
+            with self.subTest(pattern=pattern):
+                self.assertNotRegex(self.text, re.compile(pattern))
+
+    def test_cleanup_runner_state_does_not_touch_claude(self):
+        # cleanup_runner_state wipes stale runner state on restart; it must stay
+        # scoped to ~/.hapi / ~/*.json and never list anything under ~/.claude.
+        match = re.search(
+            r"cleanup_runner_state\(\)\s*\{(.*?)\n\}", self.text, re.DOTALL
+        )
+        if match is None:
+            self.fail("cleanup_runner_state() not found")
+        body = match.group(1)
+        self.assertNotIn(".claude", body)
+        # sanity: it does target the runner state files it is meant to clear.
+        self.assertIn("runner.state.json", body)
+
+
 class TestTmuxWrapperSandboxRegressions(unittest.TestCase):
     def setUp(self):
         self.text = TMUX_WRAPPER.read_text()
