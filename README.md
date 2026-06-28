@@ -77,6 +77,7 @@ hapi Client               → hapi runner (80)     → CLI tools
 | `ttyd_proxy.py` | 8080 | Multithreaded HTTP/WS прокси с аутентификацией |
 | `ttyd` | 127.0.0.1:768x | Web-терминал (по одному на сессию, только localhost) |
 | `droid daemon --remote-access` | — | Optional Droid gateway, logs to `/home/hapi/.hapi/droid-daemon.log` |
+| `ao daemon` | 127.0.0.1:3001 | Optional agent-orchestrator gateway (loopback-only), logs to `/home/hapi/.hapi/ao-daemon.log` |
 | `hapi runner` | `HAPI_PORT` (default 80) | Запуск CLI-инструментов по API (опционально) |
 | `hapi server --relay` | — | Туннель для внешнего доступа |
 
@@ -117,6 +118,8 @@ Terminal iframe page и связанные JS/CSS-ассеты лежат в `ap
 | `ROOT_PASSWORD` | - | Enable root SSH access with this password |
 | `DROID_DAEMON_ENABLED` | false | Start `droid daemon --remote-access` for Droid remote access |
 | `DROID_COMPUTER_NAME` | - | Required when `DROID_DAEMON_ENABLED=true`; used for non-interactive `droid computer register <name> -y` |
+| `AO_DAEMON_ENABLED` | false | Start `ao daemon` (agent-orchestrator); loopback-only, reach it through the SSH tunnel |
+| `AO_PORT` | 3001 | `ao daemon` bind port (loopback-only by design; understood by the daemon itself) |
 | `TTYD_SANDBOX` | false | Wrap each tmux session in a bubblewrap jail (see Multi-tenant sandbox below) |
 
 ### Multi-tenant sandbox (optional)

@@ -102,6 +102,7 @@ Docker container running hapi CLI runner alongside OpenSSH server, bundling AI C
 - `ttyd_proxy.py` (PORT, default 8080) — HTTP/WebSocket reverse proxy with auth; **spawns and manages ttyd processes itself**; runs unprivileged as `TTYD_USER` (entrypoint drops root via `runuser`)
 - `ttyd` (127.0.0.1:7681, 7682, …) — one process per terminal, localhost-only, each attached to its own tmux session `ttyd-{id}` via `bin/tmux-wrapper.sh`
 - `droid daemon --remote-access` — optional remote-access gateway; starts as `hapi` only when `DROID_DAEMON_ENABLED=true`; requires `DROID_COMPUTER_NAME` for non-interactive `droid computer register <name> -y`; logs to `/home/hapi/.hapi/droid-daemon.log`
+- `ao daemon` — optional agent-orchestrator gateway (issues #72/#61); starts as `hapi` only when `AO_DAEMON_ENABLED=true`; binds **loopback-only** `127.0.0.1:AO_PORT` (default 3001) by design — no `AO_HOST`/auth/TLS, so external access is via the SSH tunnel (#79) + `ssh -L 127.0.0.1:3001:127.0.0.1:3001`. Independent of hapi (the `ao` binary is built into the image in #83); logs to `/home/hapi/.hapi/ao-daemon.log`. **No `EXPOSE 3001`** (loopback by design).
 - `hapi server --relay` — always starts; tunnel URL + token are extracted from its log into `/home/hapi/url` (shown on the dashboard)
 - SSH tunnel (`cloudflared` or `chisel`) — optional external SSH access (issue #79); starts as `hapi` only when `SSH_TUNNEL_ENABLED=true`, next to (not inside) the hapi block so it is **independent of hapi** (works with `INSTALL_HAPI=false`); provider chosen by `SSH_TUNNEL_PROVIDER` (default `cloudflared`); logs to `/home/hapi/.hapi/ssh-tunnel.log`; the dashboard connection string is built from env (the public hostname is not logged) into `/home/hapi/ssh-url` (consumed by #80)
 - `hapi runner` (HAPI_PORT, default 80) — optional, requires HAPI_RUNNER_ENABLED=true
@@ -113,7 +114,7 @@ SSH Client → sshd (22) → shell
 hapi Client → HTTP API (HAPI_PORT) → hapi runner
 ```
 
-**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → drop any stale dashboard URL → if `hapi` is installed, start `hapi server --relay`, extract connection URL, and optionally start hapi runner (otherwise warn and skip) → `exec sshd`.
+**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → optionally start ao daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → drop any stale dashboard URL → if `hapi` is installed, start `hapi server --relay`, extract connection URL, and optionally start hapi runner (otherwise warn and skip) → `exec sshd`.
 
 **Volume mount:** `/home/hapi` — persistent runner state, logs, configs. The mount overwrites permissions, hence the permission fixes in entrypoint.sh.
 
@@ -193,6 +194,8 @@ Terminal list and controls are built **dynamically in JavaScript**, not static H
 **Other:**
 - `DROID_DAEMON_ENABLED` — set `true` to start `droid daemon --remote-access` at container start (default: false)
 - `DROID_COMPUTER_NAME` — required when `DROID_DAEMON_ENABLED=true`; limited to letters, numbers, dots, underscores, and dashes; used for non-interactive registration before daemon startup
+- `AO_DAEMON_ENABLED` — set `true` to start `ao daemon` (agent-orchestrator) at container start (default: false). Loopback-only; reach it from the host through the SSH tunnel (#79) + `ssh -L 127.0.0.1:3001:127.0.0.1:3001`. Independent of hapi.
+- `AO_PORT` — `ao daemon` bind port (default: 3001; loopback-only by design, read by the daemon itself; validated numeric in the entrypoint since it is interpolated into the launch string)
 - `HERMES_AUTO_UPDATE` — set `false` to skip Hermes Agent update at container start.
 
 **External SSH tunnel (optional, issue #79):**

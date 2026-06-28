@@ -149,6 +149,36 @@ class TestEntrypointRegressions(unittest.TestCase):
             self.text,
         )
 
+    def test_ao_daemon_started_as_hapi_with_log(self):
+        # agent-orchestrator daemon (issue #72, closes #61): off by default, gated
+        # by AO_DAEMON_ENABLED, started as hapi with its log under HAPI_HOME, the
+        # `ao` binary guarded by `command -v` so a missing binary skips (not fails).
+        self.assertIn(': "${AO_DAEMON_ENABLED:=false}"', self.text)
+        self.assertIn(': "${AO_PORT:=3001}"', self.text)
+        self.assertIn('[ "${AO_DAEMON_ENABLED}" = "true" ]', self.text)
+        self.assertIn('PATH="${HAPI_RUN_PATH}" command -v ao', self.text)
+        self.assertIn("ao CLI not found; skipping ao daemon startup", self.text)
+        self.assertIn('AO_DAEMON_LOG="${HAPI_HOME}/ao-daemon.log"', self.text)
+        self.assertIn(
+            'run_as_hapi "AO_PORT=\\"${AO_PORT}\\" stdbuf -oL ao daemon 2>&1 | tee \\"${AO_DAEMON_LOG}\\"" &',
+            self.text,
+        )
+        self.assertIn(
+            "ao daemon disabled (set AO_DAEMON_ENABLED=true", self.text
+        )
+
+    def test_ao_port_validated_numeric_in_daemon_gate(self):
+        # AO_PORT is interpolated into the `ao daemon` launch string, so a
+        # non-numeric value must fail loudly (mirrors PORT / CHISEL_REMOTE_PORT).
+        # The guard lives inside the AO_DAEMON_ENABLED gate so the default path
+        # (flag off) never validates a value it doesn't use.
+        gate_pos = self.text.find('if [ "${AO_DAEMON_ENABLED}" = "true" ]; then')
+        self.assertGreater(gate_pos, -1, "AO_DAEMON_ENABLED gate is missing")
+        check_pos = self.text.find(
+            "AO_PORT='${AO_PORT}' must be a positive integer", gate_pos
+        )
+        self.assertGreater(check_pos, gate_pos, "AO_PORT numeric check missing in gate")
+
     def test_ssh_tunnel_env_defaults(self):
         # Pluggable SSH tunnel (issue #79): env defaults must be set so the gate
         # and provider switch never run against an unset variable (set -u).
