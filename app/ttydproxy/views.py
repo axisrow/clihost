@@ -113,10 +113,19 @@ def load_ssh_url(url_file):
     Unlike load_hapi_url the content is not an HTTP URL but a single shell
     command (e.g. 'ssh -p 2222 hapi@host' or 'ssh -o ProxyCommand=... ...').
     We never interpret it - only surface it for display. Reject anything that is
-    not a single non-empty line starting with 'ssh ' (no embedded newlines,
-    carriage returns, NULs, or other control chars that could smuggle a second
-    command past the copy-paste path).
+    not a single non-empty line starting with 'ssh ' and free of shell
+    metacharacters and control characters. The string is never interpreted by
+    us, but the user pastes it into a shell, so a second command must not be
+    able to ride the copy-paste path: reject ';', '|', '&', '$', backtick,
+    backslash, '<', '>', '(', ')', '{', '}' and any control char (ord < 0x20,
+    covering newline/CR/NUL). Double quotes, spaces, '%', '@', '.', '-', ':'
+    stay allowed so the legitimate cloudflared form
+    (ssh -o ProxyCommand="cloudflared access ssh --hostname %h" hapi@host) passes.
     """
+    # Forbidden beyond the 'ssh ' prefix: shell metacharacters that could chain a
+    # second command, plus any control character (newline/CR/NUL/tab/etc.).
+    # Quotes, spaces and % are intentionally NOT here (legitimate cloudflared form).
+    forbidden = set(";|&$`\\<>(){}")
     try:
         raw = Path(url_file).read_text(encoding="utf-8")
     except OSError:
@@ -126,6 +135,6 @@ def load_ssh_url(url_file):
         return None
     if not candidate.startswith("ssh "):
         return None
-    if "\n" in candidate or "\r" in candidate or "\x00" in candidate:
+    if any(ch in forbidden or ord(ch) < 0x20 for ch in candidate):
         return None
     return candidate
