@@ -79,6 +79,15 @@ if [ -n "${INSTALL_HERMES:-}" ]; then
   BUILD_ARGS+=(--build-arg "INSTALL_HERMES=${INSTALL_HERMES}")
 fi
 
+# SSH-tunnel провайдеры ставятся не из npm (curl-пребилты в Dockerfile, issue #79),
+# но тоже управляются INSTALL_*-флагом — пробрасываем, если заданы.
+for tunnel_key in INSTALL_CLOUDFLARED INSTALL_CHISEL; do
+  if [ -n "${!tunnel_key:-}" ]; then
+    validate_bool "${tunnel_key}" "${!tunnel_key}"
+    BUILD_ARGS+=(--build-arg "${tunnel_key}=${!tunnel_key}")
+  fi
+done
+
 # Проверяем что хотя бы часть версий получена
 if (( package_count == 0 )); then
   echo "Warning: no enabled npm packages (all INSTALL_* flags are false?)"

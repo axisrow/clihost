@@ -36,7 +36,7 @@ Each bundled CLI tool can be dropped from the image to build a lighter, deploy-s
 
 - `bin/install-cli.sh` reads `cli-packages.txt` and installs only the npm tools whose `INSTALL_<KEY>` env var is not `false`. The `Dockerfile` declares one `ARG INSTALL_<KEY>=true` per component and promotes them into the env for that `RUN`. Hermes has its own `INSTALL_HERMES`-gated `RUN`.
 - `build.sh` forwards every `INSTALL_<KEY>` (read from the shell environment, default `true`) to `docker build` as `--build-arg`, and excludes disabled tools from the cache-busting hash (so bumping a disabled tool's version no longer invalidates the cache).
-- Keys: `INSTALL_CLAUDE_CODE`, `INSTALL_CODEX`, `INSTALL_GEMINI`, `INSTALL_COPILOT`, `INSTALL_OPENCODE`, `INSTALL_DROID`, `INSTALL_HAPI`, `INSTALL_HERMES`. Disabling `INSTALL_HAPI` removes the runtime core (tunnel/runner/dashboard URL); the entrypoint skips hapi startup when the binary is absent and warns if `HAPI_RUNNER_ENABLED=true`.
+- Keys: `INSTALL_CLAUDE_CODE`, `INSTALL_CODEX`, `INSTALL_GEMINI`, `INSTALL_COPILOT`, `INSTALL_OPENCODE`, `INSTALL_DROID`, `INSTALL_HAPI`, `INSTALL_HERMES`, `INSTALL_CLOUDFLARED`, `INSTALL_CHISEL`. Disabling `INSTALL_HAPI` removes the runtime core (tunnel/runner/dashboard URL); the entrypoint skips hapi startup when the binary is absent and warns if `HAPI_RUNNER_ENABLED=true`. `INSTALL_CLOUDFLARED`/`INSTALL_CHISEL` gate the two SSH-tunnel providers (issue #79): both are non-npm curl-prebuilt binaries (so they are forwarded by `build.sh` like `INSTALL_HERMES`, not via `cli-packages.txt`), installed in a dedicated `Dockerfile` `RUN` after the ttyd step with a strict `true|false` case (fail-closed on anything else).
 
 #### Headless mode — running without hapi (issue #63)
 
@@ -95,6 +95,7 @@ Docker container running hapi CLI runner alongside OpenSSH server, bundling AI C
 - `ttyd` (127.0.0.1:7681, 7682, …) — one process per terminal, localhost-only, each attached to its own tmux session `ttyd-{id}` via `bin/tmux-wrapper.sh`
 - `droid daemon --remote-access` — optional remote-access gateway; starts as `hapi` only when `DROID_DAEMON_ENABLED=true`; requires `DROID_COMPUTER_NAME` for non-interactive `droid computer register <name> -y`; logs to `/home/hapi/.hapi/droid-daemon.log`
 - `hapi server --relay` — always starts; tunnel URL + token are extracted from its log into `/home/hapi/url` (shown on the dashboard)
+- SSH tunnel (`cloudflared` or `chisel`) — optional external SSH access (issue #79); starts as `hapi` only when `SSH_TUNNEL_ENABLED=true`, next to (not inside) the hapi block so it is **independent of hapi** (works with `INSTALL_HAPI=false`); provider chosen by `SSH_TUNNEL_PROVIDER` (default `cloudflared`); logs to `/home/hapi/.hapi/ssh-tunnel.log`; the dashboard connection string is built from env (the public hostname is not logged) into `/home/hapi/ssh-url` (consumed by #80)
 - `hapi runner` (HAPI_PORT, default 80) — optional, requires HAPI_RUNNER_ENABLED=true
 
 **Data flow:**
@@ -185,6 +186,16 @@ Terminal list and controls are built **dynamically in JavaScript**, not static H
 - `DROID_DAEMON_ENABLED` — set `true` to start `droid daemon --remote-access` at container start (default: false)
 - `DROID_COMPUTER_NAME` — required when `DROID_DAEMON_ENABLED=true`; limited to letters, numbers, dots, underscores, and dashes; used for non-interactive registration before daemon startup
 - `HERMES_AUTO_UPDATE` — set `false` to skip Hermes Agent update at container start.
+
+**External SSH tunnel (optional, issue #79):**
+- `SSH_TUNNEL_ENABLED` — set `true` to expose the container's sshd (port 22) externally where port forwarding is unavailable (Railway/PaaS) (default: false). Independent of hapi (works with `INSTALL_HAPI=false`).
+- `SSH_TUNNEL_PROVIDER` — `cloudflared` (default) or `chisel`. An invalid value fails the startup loudly.
+- `CLOUDFLARE_TUNNEL_TOKEN` — required for the `cloudflared` provider; the token of a remotely-managed named tunnel (`cloudflared tunnel --no-autoupdate run --token …`). Quick tunnels (trycloudflare) are HTTP-only and cannot carry SSH, so a named tunnel + Cloudflare account/domain is mandatory. Empty token → visible warning + skip.
+- `CLOUDFLARE_TUNNEL_HOSTNAME` — the public hostname (e.g. `ssh.example.com`) used to build the dashboard connection string; cloudflared does not print it to the log, so it comes from env.
+- `CHISEL_SERVER` — required for the `chisel` provider; URL of a self-hosted `chisel server --reverse` (e.g. `https://chisel.example.com:9312`). Empty → visible warning + skip.
+- `CHISEL_AUTH` — `user:pass` credential passed to chisel via the `AUTH` env var (same on server and client).
+- `CHISEL_REMOTE_PORT` — server port that the reverse-forwarded `:22` listens on (default: 2222).
+- Client connection: cloudflared → `ssh -o ProxyCommand="cloudflared access ssh --hostname %h" hapi@$CLOUDFLARE_TUNNEL_HOSTNAME` (needs cloudflared installed locally); chisel → `ssh -p $CHISEL_REMOTE_PORT hapi@<host of CHISEL_SERVER>`; add `-L 127.0.0.1:3001:127.0.0.1:3001` to reach `ao daemon`.
 
 **Sandbox (optional):**
 - `TTYD_SANDBOX` — set `true` to launch each tmux session inside a bubblewrap (bwrap)

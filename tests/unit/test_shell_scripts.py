@@ -149,6 +149,74 @@ class TestEntrypointRegressions(unittest.TestCase):
             self.text,
         )
 
+    def test_ssh_tunnel_env_defaults(self):
+        # Pluggable SSH tunnel (issue #79): env defaults must be set so the gate
+        # and provider switch never run against an unset variable (set -u).
+        for marker in (
+            ': "${SSH_TUNNEL_ENABLED:=false}"',
+            ': "${SSH_TUNNEL_PROVIDER:=cloudflared}"',
+            ': "${CLOUDFLARE_TUNNEL_TOKEN:=}"',
+            ': "${CLOUDFLARE_TUNNEL_HOSTNAME:=}"',
+            ': "${CHISEL_SERVER:=}"',
+            ': "${CHISEL_AUTH:=}"',
+            ': "${CHISEL_REMOTE_PORT:=2222}"',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.text)
+
+    def test_ssh_tunnel_gated_and_independent_of_hapi(self):
+        # The tunnel block must be gated by SSH_TUNNEL_ENABLED and live BEFORE the
+        # `command -v hapi` guard so it starts regardless of hapi (INSTALL_HAPI=false).
+        gate_pos = self.text.find('if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then')
+        hapi_guard_pos = self.text.find(
+            'if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then'
+        )
+        self.assertGreater(gate_pos, -1, "SSH tunnel gate is missing")
+        self.assertGreater(hapi_guard_pos, -1, "hapi guard not found")
+        self.assertLess(gate_pos, hapi_guard_pos,
+                        "tunnel must start independently of hapi (before the hapi guard)")
+        self.assertIn(
+            'echo "SSH tunnel disabled (set SSH_TUNNEL_ENABLED=true', self.text
+        )
+
+    def test_ssh_tunnel_provider_switch_and_commands(self):
+        # Provider switch: cloudflared (default) named-tunnel+token, chisel reverse,
+        # and a visible error on an invalid provider.
+        self.assertIn('case "${SSH_TUNNEL_PROVIDER}" in', self.text)
+        self.assertIn(
+            'cloudflared tunnel --no-autoupdate run --token \\"${CLOUDFLARE_TUNNEL_TOKEN}\\"',
+            self.text,
+        )
+        self.assertIn(
+            'AUTH=\\"${CHISEL_AUTH}\\" stdbuf -oL chisel client --max-retry-count -1 '
+            '\\"${CHISEL_SERVER}\\" R:${CHISEL_REMOTE_PORT}:localhost:22',
+            self.text,
+        )
+        self.assertIn(
+            "SSH_TUNNEL_PROVIDER='${SSH_TUNNEL_PROVIDER}' is invalid", self.text
+        )
+
+    def test_ssh_tunnel_missing_required_env_warns_not_fatal(self):
+        # An enabled tunnel with a missing required var must warn + skip, not die
+        # silently (cloudflared needs a token; chisel needs a server).
+        self.assertIn(
+            "SSH_TUNNEL_PROVIDER=cloudflared requires CLOUDFLARE_TUNNEL_TOKEN", self.text
+        )
+        self.assertIn(
+            "SSH_TUNNEL_PROVIDER=chisel requires CHISEL_SERVER", self.text
+        )
+        # Missing binary must be fail-visible too.
+        self.assertIn("cloudflared binary not found", self.text)
+        self.assertIn("chisel binary not found", self.text)
+
+    def test_ssh_tunnel_writes_connection_file_for_dashboard(self):
+        # Connection string for the dashboard (#80) is built from env and written
+        # to ssh-url; the stale file is cleared up front (like HAPI_URL_FILE).
+        self.assertIn('SSH_URL_FILE="${HAPI_USER_HOME}/ssh-url"', self.text)
+        self.assertIn('rm -f "${SSH_URL_FILE}"', self.text)
+        self.assertIn('cloudflared access ssh --hostname', self.text)
+        self.assertIn('ssh -p %s %s@%s', self.text)
+
     def test_sandbox_flag_passed_to_proxy(self):
         # tmux-wrapper.sh only sees TTYD_SANDBOX if the entrypoint defaults it
         # and adds it to the proxy's runuser env block (a closed allow-list);
@@ -314,6 +382,32 @@ class TestDockerPackageRegressions(unittest.TestCase):
             dockerfile,
         )
 
+    def test_ssh_tunnel_binaries_installed_multiarch_and_gated(self):
+        # Pluggable SSH tunnel (issue #79): cloudflared + chisel are curl-prebuilt
+        # on both arches (no Go build-stage), each gated by a strict INSTALL_<KEY>
+        # case (fail-closed on invalid values, like Hermes).
+        dockerfile = DOCKERFILE.read_text()
+        for key in ("INSTALL_CLOUDFLARED", "INSTALL_CHISEL"):
+            with self.subTest(arg=key):
+                self.assertIn(f"ARG {key}=true", dockerfile)
+        # Multi-arch via dpkg --print-architecture (amd64/arm64), pinned versions.
+        self.assertIn('TUNNEL_ARCH="$(dpkg --print-architecture)"', dockerfile)
+        self.assertIn('CLOUDFLARED_VERSION="2026.6.1"', dockerfile)
+        self.assertIn(
+            "cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${TUNNEL_ARCH}",
+            dockerfile,
+        )
+        self.assertIn('CHISEL_VERSION="1.11.5"', dockerfile)
+        self.assertIn(
+            "chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${TUNNEL_ARCH}.gz",
+            dockerfile,
+        )
+        # Strict fail-closed gates.
+        self.assertIn(
+            "INSTALL_CLOUDFLARED='${INSTALL_CLOUDFLARED}' is invalid", dockerfile
+        )
+        self.assertIn("INSTALL_CHISEL='${INSTALL_CHISEL}' is invalid", dockerfile)
+
 
 def _parse_cli_packages():
     """Mirror install-cli.sh / build.sh parsing: (KEY, npm-spec) per real line."""
@@ -444,6 +538,13 @@ class TestModularInstallFlags(unittest.TestCase):
         self.assertIn('flag_var="INSTALL_${key}"', text)
         # Disabled tools must drop out of the cache-busting hash.
         self.assertIn('Skipping', text)
+
+    def test_build_sh_forwards_tunnel_flags(self):
+        # cloudflared/chisel are curl-installed (not npm), so build.sh forwards
+        # their INSTALL_* flags like Hermes — only when explicitly set (issue #79).
+        text = BUILD_SH.read_text()
+        self.assertIn("INSTALL_CLOUDFLARED INSTALL_CHISEL", text)
+        self.assertIn('validate_bool "${tunnel_key}" "${!tunnel_key}"', text)
 
 
 class TestInstallCliScript(unittest.TestCase):

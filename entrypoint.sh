@@ -22,6 +22,17 @@ fi
 : "${ROOT_PASSWORD:=}"
 : "${TTYD_SANDBOX:=false}"
 
+# External SSH tunnel (issue #79): pluggable provider exposing sshd (22) where
+# port forwarding is unavailable (Railway/PaaS). Independent of hapi — works with
+# INSTALL_HAPI=false. cloudflared is the default; chisel is the alternative.
+: "${SSH_TUNNEL_ENABLED:=false}"
+: "${SSH_TUNNEL_PROVIDER:=cloudflared}"
+: "${CLOUDFLARE_TUNNEL_TOKEN:=}"
+: "${CLOUDFLARE_TUNNEL_HOSTNAME:=}"
+: "${CHISEL_SERVER:=}"
+: "${CHISEL_AUTH:=}"
+: "${CHISEL_REMOTE_PORT:=2222}"
+
 HAPI_USER="${HAPI_USER:-hapi}"
 HAPI_USER_HOME="/home/${HAPI_USER}"
 : "${CLEANUP_ROOT:=${HAPI_USER_HOME}}"
@@ -178,6 +189,73 @@ if [ "${DROID_DAEMON_ENABLED}" = "true" ]; then
   fi
 else
   echo "Droid daemon disabled (set DROID_DAEMON_ENABLED=true to enable remote access)"
+fi
+
+# Start external SSH tunnel (issue #79). Pluggable provider, gated by
+# SSH_TUNNEL_ENABLED, started here (next to — not inside — the hapi block) so it
+# runs independently of hapi (works with INSTALL_HAPI=false), like the droid
+# daemon. Connection string for the dashboard (#80) is built from env (neither
+# provider prints the public hostname to its log) and written to SSH_URL_FILE.
+SSH_URL_FILE="${HAPI_USER_HOME}/ssh-url"
+# Drop any stale connection string up front (persistent /home volume may carry one
+# from a previous run / provider); recreated below only when a tunnel starts.
+rm -f "${SSH_URL_FILE}" 2>/dev/null || true
+if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
+  SSH_TUNNEL_LOG="${HAPI_HOME}/ssh-tunnel.log"
+  touch "${SSH_TUNNEL_LOG}"
+  chown "${HAPI_USER}:${HAPI_USER}" "${SSH_TUNNEL_LOG}"
+  case "${SSH_TUNNEL_PROVIDER}" in
+    cloudflared)
+      if PATH="${HAPI_RUN_PATH}" command -v cloudflared >/dev/null 2>&1; then
+        if [ -z "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
+          echo "WARNING: SSH_TUNNEL_PROVIDER=cloudflared requires CLOUDFLARE_TUNNEL_TOKEN; skipping tunnel startup" >&2
+        else
+          echo "Starting cloudflared tunnel in background (logs: ${SSH_TUNNEL_LOG})..."
+          run_as_hapi "stdbuf -oL cloudflared tunnel --no-autoupdate run --token \"${CLOUDFLARE_TUNNEL_TOKEN}\" 2>&1 | tee \"${SSH_TUNNEL_LOG}\"" &
+          SSH_TUNNEL_PID=$!
+          echo "cloudflared tunnel started with PID: ${SSH_TUNNEL_PID}"
+          # Public hostname is configured in the Cloudflare dashboard, not logged,
+          # so the dashboard connection string comes from env.
+          if [ -n "${CLOUDFLARE_TUNNEL_HOSTNAME}" ]; then
+            printf 'ssh -o ProxyCommand="cloudflared access ssh --hostname %%h" %s@%s\n' \
+              "${HAPI_USER}" "${CLOUDFLARE_TUNNEL_HOSTNAME}" > "${SSH_URL_FILE}"
+            chown "${HAPI_USER}:${HAPI_USER}" "${SSH_URL_FILE}"
+            echo "SSH connection: $(cat "${SSH_URL_FILE}")"
+          else
+            echo "WARNING: CLOUDFLARE_TUNNEL_HOSTNAME not set; dashboard SSH connection string unavailable" >&2
+          fi
+        fi
+      else
+        echo "WARNING: cloudflared binary not found; skipping SSH tunnel startup" >&2
+      fi
+      ;;
+    chisel)
+      if PATH="${HAPI_RUN_PATH}" command -v chisel >/dev/null 2>&1; then
+        if [ -z "${CHISEL_SERVER}" ]; then
+          echo "WARNING: SSH_TUNNEL_PROVIDER=chisel requires CHISEL_SERVER; skipping tunnel startup" >&2
+        else
+          echo "Starting chisel client in background (logs: ${SSH_TUNNEL_LOG})..."
+          run_as_hapi "AUTH=\"${CHISEL_AUTH}\" stdbuf -oL chisel client --max-retry-count -1 \"${CHISEL_SERVER}\" R:${CHISEL_REMOTE_PORT}:localhost:22 2>&1 | tee \"${SSH_TUNNEL_LOG}\"" &
+          SSH_TUNNEL_PID=$!
+          echo "chisel client started with PID: ${SSH_TUNNEL_PID}"
+          # Public endpoint is deterministic: the chisel server's host + the
+          # reverse-forwarded port (CHISEL_REMOTE_PORT).
+          CHISEL_HOST="$(printf '%s' "${CHISEL_SERVER}" | sed -E 's#^[a-z]+://##; s#[:/].*$##')"
+          printf 'ssh -p %s %s@%s\n' "${CHISEL_REMOTE_PORT}" "${HAPI_USER}" "${CHISEL_HOST}" > "${SSH_URL_FILE}"
+          chown "${HAPI_USER}:${HAPI_USER}" "${SSH_URL_FILE}"
+          echo "SSH connection: $(cat "${SSH_URL_FILE}")"
+        fi
+      else
+        echo "WARNING: chisel binary not found; skipping SSH tunnel startup" >&2
+      fi
+      ;;
+    *)
+      echo "ERROR: SSH_TUNNEL_PROVIDER='${SSH_TUNNEL_PROVIDER}' is invalid; must be 'cloudflared' or 'chisel'" >&2
+      exit 1
+      ;;
+  esac
+else
+  echo "SSH tunnel disabled (set SSH_TUNNEL_ENABLED=true to expose sshd externally)"
 fi
 
 # Start TTYD HTTP proxy (manages TTYD processes dynamically; drops root and
