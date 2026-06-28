@@ -227,6 +227,14 @@ fi
 # 127.0.0.1:${AO_PORT} by design (no AO_HOST / auth / TLS) — external access is via
 # the existing SSH tunnel (#79) + `ssh -L 127.0.0.1:3001:127.0.0.1:3001`.
 # Independent of hapi (binary built into the image in #83), like the droid daemon.
+#
+# The loopback bind is enforced by the `ao` binary itself, NOT by this script:
+# verified against the binary, the listen address is hardcoded to 127.0.0.1
+# (`ao daemon` exposes no --host/--listen flag and honors no AO_HOST env), and it
+# range-validates AO_PORT on its own. So there is nothing here to pass to keep it
+# on loopback. If a future `ao` upgrade ever adds a bind-host knob or changes the
+# default, this no-auth/no-TLS daemon could be exposed on a published port — re-check
+# that the hardcoded-loopback invariant still holds before bumping the pinned ao ref.
 if [ "${AO_DAEMON_ENABLED}" = "true" ]; then
   # Validate AO_PORT numeric: it is interpolated into the `ao daemon` launch
   # string, so a non-numeric value must fail loudly (mirrors PORT / CHISEL_REMOTE_PORT).
