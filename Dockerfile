@@ -152,10 +152,14 @@ FROM npm-manifest-hapi-${INSTALL_HAPI} AS npm-manifest-hapi
 # ao (agent-orchestrator) — Go binary built from source (issue #76/#77).
 # Not a prebuilt download and not an npm package: ao is a Go program whose only
 # native dep is the pure-Go modernc.org/sqlite driver, so CGO_ENABLED=0 yields one
-# static build path for every architecture (GOARCH from buildx's TARGETARCH) — no
-# arch branches, no gcc/musl. INSTALL_AO selects the real build stage or an empty
-# placeholder via a FROM alias, mirroring the npm-manifest-* gating above; when
-# disabled, BuildKit never schedules the golang stage at all (no toolchain pulled).
+# static build path for every architecture — no arch branches, no gcc/musl. GOARCH
+# is resolved from buildx's TARGETARCH when set, else from the host's
+# `dpkg --print-architecture` (matching the ttyd/tunnel steps above): TARGETARCH is
+# a BuildKit-only automatic arg, so a non-BuildKit native build leaves it empty —
+# defaulting to amd64 there would silently produce an amd64 binary inside an arm64
+# image (green build, runtime failure). INSTALL_AO selects the real build stage or
+# an empty placeholder via a FROM alias, mirroring the npm-manifest-* gating above;
+# when disabled, BuildKit never schedules the golang stage at all (no toolchain).
 #
 # Source pinning: the Go `backend/` rewrite is NOT yet in any upstream release tag
 # (those tags are still the old TypeScript monorepo, no backend/). The Go tree only
@@ -176,7 +180,9 @@ RUN git init -q /src && \
     git fetch --depth 1 origin "${AO_REF}" && \
     git checkout -q FETCH_HEAD && \
     cd /src/backend && \
-    CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH:-amd64}" \
+    GOARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
+    echo "Building ao for GOARCH=${GOARCH}" && \
+    CGO_ENABLED=0 GOOS=linux GOARCH="${GOARCH}" \
       go build -trimpath -ldflags='-s -w' -o /out/ao ./cmd/ao
 
 # Disabled placeholder: produce an empty /out/ao so the final COPY has a source,

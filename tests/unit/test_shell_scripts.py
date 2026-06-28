@@ -617,9 +617,8 @@ class TestAoGoBuildStage(unittest.TestCase):
         self.assertIn("axisrow/agent-orchestrator.git", self.dockerfile)
 
     def test_ao_build_is_cgo_free_and_arch_agnostic(self):
-        # CGO_ENABLED=0 + GOARCH from buildx TARGETARCH = one path for all arches.
+        # CGO_ENABLED=0 + a single GOARCH = one build path for all arches.
         self.assertIn("CGO_ENABLED=0", self.dockerfile)
-        self.assertIn('GOARCH="${TARGETARCH:-amd64}"', self.dockerfile)
         self.assertIn("ARG TARGETARCH", self.dockerfile)
         self.assertIn(
             "go build -trimpath -ldflags='-s -w' -o /out/ao ./cmd/ao",
@@ -627,6 +626,16 @@ class TestAoGoBuildStage(unittest.TestCase):
         )
         # The build runs inside the upstream backend/ module.
         self.assertIn("cd /src/backend", self.dockerfile)
+
+    def test_ao_goarch_falls_back_to_host_not_silent_amd64(self):
+        # TARGETARCH is a BuildKit-only automatic arg; a non-BuildKit native build
+        # leaves it empty. Defaulting to amd64 there would ship an amd64 binary in
+        # an arm64 image (green build, runtime failure — undercuts #77). GOARCH must
+        # fall back to the host's dpkg arch, matching the ttyd/tunnel steps.
+        self.assertIn(
+            'GOARCH="${TARGETARCH:-$(dpkg --print-architecture)}"', self.dockerfile
+        )
+        self.assertNotIn('GOARCH="${TARGETARCH:-amd64}"', self.dockerfile)
 
     def test_ao_gated_by_install_arg_via_from_alias(self):
         # Mirrors npm-manifest-* gating: a FROM alias selects the real build
