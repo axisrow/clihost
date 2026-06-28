@@ -1,5 +1,6 @@
 """HTML rendering and template helpers for ttyd proxy pages."""
 import html as html_module
+import re
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -23,6 +24,22 @@ DEFAULT_TITLE = "clihost"
 # Placeholders substituted into every rendered page. {{TITLE}} defaults to the
 # neutral title here; pages that need a dynamic title (e.g. terminals) override it.
 BASE_REPLACEMENTS = {"{{FAVICON}}": FAVICON_LINKS, "{{TITLE}}": DEFAULT_TITLE}
+
+# Allowlist for the SSH connection string shown on the dashboard (issue #80).
+# The string is pasted into a shell by the user, so we accept ONLY two exact
+# grammars the tunnel writes (chisel / cloudflared). Anything else - arbitrary
+# ProxyCommand, -F, LocalCommand, extra options, non-numeric port, host with / or
+# :, shell metacharacters - fails to match and is rejected. re.fullmatch anchors
+# both ends, so no trailing/leading payload survives.
+_SSH_USER = r"[A-Za-z0-9._-]+"
+_SSH_HOST = r"[A-Za-z0-9.-]+"
+# 1. chisel: ssh -p <PORT> <USER>@<HOST>
+_SSH_CHISEL_RE = re.compile(rf"ssh -p [0-9]{{1,5}} {_SSH_USER}@{_SSH_HOST}")
+# 2. cloudflared: the ProxyCommand value is pinned to exactly this string, so a
+#    hostile ProxyCommand (executed locally by ssh before connecting) cannot ride it.
+_SSH_CLOUDFLARED_RE = re.compile(
+    rf'ssh -o ProxyCommand="cloudflared access ssh --hostname %h" {_SSH_USER}@{_SSH_HOST}'
+)
 
 
 @lru_cache(maxsize=None)
@@ -110,22 +127,18 @@ def load_hapi_url(url_file):
 def load_ssh_url(url_file):
     """Read and validate the SSH connection-string file written by the tunnel.
 
-    Unlike load_hapi_url the content is not an HTTP URL but a single shell
-    command (e.g. 'ssh -p 2222 hapi@host' or 'ssh -o ProxyCommand=... ...').
-    We never interpret it - only surface it for display. Reject anything that is
-    not a single non-empty line starting with 'ssh ' and free of shell
-    metacharacters and control characters. The string is never interpreted by
-    us, but the user pastes it into a shell, so a second command must not be
-    able to ride the copy-paste path: reject ';', '|', '&', '$', backtick,
-    backslash, '<', '>', '(', ')', '{', '}' and any control char (ord < 0x20,
-    covering newline/CR/NUL). Double quotes, spaces, '%', '@', '.', '-', ':'
-    stay allowed so the legitimate cloudflared form
-    (ssh -o ProxyCommand="cloudflared access ssh --hostname %h" hapi@host) passes.
+    The user copies this string into a shell, so it is accepted ONLY when it
+    matches one of two exact grammars (re.fullmatch, both ends anchored):
+      1. chisel:     ssh -p <PORT> <USER>@<HOST>
+      2. cloudflared: ssh -o ProxyCommand="cloudflared access ssh --hostname %h"
+                        <USER>@<HOST>
+    The cloudflared ProxyCommand value is pinned verbatim, so an arbitrary
+    ProxyCommand - which ssh executes locally before connecting (RCE) - cannot
+    pass. Any other option (-F, LocalCommand, extra flags), non-numeric port,
+    host containing / or :, and any shell metacharacter simply fail to match and
+    are rejected. Newlines/CR/NUL/control chars are rejected too (none are in the
+    allowed character classes). We never interpret the string, only display it.
     """
-    # Forbidden beyond the 'ssh ' prefix: shell metacharacters that could chain a
-    # second command, plus any control character (newline/CR/NUL/tab/etc.).
-    # Quotes, spaces and % are intentionally NOT here (legitimate cloudflared form).
-    forbidden = set(";|&$`\\<>(){}")
     try:
         raw = Path(url_file).read_text(encoding="utf-8")
     except OSError:
@@ -133,8 +146,6 @@ def load_ssh_url(url_file):
     candidate = raw.strip()
     if not candidate:
         return None
-    if not candidate.startswith("ssh "):
-        return None
-    if any(ch in forbidden or ord(ch) < 0x20 for ch in candidate):
-        return None
-    return candidate
+    if _SSH_CHISEL_RE.fullmatch(candidate) or _SSH_CLOUDFLARED_RE.fullmatch(candidate):
+        return candidate
+    return None
