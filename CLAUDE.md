@@ -37,6 +37,10 @@ Each bundled CLI tool can be dropped from the image to build a lighter, deploy-s
 - `bin/install-cli.sh` reads `cli-packages.txt` and installs only the npm tools whose `INSTALL_<KEY>` env var is not `false`. The `Dockerfile` declares one `ARG INSTALL_<KEY>=true` per component and promotes them into the env for that `RUN`. Hermes has its own `INSTALL_HERMES`-gated `RUN`.
 - `build.sh` forwards every `INSTALL_<KEY>` (read from the shell environment, default `true`) to `docker build` as `--build-arg`, and excludes disabled tools from the cache-busting hash (so bumping a disabled tool's version no longer invalidates the cache).
 - Keys: `INSTALL_CLAUDE_CODE`, `INSTALL_CODEX`, `INSTALL_GEMINI`, `INSTALL_COPILOT`, `INSTALL_OPENCODE`, `INSTALL_DROID`, `INSTALL_HAPI`, `INSTALL_HERMES`. Disabling `INSTALL_HAPI` removes the runtime core (tunnel/runner/dashboard URL); the entrypoint skips hapi startup when the binary is absent and warns if `HAPI_RUNNER_ENABLED=true`.
+
+#### Headless mode — running without hapi (issue #63)
+
+Building with `INSTALL_HAPI=false` yields a "terminal-only" image: the relay tunnel, hapi runner, and the dashboard relay-URL are all gone, but the **ttyd web terminal + SSH** keep working as the container's reason to exist. With no relay URL, `render_menu_page` (`views.py`) drops the **"HAPI Server" menu item entirely** (no disabled "(not available)" stub), and the dashboard renders the neutral title `clihost` (via the `{{TITLE}}` placeholder) instead of "HAPI Dashboard". This is purely build-time — there is no `HAPI_ENABLED` runtime flag and `entrypoint.sh` is unchanged; the same neutral-title path also runs whenever hapi is installed but no relay URL was extracted.
 - Every `INSTALL_<KEY>` must be exactly `true` or `false` — `install-cli.sh`, `build.sh`, and the Hermes `RUN` all fail closed on anything else (`False`, `0`, typos) so a misconfigured build never silently ships a tool. Caveat: an invalid value passed straight to `docker build` (bypassing `build.sh`) still fails the build, but for an npm tool the manifest stage `FROM npm-manifest-<tool>-${INSTALL_<KEY>}` errors first with an opaque "base name not found" instead of the friendly message — the strict check in `install-cli.sh` is the readable one.
 
 Examples — drop Codex and Gemini:
@@ -125,7 +129,7 @@ hapi Client → HTTP API (HAPI_PORT) → hapi runner
 
 `app/server.py` — shared `BaseHTTPHandler` (JSON/HTML/binary responses, silent logging, security headers). Server is `ThreadingHTTPServer` (one thread per request) — never switch to plain `HTTPServer`, slow WebSocket connections would block everything.
 
-**Templates & assets:** `app/index.html` (dashboard), `app/login.html`, `app/terminal.html` — variable substitution like `{{USERNAME}}`, `{{CSRF_TOKEN}}`, values escaped via `html.escape()`. Front-end JS/CSS injected into pages lives in `app/assets/` (tab_fix_script.html, virtual_keyboard.html/.css, terminal_parent_tab_handler.html, favicons).
+**Templates & assets:** `app/index.html` (dashboard), `app/login.html`, `app/terminal.html` — variable substitution like `{{TITLE}}`, `{{USERNAME}}`, `{{CSRF_TOKEN}}`, values escaped via `html.escape()`. `{{TITLE}}` defaults to the neutral `DEFAULT_TITLE` (`clihost`) via `BASE_REPLACEMENTS` (applied to every page); `render_terminal_page` overrides it per terminal. On the dashboard, `{{HAPI_LINK}}` is the "HAPI Server" link only when a relay URL is present, otherwise an empty string (no menu item at all). Front-end JS/CSS injected into pages lives in `app/assets/` (tab_fix_script.html, virtual_keyboard.html/.css, terminal_parent_tab_handler.html, favicons).
 
 ### HTTP routes
 
@@ -146,6 +150,8 @@ hapi Client → HTTP API (HAPI_PORT) → hapi runner
 State-changing requests use a CSRF double-submit token (`X-CSRF-Token` header must match the `csrf_token` cookie and verify against PASSWORD_SECRET). Login is rate-limited: 5 attempts per 60s per IP and 5 per 300s per IP+account.
 
 ### Dashboard UI (app/index.html)
+
+The page title/heading is the templated `{{TITLE}}` (rendered as `clihost`), and the "HAPI Server" link (`{{HAPI_LINK}}`) only appears when a relay URL is available — without hapi the menu shows just the terminal list and "+ New terminal".
 
 Terminal list and controls are built **dynamically in JavaScript**, not static HTML — searching for button text in the HTML will not find them:
 - **Close terminal button** (`delete-btn` class, red ×): calls `deleteTerminal(id)` → `DELETE /terminals/{id}`. This is what users mean by "кнопка закрытия сессии". It is **not** a logout button.

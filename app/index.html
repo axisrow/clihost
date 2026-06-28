@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   {{FAVICON}}
-  <title>HAPI Dashboard</title>
+  <title>{{TITLE}}</title>
   <style>
     * { box-sizing: border-box; }
     body {
@@ -56,12 +56,6 @@
     }
     .menu-link.secondary:hover {
       background: #4d5460;
-    }
-    .menu-link.disabled {
-      background: #2d3240;
-      color: #6b7280;
-      cursor: not-allowed;
-      pointer-events: none;
     }
     .menu-link.new-terminal {
       background: #2d6a4f;
@@ -262,7 +256,7 @@
 </head>
 <body>
   <div class="menu-container">
-    <h1>HAPI Dashboard</h1>
+    <h1>{{TITLE}}</h1>
     <div class="username">{{USERNAME}}</div>
     <div class="menu-links" id="menu-links">
       {{HAPI_LINK}}
