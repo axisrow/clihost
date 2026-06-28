@@ -92,6 +92,27 @@ run_as_hapi() {
   runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"${HAPI_RUN_PATH}\" HAPI_HOME=\"${HAPI_HOME}\" ${command}"
 }
 
+# argv-based variant of run_as_hapi: the program and its arguments are passed as
+# separate argv elements (NOT interpolated into an `sh -c` string), so values
+# containing shell metacharacters (quotes, $(), backticks, ;) can never be
+# executed as code. Extra environment variables — used to hand secrets to the
+# child WITHOUT putting them on the command line (argv is world-readable via
+# `ps`/`/proc/<pid>/cmdline`) — are passed before a literal `--` separator as
+# NAME=VALUE pairs; everything after `--` is the argv to exec. This keeps the
+# tunnel token/auth out of the process table, matching the repo's no-secrets-in-
+# argv invariant (cf. ROOT_PASSWORD heredoc, PASSWORD_SECRET file).
+run_as_hapi_argv() {
+  local -a extra_env=()
+  while [ "$1" != "--" ]; do
+    extra_env+=("$1")
+    shift
+  done
+  shift  # drop the "--" separator
+  runuser -u "${HAPI_USER}" -- env \
+    HOME="${HAPI_USER_HOME}" PATH="${HAPI_RUN_PATH}" HAPI_HOME="${HAPI_HOME}" \
+    "${extra_env[@]}" "$@"
+}
+
 cleanup_runner_state() {
   local paths=(
     "${HAPI_USER_HOME}/.hapi/runner.state.json"
@@ -201,6 +222,15 @@ SSH_URL_FILE="${HAPI_USER_HOME}/ssh-url"
 # from a previous run / provider); recreated below only when a tunnel starts.
 rm -f "${SSH_URL_FILE}" 2>/dev/null || true
 if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
+  # Validate CHISEL_REMOTE_PORT is numeric up front: it is interpolated into the
+  # chisel R:<port>:localhost:22 spec, so a non-numeric value must fail loudly
+  # rather than silently produce a broken forward (mirrors the PORT check below).
+  case "${CHISEL_REMOTE_PORT}" in
+    ''|*[!0-9]*)
+      echo "ERROR: CHISEL_REMOTE_PORT='${CHISEL_REMOTE_PORT}' must be a positive integer" >&2
+      exit 1
+      ;;
+  esac
   SSH_TUNNEL_LOG="${HAPI_HOME}/ssh-tunnel.log"
   touch "${SSH_TUNNEL_LOG}"
   chown "${HAPI_USER}:${HAPI_USER}" "${SSH_TUNNEL_LOG}"
@@ -211,7 +241,15 @@ if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
           echo "WARNING: SSH_TUNNEL_PROVIDER=cloudflared requires CLOUDFLARE_TUNNEL_TOKEN; skipping tunnel startup" >&2
         else
           echo "Starting cloudflared tunnel in background (logs: ${SSH_TUNNEL_LOG})..."
-          run_as_hapi "stdbuf -oL cloudflared tunnel --no-autoupdate run --token \"${CLOUDFLARE_TUNNEL_TOKEN}\" 2>&1 | tee \"${SSH_TUNNEL_LOG}\"" &
+          # Secret hygiene: the token is handed to cloudflared via the TUNNEL_TOKEN
+          # env var (which it reads natively), NOT as a --token argv element, so it
+          # never appears in `ps`/`/proc/<pid>/cmdline`. argv-based launch (no
+          # `sh -c` string) means no env value can be interpreted as shell code.
+          # Logging via a plain redirect (not `| tee`) keeps $! pointing at the
+          # tunnel process itself, so an immediate exit isn't masked by a live tee.
+          run_as_hapi_argv "TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}" -- \
+            stdbuf -oL cloudflared tunnel --no-autoupdate run \
+            >>"${SSH_TUNNEL_LOG}" 2>&1 &
           SSH_TUNNEL_PID=$!
           echo "cloudflared tunnel started with PID: ${SSH_TUNNEL_PID}"
           # Public hostname is configured in the Cloudflare dashboard, not logged,
@@ -235,12 +273,20 @@ if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
           echo "WARNING: SSH_TUNNEL_PROVIDER=chisel requires CHISEL_SERVER; skipping tunnel startup" >&2
         else
           echo "Starting chisel client in background (logs: ${SSH_TUNNEL_LOG})..."
-          run_as_hapi "AUTH=\"${CHISEL_AUTH}\" stdbuf -oL chisel client --max-retry-count -1 \"${CHISEL_SERVER}\" R:${CHISEL_REMOTE_PORT}:localhost:22 2>&1 | tee \"${SSH_TUNNEL_LOG}\"" &
+          # AUTH (user:pass) is handed to chisel via the env (which it reads
+          # natively), not argv; argv-based launch prevents shell interpretation
+          # of CHISEL_SERVER/CHISEL_REMOTE_PORT. Logging via redirect (not tee)
+          # keeps $! on the chisel process. CHISEL_REMOTE_PORT is validated numeric
+          # below so the R:<port>:... spec can't be corrupted.
+          run_as_hapi_argv "AUTH=${CHISEL_AUTH}" -- \
+            stdbuf -oL chisel client --max-retry-count -1 \
+            "${CHISEL_SERVER}" "R:${CHISEL_REMOTE_PORT}:localhost:22" \
+            >>"${SSH_TUNNEL_LOG}" 2>&1 &
           SSH_TUNNEL_PID=$!
           echo "chisel client started with PID: ${SSH_TUNNEL_PID}"
           # Public endpoint is deterministic: the chisel server's host + the
           # reverse-forwarded port (CHISEL_REMOTE_PORT).
-          CHISEL_HOST="$(printf '%s' "${CHISEL_SERVER}" | sed -E 's#^[a-z]+://##; s#[:/].*$##')"
+          CHISEL_HOST="$(printf '%s' "${CHISEL_SERVER}" | sed -E 's#^[A-Za-z]+://##; s#[:/].*$##')"
           printf 'ssh -p %s %s@%s\n' "${CHISEL_REMOTE_PORT}" "${HAPI_USER}" "${CHISEL_HOST}" > "${SSH_URL_FILE}"
           chown "${HAPI_USER}:${HAPI_USER}" "${SSH_URL_FILE}"
           echo "SSH connection: $(cat "${SSH_URL_FILE}")"
