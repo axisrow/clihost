@@ -5,6 +5,8 @@ ARG INSTALL_COPILOT=true
 ARG INSTALL_OPENCODE=true
 ARG INSTALL_DROID=true
 ARG INSTALL_HAPI=true
+ARG INSTALL_CLOUDFLARED=true
+ARG INSTALL_CHISEL=true
 
 FROM debian:bookworm-slim AS runtime-base
 
@@ -56,6 +58,40 @@ RUN TTYD_VERSION="1.7.7" && \
     curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${TTYD_ARCH}" \
     -o /usr/local/bin/ttyd && \
     chmod +x /usr/local/bin/ttyd
+
+# Install SSH-tunnel providers (issue #79): cloudflared (default) + chisel.
+# Both expose the container's sshd (port 22) externally where port forwarding is
+# unavailable (Railway/PaaS). Both are Go with prebuilt linux amd64+arm64 binaries,
+# so they install via curl on both arches (like ttyd) — NO Go build-stage needed
+# (that is only for `ao`, issue #77). Each is gated by INSTALL_<KEY> (issue #57)
+# with a strict true|false case (fail-closed on anything else, like Hermes).
+# (Re-declared here because ARGs are scoped per build stage; the top-of-file
+# copies do not carry into this runtime-base RUN.)
+ARG INSTALL_CLOUDFLARED=true
+ARG INSTALL_CHISEL=true
+RUN TUNNEL_ARCH="$(dpkg --print-architecture)" && \
+    case "${INSTALL_CLOUDFLARED}" in \
+      false) echo "Skipping cloudflared (INSTALL_CLOUDFLARED=false)" ;; \
+      true) \
+        CLOUDFLARED_VERSION="2026.6.1" && \
+        echo "Installing cloudflared ${CLOUDFLARED_VERSION} for ${TUNNEL_ARCH}" && \
+        curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${TUNNEL_ARCH}" \
+          -o /usr/local/bin/cloudflared && \
+        chmod +x /usr/local/bin/cloudflared ;; \
+      *) echo "ERROR: INSTALL_CLOUDFLARED='${INSTALL_CLOUDFLARED}' is invalid; must be 'true' or 'false'" >&2; exit 1 ;; \
+    esac && \
+    case "${INSTALL_CHISEL}" in \
+      false) echo "Skipping chisel (INSTALL_CHISEL=false)" ;; \
+      true) \
+        CHISEL_VERSION="1.11.5" && \
+        echo "Installing chisel ${CHISEL_VERSION} for ${TUNNEL_ARCH}" && \
+        curl -fsSL "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${TUNNEL_ARCH}.gz" \
+          -o /tmp/chisel.gz && \
+        gunzip -c /tmp/chisel.gz > /usr/local/bin/chisel && \
+        rm -f /tmp/chisel.gz && \
+        chmod +x /usr/local/bin/chisel ;; \
+      *) echo "ERROR: INSTALL_CHISEL='${INSTALL_CHISEL}' is invalid; must be 'true' or 'false'" >&2; exit 1 ;; \
+    esac
 
 # Invalidate cache when npm package versions change (used by build.sh for local builds)
 ARG NPM_VERSIONS_HASH=default
@@ -126,6 +162,8 @@ ARG INSTALL_OPENCODE=true
 ARG INSTALL_DROID=true
 ARG INSTALL_HAPI=true
 ARG INSTALL_HERMES=true
+ARG INSTALL_CLOUDFLARED=true
+ARG INSTALL_CHISEL=true
 
 COPY --from=npm-manifest-claude-code /manifest.json /tmp/npm-manifests/claude-code.json
 COPY --from=npm-manifest-codex /manifest.json /tmp/npm-manifests/codex.json

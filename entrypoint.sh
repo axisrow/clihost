@@ -22,6 +22,17 @@ fi
 : "${ROOT_PASSWORD:=}"
 : "${TTYD_SANDBOX:=false}"
 
+# External SSH tunnel (issue #79): pluggable provider exposing sshd (22) where
+# port forwarding is unavailable (Railway/PaaS). Independent of hapi — works with
+# INSTALL_HAPI=false. cloudflared is the default; chisel is the alternative.
+: "${SSH_TUNNEL_ENABLED:=false}"
+: "${SSH_TUNNEL_PROVIDER:=cloudflared}"
+: "${CLOUDFLARE_TUNNEL_TOKEN:=}"
+: "${CLOUDFLARE_TUNNEL_HOSTNAME:=}"
+: "${CHISEL_SERVER:=}"
+: "${CHISEL_AUTH:=}"
+: "${CHISEL_REMOTE_PORT:=2222}"
+
 HAPI_USER="${HAPI_USER:-hapi}"
 HAPI_USER_HOME="/home/${HAPI_USER}"
 : "${CLEANUP_ROOT:=${HAPI_USER_HOME}}"
@@ -79,6 +90,36 @@ EOF
 run_as_hapi() {
   local command="$1"
   runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"${HAPI_RUN_PATH}\" HAPI_HOME=\"${HAPI_HOME}\" ${command}"
+}
+
+# argv-based variant of run_as_hapi: the program and its arguments are passed as
+# separate argv elements (NOT interpolated into an `sh -c` string), so values
+# containing shell metacharacters (quotes, $(), backticks, ;) can never be
+# executed as code.
+#
+# Secrets (tunnel token/auth) must NEVER appear in argv — not even briefly as an
+# `env NAME=VALUE` argument — because argv is world-readable via `ps` /
+# `/proc/<pid>/cmdline` for the lifetime of every process in the launch chain.
+# Instead, the caller EXPORTS each secret into this launcher's own environment and
+# passes only its NAME (before the `--` separator) to document the contract. We
+# rely on util-linux runuser's documented default (WITHOUT --login it does NOT
+# clear the environment — it only sets HOME/SHELL), so an exported secret is
+# inherited across the privilege drop with its VALUE never entering any argv. This
+# matches the repo's no-secrets-in-argv invariant (cf. ROOT_PASSWORD heredoc,
+# PASSWORD_SECRET file). (--whitelist-environment is intentionally NOT used: it is
+# a no-op without --login.) Non-secret vars (HOME/PATH/HAPI_HOME) are set via
+# `env` since they are not sensitive; PATH in particular must be forced because
+# runuser would otherwise leave the caller's root PATH in place.
+run_as_hapi_argv() {
+  # Consume (and ignore) the documented secret NAMES up to the `--` separator;
+  # they are inherited from the exported environment, not passed here.
+  while [ "$1" != "--" ]; do
+    shift
+  done
+  shift  # drop the "--" separator
+  runuser -u "${HAPI_USER}" -- env \
+    HOME="${HAPI_USER_HOME}" PATH="${HAPI_RUN_PATH}" HAPI_HOME="${HAPI_HOME}" \
+    "$@"
 }
 
 cleanup_runner_state() {
@@ -178,6 +219,104 @@ if [ "${DROID_DAEMON_ENABLED}" = "true" ]; then
   fi
 else
   echo "Droid daemon disabled (set DROID_DAEMON_ENABLED=true to enable remote access)"
+fi
+
+# Start external SSH tunnel (issue #79). Pluggable provider, gated by
+# SSH_TUNNEL_ENABLED, started here (next to — not inside — the hapi block) so it
+# runs independently of hapi (works with INSTALL_HAPI=false), like the droid
+# daemon. Connection string for the dashboard (#80) is built from env (neither
+# provider prints the public hostname to its log) and written to SSH_URL_FILE.
+SSH_URL_FILE="${HAPI_USER_HOME}/ssh-url"
+# Drop any stale connection string up front (persistent /home volume may carry one
+# from a previous run / provider); recreated below only when a tunnel starts.
+rm -f "${SSH_URL_FILE}" 2>/dev/null || true
+if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
+  # Validate CHISEL_REMOTE_PORT is numeric up front: it is interpolated into the
+  # chisel R:<port>:localhost:22 spec, so a non-numeric value must fail loudly
+  # rather than silently produce a broken forward (mirrors the PORT check below).
+  case "${CHISEL_REMOTE_PORT}" in
+    ''|*[!0-9]*)
+      echo "ERROR: CHISEL_REMOTE_PORT='${CHISEL_REMOTE_PORT}' must be a positive integer" >&2
+      exit 1
+      ;;
+  esac
+  SSH_TUNNEL_LOG="${HAPI_HOME}/ssh-tunnel.log"
+  touch "${SSH_TUNNEL_LOG}"
+  chown "${HAPI_USER}:${HAPI_USER}" "${SSH_TUNNEL_LOG}"
+  case "${SSH_TUNNEL_PROVIDER}" in
+    cloudflared)
+      if PATH="${HAPI_RUN_PATH}" command -v cloudflared >/dev/null 2>&1; then
+        if [ -z "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
+          echo "WARNING: SSH_TUNNEL_PROVIDER=cloudflared requires CLOUDFLARE_TUNNEL_TOKEN; skipping tunnel startup" >&2
+        else
+          echo "Starting cloudflared tunnel in background (logs: ${SSH_TUNNEL_LOG})..."
+          # Secret hygiene: cloudflared reads the token natively from TUNNEL_TOKEN.
+          # We EXPORT it into this launcher's env and pass only its NAME to
+          # run_as_hapi_argv; runuser (no --login) inherits it across the privilege
+          # drop, so the token VALUE never appears in any argv (`ps`/`/proc/<pid>/
+          # cmdline`), not even briefly as an `env NAME=VALUE` arg. argv-based launch
+          # (no `sh -c` string) also means no env value can be interpreted as shell code.
+          # Logging via a plain redirect (not `| tee`) keeps $! pointing at the
+          # tunnel process itself, so an immediate exit isn't masked by a live tee.
+          TUNNEL_TOKEN="${CLOUDFLARE_TUNNEL_TOKEN}" \
+          run_as_hapi_argv TUNNEL_TOKEN -- \
+            stdbuf -oL cloudflared tunnel --no-autoupdate run \
+            >>"${SSH_TUNNEL_LOG}" 2>&1 &
+          SSH_TUNNEL_PID=$!
+          echo "cloudflared tunnel started with PID: ${SSH_TUNNEL_PID}"
+          # Public hostname is configured in the Cloudflare dashboard, not logged,
+          # so the dashboard connection string comes from env.
+          if [ -n "${CLOUDFLARE_TUNNEL_HOSTNAME}" ]; then
+            printf 'ssh -o ProxyCommand="cloudflared access ssh --hostname %%h" %s@%s\n' \
+              "${HAPI_USER}" "${CLOUDFLARE_TUNNEL_HOSTNAME}" > "${SSH_URL_FILE}"
+            chown "${HAPI_USER}:${HAPI_USER}" "${SSH_URL_FILE}"
+            echo "SSH connection: $(cat "${SSH_URL_FILE}")"
+          else
+            echo "WARNING: CLOUDFLARE_TUNNEL_HOSTNAME not set; dashboard SSH connection string unavailable" >&2
+          fi
+        fi
+      else
+        echo "WARNING: cloudflared binary not found; skipping SSH tunnel startup" >&2
+      fi
+      ;;
+    chisel)
+      if PATH="${HAPI_RUN_PATH}" command -v chisel >/dev/null 2>&1; then
+        if [ -z "${CHISEL_SERVER}" ]; then
+          echo "WARNING: SSH_TUNNEL_PROVIDER=chisel requires CHISEL_SERVER; skipping tunnel startup" >&2
+        else
+          echo "Starting chisel client in background (logs: ${SSH_TUNNEL_LOG})..."
+          # AUTH (user:pass) is read natively by chisel from the env. We EXPORT it
+          # and pass only its NAME to run_as_hapi_argv; runuser (no --login)
+          # inherits it, so the value never lands in argv. argv-based launch
+          # prevents shell interpretation of CHISEL_SERVER/CHISEL_REMOTE_PORT.
+          # Logging via redirect (not tee) keeps $! on the chisel process.
+          # CHISEL_REMOTE_PORT is validated numeric above so the R:<port>:... spec
+          # can't be corrupted.
+          AUTH="${CHISEL_AUTH}" \
+          run_as_hapi_argv AUTH -- \
+            stdbuf -oL chisel client --max-retry-count -1 \
+            "${CHISEL_SERVER}" "R:${CHISEL_REMOTE_PORT}:localhost:22" \
+            >>"${SSH_TUNNEL_LOG}" 2>&1 &
+          SSH_TUNNEL_PID=$!
+          echo "chisel client started with PID: ${SSH_TUNNEL_PID}"
+          # Public endpoint is deterministic: the chisel server's host + the
+          # reverse-forwarded port (CHISEL_REMOTE_PORT).
+          CHISEL_HOST="$(printf '%s' "${CHISEL_SERVER}" | sed -E 's#^[A-Za-z]+://##; s#[:/].*$##')"
+          printf 'ssh -p %s %s@%s\n' "${CHISEL_REMOTE_PORT}" "${HAPI_USER}" "${CHISEL_HOST}" > "${SSH_URL_FILE}"
+          chown "${HAPI_USER}:${HAPI_USER}" "${SSH_URL_FILE}"
+          echo "SSH connection: $(cat "${SSH_URL_FILE}")"
+        fi
+      else
+        echo "WARNING: chisel binary not found; skipping SSH tunnel startup" >&2
+      fi
+      ;;
+    *)
+      echo "ERROR: SSH_TUNNEL_PROVIDER='${SSH_TUNNEL_PROVIDER}' is invalid; must be 'cloudflared' or 'chisel'" >&2
+      exit 1
+      ;;
+  esac
+else
+  echo "SSH tunnel disabled (set SSH_TUNNEL_ENABLED=true to expose sshd externally)"
 fi
 
 # Start TTYD HTTP proxy (manages TTYD processes dynamically; drops root and

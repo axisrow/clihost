@@ -58,7 +58,7 @@ Add persistent volume at `/home/hapi` via Railway dashboard → Service → Volu
 
 ### Notes
 
-- SSH (port 22) is not accessible externally on Railway — web terminal only
+- By default SSH (port 22) is not reachable externally on Railway (no arbitrary port forwarding) — web terminal only. To get external SSH, enable the **external SSH tunnel** below (`SSH_TUNNEL_ENABLED=true`).
 - `PORT` is injected automatically by Railway, `ttyd_proxy.py` reads it via `os.environ`
 
 ## Архитектура
@@ -130,6 +130,35 @@ dokku docker-options:add <app> deploy,run "--security-opt seccomp=unconfined"
 ```
 
 The jail keeps network access (AI CLIs need it) and is **fail-closed**: if it can't start, the terminal doesn't open rather than falling back to an unsandboxed shell.
+
+### External SSH tunnel (optional)
+
+Exposes the container's sshd (port 22) externally where arbitrary port forwarding is unavailable (Railway and similar PaaS). Pluggable: both providers ship in the image, selected by `SSH_TUNNEL_PROVIDER`. **Independent of hapi** — works with `INSTALL_HAPI=false`. Off by default.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SSH_TUNNEL_ENABLED` | false | Enable the external SSH tunnel |
+| `SSH_TUNNEL_PROVIDER` | cloudflared | `cloudflared` or `chisel` |
+| `CLOUDFLARE_TUNNEL_TOKEN` | - | Required for `cloudflared`; named-tunnel token (`cloudflared tunnel run --token …`) |
+| `CLOUDFLARE_TUNNEL_HOSTNAME` | - | Public hostname (e.g. `ssh.example.com`) for the dashboard connection string |
+| `CHISEL_SERVER` | - | Required for `chisel`; URL of a self-hosted `chisel server --reverse` |
+| `CHISEL_AUTH` | - | `user:pass` credential (same on server and client) |
+| `CHISEL_REMOTE_PORT` | 2222 | Server port the reverse-forwarded `:22` listens on |
+
+> **cloudflared** uses a *named tunnel + token* (requires a Cloudflare account + domain). Quick tunnels (trycloudflare) are HTTP-only and cannot carry SSH. **chisel** requires you to run your own public `chisel server --reverse`.
+
+Connecting from the client:
+
+```bash
+# cloudflared (needs cloudflared installed locally):
+ssh -o ProxyCommand="cloudflared access ssh --hostname %h" hapi@$CLOUDFLARE_TUNNEL_HOSTNAME
+
+# chisel (plain ssh):
+ssh -p $CHISEL_REMOTE_PORT hapi@<host of CHISEL_SERVER>
+
+# to reach `ao daemon` (loopback-only) through the tunnel, add:
+#   -L 127.0.0.1:3001:127.0.0.1:3001
+```
 
 ### Hapi Runner (Optional)
 
