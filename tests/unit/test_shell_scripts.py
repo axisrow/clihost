@@ -132,11 +132,17 @@ class TestClaudeConfigPersistence(unittest.TestCase):
         self.assertIn('ensure_dir_owned "${HAPI_USER_HOME}/.claude"', self.text)
 
     def test_entrypoint_never_removes_claude_config(self):
-        # No rm/rm -rf may target ~/.claude (directly or via HAPI_USER_HOME).
+        # No destructive op may target ~/.claude (directly or via HAPI_USER_HOME).
+        # Covers rm AND the non-rm deletion/truncation mechanisms a future edit
+        # could reach for — find -delete, rmdir, and `:`/`>` truncation — so the
+        # contract is pinned against more than a literal `rm`.
         for pattern in (
             r'rm\s+[^\n]*\.claude\b',
             r'rm\s+[^\n]*\$\{HAPI_USER_HOME\}/\.claude',
             r'rm\s+[^\n]*HOME[^\n]*/\.claude',
+            r'find\s+[^\n]*\.claude[^\n]*-delete',
+            r'rmdir\s+[^\n]*\.claude\b',
+            r'(?:^|[;&|]|\btrue\b)\s*>\s*[^\n]*\.claude',
         ):
             with self.subTest(pattern=pattern):
                 self.assertNotRegex(self.text, re.compile(pattern))
