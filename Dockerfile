@@ -65,6 +65,8 @@ RUN TTYD_VERSION="1.7.7" && \
 # so they install via curl on both arches (like ttyd) — NO Go build-stage needed
 # (that is only for `ao`, issue #77). Each is gated by INSTALL_<KEY> (issue #57)
 # with a strict true|false case (fail-closed on anything else, like Hermes).
+# (Re-declared here because ARGs are scoped per build stage; the top-of-file
+# copies do not carry into this runtime-base RUN.)
 ARG INSTALL_CLOUDFLARED=true
 ARG INSTALL_CHISEL=true
 RUN TUNNEL_ARCH="$(dpkg --print-architecture)" && \

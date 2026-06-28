@@ -201,7 +201,8 @@ class TestEntrypointRegressions(unittest.TestCase):
         # Regression for the review findings (cycle 1 C1/C2 + cycle 2): the secret
         # VALUE must never appear in any argv (not even briefly as `env NAME=VALUE`).
         # The caller EXPORTS the secret into the launcher env and passes only its
-        # NAME; run_as_hapi_argv forwards it via `runuser --whitelist-environment`.
+        # NAME; runuser (no --login) inherits it from the environment across the
+        # privilege drop, so the value never enters argv.
         # This is the no-secrets-in-argv invariant (cf. ROOT_PASSWORD / PASSWORD_SECRET).
         self.assertIn("run_as_hapi_argv", self.text)
         # cloudflared: export TUNNEL_TOKEN, pass only the NAME.
@@ -303,8 +304,8 @@ class TestRunAsHapiArgvSecretHygiene(unittest.TestCase):
     secret handed to run_as_hapi_argv must reach the child via the ENVIRONMENT and
     its VALUE must NEVER appear in any argv — not even briefly as `env NAME=VALUE`
     (argv is world-readable via ps / /proc/<pid>/cmdline for every process in the
-    launch chain). The secret is exported into the launcher env and forwarded by
-    name via `runuser --whitelist-environment`.
+    launch chain). The secret is exported into the launcher env and inherited by
+    runuser (which, without --login, does not clear the environment).
 
     Sources the real run_as_hapi_argv from entrypoint.sh and runs it with a fake
     `runuser` that records its full argv AND whether the secret was present in its
@@ -328,8 +329,8 @@ class TestRunAsHapiArgvSecretHygiene(unittest.TestCase):
             env_log = tmp_path / "env.log"
             # Fake runuser: log every argv element one per line, and separately log
             # whether TUNNEL_TOKEN was inherited via the ENVIRONMENT (the real
-            # runuser would honor --whitelist-environment to preserve it). This lets
-            # the test assert "value in env, never in argv".
+            # runuser without --login does not clear the env, so it is preserved).
+            # This lets the test assert "value in env, never in argv".
             fake_runuser = tmp_path / "runuser"
             fake_runuser.write_text(
                 "#!/bin/bash\n"
