@@ -17,8 +17,12 @@ FAVICON_LINKS = "\n  ".join(
     icon.link for icon in assets.FAVICONS if icon.body is not None
 )
 
-# Placeholders substituted into every rendered page.
-BASE_REPLACEMENTS = {"{{FAVICON}}": FAVICON_LINKS}
+# Neutral dashboard title (issue #63) — shown whether or not hapi is present.
+DEFAULT_TITLE = "clihost"
+
+# Placeholders substituted into every rendered page. {{TITLE}} defaults to the
+# neutral title here; pages that need a dynamic title (e.g. terminals) override it.
+BASE_REPLACEMENTS = {"{{FAVICON}}": FAVICON_LINKS, "{{TITLE}}": DEFAULT_TITLE}
 
 
 @lru_cache(maxsize=None)
@@ -63,7 +67,7 @@ def render_menu_page(username, hapi_url):
         escaped_url = html_module.escape(hapi_url, quote=True)
         hapi_link = f'<a href="{escaped_url}" target="_blank" class="menu-link">HAPI Server</a>'
     else:
-        hapi_link = '<span class="menu-link disabled">HAPI Server (not available)</span>'
+        hapi_link = ""  # without hapi the menu item disappears entirely (issue #63)
     return render_template(
         "index.html",
         {
