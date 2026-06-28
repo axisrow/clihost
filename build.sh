@@ -79,12 +79,14 @@ if [ -n "${INSTALL_HERMES:-}" ]; then
   BUILD_ARGS+=(--build-arg "INSTALL_HERMES=${INSTALL_HERMES}")
 fi
 
-# SSH-tunnel провайдеры ставятся не из npm (curl-пребилты в Dockerfile, issue #79),
-# но тоже управляются INSTALL_*-флагом — пробрасываем, если заданы.
-for tunnel_key in INSTALL_CLOUDFLARED INSTALL_CHISEL; do
-  if [ -n "${!tunnel_key:-}" ]; then
-    validate_bool "${tunnel_key}" "${!tunnel_key}"
-    BUILD_ARGS+=(--build-arg "${tunnel_key}=${!tunnel_key}")
+# Прочие non-npm компоненты тоже управляются INSTALL_*-флагом, но не входят в
+# cli-packages.txt и cache-busting хеш: SSH-tunnel провайдеры (curl-пребилты,
+# issue #79) и ao (собирается из исходников в Go build-stage по AO_REF, #76/#77).
+# Пробрасываем каждый флаг в сборку, если задан.
+for nonnpm_key in INSTALL_CLOUDFLARED INSTALL_CHISEL INSTALL_AO; do
+  if [ -n "${!nonnpm_key:-}" ]; then
+    validate_bool "${nonnpm_key}" "${!nonnpm_key}"
+    BUILD_ARGS+=(--build-arg "${nonnpm_key}=${!nonnpm_key}")
   fi
 done
 

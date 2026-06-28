@@ -7,6 +7,7 @@ ARG INSTALL_DROID=true
 ARG INSTALL_HAPI=true
 ARG INSTALL_CLOUDFLARED=true
 ARG INSTALL_CHISEL=true
+ARG INSTALL_AO=true
 
 FROM debian:bookworm-slim AS runtime-base
 
@@ -148,6 +149,49 @@ ADD https://registry.npmjs.org/@twsxtd/hapi/latest /manifest.json
 FROM npm-manifest-disabled AS npm-manifest-hapi-false
 FROM npm-manifest-hapi-${INSTALL_HAPI} AS npm-manifest-hapi
 
+# ao (agent-orchestrator) — Go binary built from source (issue #76/#77).
+# Not a prebuilt download and not an npm package: ao is a Go program whose only
+# native dep is the pure-Go modernc.org/sqlite driver, so CGO_ENABLED=0 yields one
+# static build path for every architecture — no arch branches, no gcc/musl. GOARCH
+# is resolved from buildx's TARGETARCH when set, else from the host's
+# `dpkg --print-architecture` (matching the ttyd/tunnel steps above): TARGETARCH is
+# a BuildKit-only automatic arg, so a non-BuildKit native build leaves it empty —
+# defaulting to amd64 there would silently produce an amd64 binary inside an arm64
+# image (green build, runtime failure). INSTALL_AO selects the real build stage or
+# an empty placeholder via a FROM alias, mirroring the npm-manifest-* gating above;
+# when disabled, BuildKit never schedules the golang stage at all (no toolchain).
+#
+# Source pinning: the Go `backend/` rewrite is NOT yet in any upstream release tag
+# (those tags are still the old TypeScript monorepo, no backend/). The Go tree only
+# exists on the moving upstream main and on the fork branch, so we pin AO_REF to a
+# specific fork commit for a reproducible build. AO_REPO/AO_REF are overridable via
+# --build-arg to retarget upstream once a Go-bearing tag is published.
+# AO_REF lives inside the stage (not as a global pre-FROM ARG): it isn't used in any
+# FROM line, so a global default wouldn't reach this RUN, and a bare in-stage `ARG
+# AO_REF` would reset it to empty. A full commit SHA can't be used with `clone
+# --branch`, so we clone shallow + fetch the exact SHA + checkout.
+FROM golang:1.25-bookworm AS ao-build-true
+ARG AO_REPO=https://github.com/axisrow/agent-orchestrator.git
+ARG AO_REF=405be363fbe414dd93a81b12dfcfea112e277741
+ARG TARGETARCH
+RUN git init -q /src && \
+    cd /src && \
+    git remote add origin "${AO_REPO}" && \
+    git fetch --depth 1 origin "${AO_REF}" && \
+    git checkout -q FETCH_HEAD && \
+    cd /src/backend && \
+    GOARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
+    echo "Building ao for GOARCH=${GOARCH}" && \
+    CGO_ENABLED=0 GOOS=linux GOARCH="${GOARCH}" \
+      go build -trimpath -ldflags='-s -w' -o /out/ao ./cmd/ao
+
+# Disabled placeholder: produce an empty /out/ao so the final COPY has a source,
+# without cloning or compiling anything. The final stage drops it (see below).
+FROM busybox AS ao-build-false
+RUN mkdir -p /out && : > /out/ao
+
+FROM ao-build-${INSTALL_AO} AS ao-build
+
 FROM runtime-base
 
 # Modular install flags (issue #57): set any to "false" at build time to drop
@@ -161,6 +205,7 @@ ARG INSTALL_COPILOT=true
 ARG INSTALL_OPENCODE=true
 ARG INSTALL_DROID=true
 ARG INSTALL_HAPI=true
+ARG INSTALL_AO=true
 ARG INSTALL_HERMES=true
 ARG INSTALL_CLOUDFLARED=true
 ARG INSTALL_CHISEL=true
@@ -209,6 +254,22 @@ RUN case "${INSTALL_HERMES}" in \
         echo "ERROR: INSTALL_HERMES='${INSTALL_HERMES}' is invalid; must be 'true' or 'false'" >&2; \
         exit 1 ;; \
     esac
+
+# Install the ao binary built in the ao-build stage above (issue #76/#77). The
+# disabled stage produced an empty placeholder, so when INSTALL_AO=false we drop
+# it instead of shipping a bogus executable. Strict true|false (fail closed). The
+# binary is not run here — on a cross-built (foreign-arch) image it can't execute.
+COPY --from=ao-build /out/ao /tmp/ao.bin
+RUN case "${INSTALL_AO}" in \
+      true) \
+        install -m 0755 /tmp/ao.bin /usr/local/bin/ao ;; \
+      false) \
+        echo "Skipping ao (INSTALL_AO=false)" ;; \
+      *) \
+        echo "ERROR: INSTALL_AO='${INSTALL_AO}' is invalid; must be 'true' or 'false'" >&2; \
+        exit 1 ;; \
+    esac && \
+    rm -f /tmp/ao.bin
 
 # Create app directory for TTYD proxy
 RUN mkdir -p /app /bin

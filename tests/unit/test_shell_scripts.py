@@ -573,6 +573,115 @@ class TestDockerPackageRegressions(unittest.TestCase):
         self.assertIn("INSTALL_CHISEL='${INSTALL_CHISEL}' is invalid", dockerfile)
 
 
+class TestAoGoBuildStage(unittest.TestCase):
+    """issue #76 + #77: ao is built from upstream Go source in a dedicated
+    build-stage (NOT npm, NOT a prebuilt curl), gated by INSTALL_AO via a
+    FROM alias. CGO_ENABLED=0 + modernc.org/sqlite ⟶ one arch-agnostic build
+    path (no arch branches), closing both the x86_64 and arm64 issues at once.
+    """
+
+    def setUp(self):
+        self.dockerfile = DOCKERFILE.read_text()
+
+    def test_ao_is_not_an_npm_component(self):
+        # ao must NOT leak into the npm install path: no cli-packages.txt row,
+        # no npm-manifest stage. It is a from-source Go binary.
+        self.assertNotIn("AO ", CLI_PACKAGES.read_text())
+        self.assertNotIn("@aoagents/ao", self.dockerfile)
+        self.assertNotIn("npm-manifest-ao", self.dockerfile)
+
+    def test_ao_built_in_pinned_golang_stage(self):
+        self.assertIn("FROM golang:1.25-bookworm AS ao-build-true", self.dockerfile)
+
+    def test_ao_ref_is_pinned_commit_and_overridable(self):
+        # The Go backend/ tree is not in any upstream release tag yet, so AO_REF
+        # is pinned to a specific 40-char commit SHA (reproducible), exposed as an
+        # ARG to bump. AO_REPO is likewise an ARG so the source can be retargeted.
+        self.assertRegex(self.dockerfile, r"ARG AO_REF=[0-9a-f]{40}\b")
+        self.assertIn(
+            "ARG AO_REF=405be363fbe414dd93a81b12dfcfea112e277741",
+            self.dockerfile,
+        )
+        self.assertRegex(self.dockerfile, r"ARG AO_REPO=https://github\.com/")
+
+    def test_ao_pinned_by_sha_via_fetch_not_branch_clone(self):
+        # A full SHA cannot be used with `clone --branch`; the stage must fetch
+        # the exact commit and check out FETCH_HEAD so the pin is honoured.
+        self.assertNotIn('git clone --depth 1 --branch "${AO_REF}"', self.dockerfile)
+        self.assertIn('git fetch --depth 1 origin "${AO_REF}"', self.dockerfile)
+        self.assertIn("git checkout -q FETCH_HEAD", self.dockerfile)
+
+    def test_ao_source_repo_is_configured(self):
+        # Source currently tracks the fork (only place with the Go backend/ tree
+        # at a pinnable commit); retargetable via the AO_REPO build arg.
+        self.assertIn("axisrow/agent-orchestrator.git", self.dockerfile)
+
+    def test_ao_build_is_cgo_free_and_arch_agnostic(self):
+        # CGO_ENABLED=0 + a single GOARCH = one build path for all arches.
+        self.assertIn("CGO_ENABLED=0", self.dockerfile)
+        self.assertIn("ARG TARGETARCH", self.dockerfile)
+        self.assertIn(
+            "go build -trimpath -ldflags='-s -w' -o /out/ao ./cmd/ao",
+            self.dockerfile,
+        )
+        # The build runs inside the upstream backend/ module.
+        self.assertIn("cd /src/backend", self.dockerfile)
+
+    def test_ao_goarch_falls_back_to_host_not_silent_amd64(self):
+        # TARGETARCH is a BuildKit-only automatic arg; a non-BuildKit native build
+        # leaves it empty. Defaulting to amd64 there would ship an amd64 binary in
+        # an arm64 image (green build, runtime failure — undercuts #77). GOARCH must
+        # fall back to the host's dpkg arch, matching the ttyd/tunnel steps.
+        self.assertIn(
+            'GOARCH="${TARGETARCH:-$(dpkg --print-architecture)}"', self.dockerfile
+        )
+        self.assertNotIn('GOARCH="${TARGETARCH:-amd64}"', self.dockerfile)
+
+    def test_ao_gated_by_install_arg_via_from_alias(self):
+        # Mirrors npm-manifest-* gating: a FROM alias selects the real build
+        # or an empty busybox placeholder; disabled never schedules the toolchain.
+        self.assertIn("FROM busybox AS ao-build-false", self.dockerfile)
+        self.assertIn("FROM ao-build-${INSTALL_AO} AS ao-build", self.dockerfile)
+        # ARG declared both at the top (for the alias) and in the final stage.
+        self.assertEqual(self.dockerfile.count("ARG INSTALL_AO=true"), 2)
+
+    def test_ao_install_gate_is_strict_boolean(self):
+        # COPY pulls the binary, then a strict case installs or drops it.
+        self.assertIn("COPY --from=ao-build /out/ao /tmp/ao.bin", self.dockerfile)
+        self.assertIn('case "${INSTALL_AO}" in', self.dockerfile)
+        self.assertIn("install -m 0755 /tmp/ao.bin /usr/local/bin/ao", self.dockerfile)
+        self.assertIn("Skipping ao (INSTALL_AO=false)", self.dockerfile)
+        self.assertIn(
+            "INSTALL_AO='${INSTALL_AO}' is invalid", self.dockerfile
+        )
+
+    def test_ao_binary_not_executed_at_build_time(self):
+        # A cross-built foreign-arch image can't run ao; the gate must not call it.
+        self.assertNotRegex(self.dockerfile, r"/usr/local/bin/ao --version")
+        self.assertNotRegex(self.dockerfile, r"\bao --version\b")
+
+    def test_ao_runtime_deps_present(self):
+        # The ao daemon needs tmux and git at runtime; both are in the base apt layer.
+        self.assertRegex(self.dockerfile, r"apt-get install[^\n]*\btmux\b")
+        self.assertRegex(self.dockerfile, r"apt-get install[^\n]*\bgit\b")
+
+    def test_go_toolchain_not_in_runtime(self):
+        # Only the binary is COPY'd from the build stage; no golang in final image.
+        self.assertNotIn("FROM golang:1.25-bookworm\n", self.dockerfile)
+        self.assertNotRegex(self.dockerfile, r"apt-get install[^\n]*\bgolang\b")
+
+    def test_build_sh_forwards_install_ao(self):
+        # ao is forwarded through the shared non-npm flag loop (alongside the
+        # tunnel providers), not the npm cache-hash path. The loop validates and
+        # forwards each INSTALL_<KEY> by indirect expansion.
+        text = BUILD_SH.read_text()
+        self.assertRegex(text, r"for nonnpm_key in [^\n]*\bINSTALL_AO\b")
+        self.assertIn('validate_bool "${nonnpm_key}" "${!nonnpm_key}"', text)
+        self.assertIn(
+            'BUILD_ARGS+=(--build-arg "${nonnpm_key}=${!nonnpm_key}")', text
+        )
+
+
 def _parse_cli_packages():
     """Mirror install-cli.sh / build.sh parsing: (KEY, npm-spec) per real line."""
     rows = []
@@ -706,9 +815,12 @@ class TestModularInstallFlags(unittest.TestCase):
     def test_build_sh_forwards_tunnel_flags(self):
         # cloudflared/chisel are curl-installed (not npm), so build.sh forwards
         # their INSTALL_* flags like Hermes — only when explicitly set (issue #79).
+        # They share the non-npm flag loop with ao (#76/#77).
         text = BUILD_SH.read_text()
-        self.assertIn("INSTALL_CLOUDFLARED INSTALL_CHISEL", text)
-        self.assertIn('validate_bool "${tunnel_key}" "${!tunnel_key}"', text)
+        self.assertRegex(
+            text, r"for nonnpm_key in [^\n]*\bINSTALL_CLOUDFLARED\b[^\n]*\bINSTALL_CHISEL\b"
+        )
+        self.assertIn('validate_bool "${nonnpm_key}" "${!nonnpm_key}"', text)
 
 
 class TestInstallCliScript(unittest.TestCase):
