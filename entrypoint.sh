@@ -19,6 +19,8 @@ fi
 : "${HAPI_RUNNER_ENABLED:=false}"
 : "${DROID_DAEMON_ENABLED:=false}"
 : "${DROID_COMPUTER_NAME:=}"
+: "${AO_DAEMON_ENABLED:=false}"
+: "${AO_PORT:=3001}"
 : "${ROOT_PASSWORD:=}"
 : "${TTYD_SANDBOX:=false}"
 
@@ -219,6 +221,42 @@ if [ "${DROID_DAEMON_ENABLED}" = "true" ]; then
   fi
 else
   echo "Droid daemon disabled (set DROID_DAEMON_ENABLED=true to enable remote access)"
+fi
+
+# Start agent-orchestrator daemon (issue #72, closes #61). Loopback-only
+# 127.0.0.1:${AO_PORT} by design (no AO_HOST / auth / TLS) — external access is via
+# the existing SSH tunnel (#79) + `ssh -L 127.0.0.1:3001:127.0.0.1:3001`.
+# Independent of hapi (binary built into the image in #83), like the droid daemon.
+#
+# The loopback bind is enforced by the `ao` binary itself, NOT by this script:
+# verified against the binary, the listen address is hardcoded to 127.0.0.1
+# (`ao daemon` exposes no --host/--listen flag and honors no AO_HOST env), and it
+# range-validates AO_PORT on its own. So there is nothing here to pass to keep it
+# on loopback. If a future `ao` upgrade ever adds a bind-host knob or changes the
+# default, this no-auth/no-TLS daemon could be exposed on a published port — re-check
+# that the hardcoded-loopback invariant still holds before bumping the pinned ao ref.
+if [ "${AO_DAEMON_ENABLED}" = "true" ]; then
+  # Validate AO_PORT numeric: it is interpolated into the `ao daemon` launch
+  # string, so a non-numeric value must fail loudly (mirrors PORT / CHISEL_REMOTE_PORT).
+  case "${AO_PORT}" in
+    ''|*[!0-9]*)
+      echo "ERROR: AO_PORT='${AO_PORT}' must be a positive integer" >&2
+      exit 1
+      ;;
+  esac
+  if PATH="${HAPI_RUN_PATH}" command -v ao >/dev/null 2>&1; then
+    AO_DAEMON_LOG="${HAPI_HOME}/ao-daemon.log"
+    touch "${AO_DAEMON_LOG}"
+    chown "${HAPI_USER}:${HAPI_USER}" "${AO_DAEMON_LOG}"
+    echo "Starting ao daemon on 127.0.0.1:${AO_PORT} in background (logs: ${AO_DAEMON_LOG})..."
+    run_as_hapi "AO_PORT=\"${AO_PORT}\" stdbuf -oL ao daemon 2>&1 | tee \"${AO_DAEMON_LOG}\"" &
+    AO_DAEMON_PID=$!
+    echo "ao daemon started with PID: ${AO_DAEMON_PID}"
+  else
+    echo "ao CLI not found; skipping ao daemon startup" >&2
+  fi
+else
+  echo "ao daemon disabled (set AO_DAEMON_ENABLED=true to enable agent-orchestrator remote access)"
 fi
 
 # Start external SSH tunnel (issue #79). Pluggable provider, gated by
