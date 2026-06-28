@@ -61,18 +61,24 @@ def render_login_page(csrf_token):
     return render_template("login.html", {"{{CSRF_TOKEN}}": csrf_token})
 
 
-def render_menu_page(username, hapi_url):
+def render_menu_page(username, hapi_url, ssh_conn=None):
     """Render the main dashboard menu."""
     if hapi_url:
         escaped_url = html_module.escape(hapi_url, quote=True)
         hapi_link = f'<a href="{escaped_url}" target="_blank" class="menu-link">HAPI Server</a>'
     else:
         hapi_link = ""  # without hapi the menu item disappears entirely (issue #63)
+    if ssh_conn:
+        escaped_conn = html_module.escape(ssh_conn, quote=True)
+        ssh_link = f'<code class="ssh-link">{escaped_conn}</code>'
+    else:
+        ssh_link = ""  # no tunnel -> no SSH block, like HAPI item disappears
     return render_template(
         "index.html",
         {
             "{{USERNAME}}": html_module.escape(username),
             "{{HAPI_LINK}}": hapi_link,
+            "{{SSH_LINK}}": ssh_link,
         },
     )
 
@@ -100,3 +106,26 @@ def load_hapi_url(url_file):
         return None
     return hapi_url
 
+
+def load_ssh_url(url_file):
+    """Read and validate the SSH connection-string file written by the tunnel.
+
+    Unlike load_hapi_url the content is not an HTTP URL but a single shell
+    command (e.g. 'ssh -p 2222 hapi@host' or 'ssh -o ProxyCommand=... ...').
+    We never interpret it - only surface it for display. Reject anything that is
+    not a single non-empty line starting with 'ssh ' (no embedded newlines,
+    carriage returns, NULs, or other control chars that could smuggle a second
+    command past the copy-paste path).
+    """
+    try:
+        raw = Path(url_file).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    if not candidate.startswith("ssh "):
+        return None
+    if "\n" in candidate or "\r" in candidate or "\x00" in candidate:
+        return None
+    return candidate

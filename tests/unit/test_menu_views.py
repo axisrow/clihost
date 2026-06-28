@@ -35,5 +35,30 @@ class TestMenuViews(unittest.TestCase):
         self.assertIn("&lt;script&gt;", page)
 
 
+class TestMenuSshBlock(unittest.TestCase):
+    """SSH connection-string block gating (issue #80)."""
+
+    SSH_CMD = "ssh -p 2222 hapi@example.com"
+
+    def test_ssh_block_rendered_when_command_present(self):
+        page = render_menu_page("hapi", None, self.SSH_CMD)
+        self.assertIn("ssh-link", page)
+        self.assertIn(self.SSH_CMD, page)
+
+    def test_ssh_block_absent_when_command_missing(self):
+        page = render_menu_page("hapi", None, None)
+        # CSS class .ssh-link is always in <style>; assert the rendered element
+        # (the copyable code block) is absent, not the bare class name.
+        self.assertNotIn('<code class="ssh-link">', page)
+
+    def test_ssh_command_is_html_escaped(self):
+        malicious = 'ssh -o Foo="x" hapi@h<script>'
+        page = render_menu_page("hapi", None, malicious)
+        # The page contains legitimate <script> tags; assert the injected payload
+        # specifically is escaped, not that <script> is absent globally.
+        self.assertNotIn("hapi@h<script>", page)
+        self.assertIn("hapi@h&lt;script&gt;", page)
+
+
 if __name__ == "__main__":
     unittest.main()

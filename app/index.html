@@ -57,6 +57,20 @@
     .menu-link.secondary:hover {
       background: #4d5460;
     }
+    .ssh-link {
+      display: block;
+      padding: 0.75rem 1rem;
+      background: #1f242d;
+      color: #cdd6e1;
+      border: 1px solid #353b47;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.9rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+      text-align: left;
+      user-select: all;
+    }
     .menu-link.new-terminal {
       background: #2d6a4f;
     }
@@ -260,6 +274,7 @@
     <div class="username">{{USERNAME}}</div>
     <div class="menu-links" id="menu-links">
       {{HAPI_LINK}}
+      {{SSH_LINK}}
       <div id="terminals-list"></div>
       <button class="menu-link new-terminal" id="new-terminal-btn" onclick="createTerminal()">+ New terminal</button>
     </div>
