@@ -95,22 +95,31 @@ run_as_hapi() {
 # argv-based variant of run_as_hapi: the program and its arguments are passed as
 # separate argv elements (NOT interpolated into an `sh -c` string), so values
 # containing shell metacharacters (quotes, $(), backticks, ;) can never be
-# executed as code. Extra environment variables — used to hand secrets to the
-# child WITHOUT putting them on the command line (argv is world-readable via
-# `ps`/`/proc/<pid>/cmdline`) — are passed before a literal `--` separator as
-# NAME=VALUE pairs; everything after `--` is the argv to exec. This keeps the
-# tunnel token/auth out of the process table, matching the repo's no-secrets-in-
-# argv invariant (cf. ROOT_PASSWORD heredoc, PASSWORD_SECRET file).
+# executed as code.
+#
+# Secrets (tunnel token/auth) must NEVER appear in argv — not even briefly as an
+# `env NAME=VALUE` argument — because argv is world-readable via `ps` /
+# `/proc/<pid>/cmdline` for the lifetime of every process in the launch chain.
+# Instead, the caller EXPORTS each secret into this launcher's own environment and
+# passes only its NAME (before the `--` separator) to document the contract. We
+# rely on util-linux runuser's documented default (WITHOUT --login it does NOT
+# clear the environment — it only sets HOME/SHELL), so an exported secret is
+# inherited across the privilege drop with its VALUE never entering any argv. This
+# matches the repo's no-secrets-in-argv invariant (cf. ROOT_PASSWORD heredoc,
+# PASSWORD_SECRET file). (--whitelist-environment is intentionally NOT used: it is
+# a no-op without --login.) Non-secret vars (HOME/PATH/HAPI_HOME) are set via
+# `env` since they are not sensitive; PATH in particular must be forced because
+# runuser would otherwise leave the caller's root PATH in place.
 run_as_hapi_argv() {
-  local -a extra_env=()
+  # Consume (and ignore) the documented secret NAMES up to the `--` separator;
+  # they are inherited from the exported environment, not passed here.
   while [ "$1" != "--" ]; do
-    extra_env+=("$1")
     shift
   done
   shift  # drop the "--" separator
   runuser -u "${HAPI_USER}" -- env \
     HOME="${HAPI_USER_HOME}" PATH="${HAPI_RUN_PATH}" HAPI_HOME="${HAPI_HOME}" \
-    "${extra_env[@]}" "$@"
+    "$@"
 }
 
 cleanup_runner_state() {
@@ -241,13 +250,16 @@ if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
           echo "WARNING: SSH_TUNNEL_PROVIDER=cloudflared requires CLOUDFLARE_TUNNEL_TOKEN; skipping tunnel startup" >&2
         else
           echo "Starting cloudflared tunnel in background (logs: ${SSH_TUNNEL_LOG})..."
-          # Secret hygiene: the token is handed to cloudflared via the TUNNEL_TOKEN
-          # env var (which it reads natively), NOT as a --token argv element, so it
-          # never appears in `ps`/`/proc/<pid>/cmdline`. argv-based launch (no
-          # `sh -c` string) means no env value can be interpreted as shell code.
+          # Secret hygiene: cloudflared reads the token natively from TUNNEL_TOKEN.
+          # We EXPORT it into this launcher's env and pass only its NAME to
+          # run_as_hapi_argv; runuser (no --login) inherits it across the privilege
+          # drop, so the token VALUE never appears in any argv (`ps`/`/proc/<pid>/
+          # cmdline`), not even briefly as an `env NAME=VALUE` arg. argv-based launch
+          # (no `sh -c` string) also means no env value can be interpreted as shell code.
           # Logging via a plain redirect (not `| tee`) keeps $! pointing at the
           # tunnel process itself, so an immediate exit isn't masked by a live tee.
-          run_as_hapi_argv "TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}" -- \
+          TUNNEL_TOKEN="${CLOUDFLARE_TUNNEL_TOKEN}" \
+          run_as_hapi_argv TUNNEL_TOKEN -- \
             stdbuf -oL cloudflared tunnel --no-autoupdate run \
             >>"${SSH_TUNNEL_LOG}" 2>&1 &
           SSH_TUNNEL_PID=$!
@@ -273,12 +285,15 @@ if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
           echo "WARNING: SSH_TUNNEL_PROVIDER=chisel requires CHISEL_SERVER; skipping tunnel startup" >&2
         else
           echo "Starting chisel client in background (logs: ${SSH_TUNNEL_LOG})..."
-          # AUTH (user:pass) is handed to chisel via the env (which it reads
-          # natively), not argv; argv-based launch prevents shell interpretation
-          # of CHISEL_SERVER/CHISEL_REMOTE_PORT. Logging via redirect (not tee)
-          # keeps $! on the chisel process. CHISEL_REMOTE_PORT is validated numeric
-          # below so the R:<port>:... spec can't be corrupted.
-          run_as_hapi_argv "AUTH=${CHISEL_AUTH}" -- \
+          # AUTH (user:pass) is read natively by chisel from the env. We EXPORT it
+          # and pass only its NAME to run_as_hapi_argv; runuser (no --login)
+          # inherits it, so the value never lands in argv. argv-based launch
+          # prevents shell interpretation of CHISEL_SERVER/CHISEL_REMOTE_PORT.
+          # Logging via redirect (not tee) keeps $! on the chisel process.
+          # CHISEL_REMOTE_PORT is validated numeric above so the R:<port>:... spec
+          # can't be corrupted.
+          AUTH="${CHISEL_AUTH}" \
+          run_as_hapi_argv AUTH -- \
             stdbuf -oL chisel client --max-retry-count -1 \
             "${CHISEL_SERVER}" "R:${CHISEL_REMOTE_PORT}:localhost:22" \
             >>"${SSH_TUNNEL_LOG}" 2>&1 &

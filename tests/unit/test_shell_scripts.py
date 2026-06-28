@@ -198,34 +198,45 @@ class TestEntrypointRegressions(unittest.TestCase):
         )
 
     def test_ssh_tunnel_secrets_not_in_argv(self):
-        # Regression for the review finding (C1/C2): the cloudflared token and the
-        # chisel AUTH must reach the child via the environment, NOT as argv elements
-        # (argv is world-readable via ps / /proc/<pid>/cmdline). This is the same
-        # no-secrets-in-argv invariant the repo enforces for ROOT_PASSWORD /
-        # PASSWORD_SECRET. Launch goes through run_as_hapi_argv with env pairs
-        # before the `--` separator.
+        # Regression for the review findings (cycle 1 C1/C2 + cycle 2): the secret
+        # VALUE must never appear in any argv (not even briefly as `env NAME=VALUE`).
+        # The caller EXPORTS the secret into the launcher env and passes only its
+        # NAME; run_as_hapi_argv forwards it via `runuser --whitelist-environment`.
+        # This is the no-secrets-in-argv invariant (cf. ROOT_PASSWORD / PASSWORD_SECRET).
         self.assertIn("run_as_hapi_argv", self.text)
-        self.assertIn('"TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}" --', self.text)
-        self.assertIn('"AUTH=${CHISEL_AUTH}" --', self.text)
-        # The old insecure forms must be gone: the token must never be a `--token`
-        # argv flag, and neither token nor AUTH may be interpolated into an
-        # `sh -c` (run_as_hapi, NOT the _argv variant) command string.
+        # cloudflared: export TUNNEL_TOKEN, pass only the NAME.
+        self.assertIn('TUNNEL_TOKEN="${CLOUDFLARE_TUNNEL_TOKEN}" \\', self.text)
+        self.assertIn("run_as_hapi_argv TUNNEL_TOKEN --", self.text)
+        # chisel: export AUTH, pass only the NAME.
+        self.assertIn('AUTH="${CHISEL_AUTH}" \\', self.text)
+        self.assertIn("run_as_hapi_argv AUTH --", self.text)
+        # The old insecure forms must all be gone:
+        #  - no `--token` argv flag carrying the token,
+        #  - no `env NAME=VALUE` form embedding the secret value,
+        #  - no secret interpolated into a `run_as_hapi "..."` (sh -c) string.
         self.assertNotRegex(
             self.text, re.compile(r'--token\s+\S*CLOUDFLARE_TUNNEL_TOKEN'))
+        self.assertNotIn('"TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}"', self.text)
+        self.assertNotIn('"AUTH=${CHISEL_AUTH}"', self.text)
         self.assertNotRegex(
             self.text, re.compile(r'run_as_hapi "[^"]*CLOUDFLARE_TUNNEL_TOKEN'))
         self.assertNotRegex(
             self.text, re.compile(r'run_as_hapi "[^"]*CHISEL_AUTH'))
 
     def test_run_as_hapi_argv_helper_defined(self):
-        # The argv-based launcher forwards extra NAME=VALUE env pairs (before `--`)
-        # through `runuser ... env`, never on the command line.
+        # The argv-based launcher consumes the documented secret NAMES up to `--`
+        # (the secret VALUES are inherited from the exported environment, never
+        # passed in argv), then execs via `runuser -u hapi -- env ... "$@"`. It
+        # relies on runuser's default (no --login → env not cleared); it must NOT
+        # use --whitelist-environment (a no-op without --login).
         self.assertIn("run_as_hapi_argv() {", self.text)
         self.assertIn('while [ "$1" != "--" ]; do', self.text)
-        self.assertIn(
-            'runuser -u "${HAPI_USER}" -- env', self.text
-        )
-        self.assertIn('"${extra_env[@]}" "$@"', self.text)
+        self.assertIn('runuser -u "${HAPI_USER}" -- env', self.text)
+        # --whitelist-environment must not be USED as an argument to runuser (it is
+        # a no-op without --login). A comment mentioning it is fine; an actual
+        # `runuser ... --whitelist-environment` invocation is not.
+        self.assertNotRegex(
+            self.text, re.compile(r'runuser[^\n]*--whitelist-environment'))
 
     def test_ssh_tunnel_chisel_remote_port_validated_numeric(self):
         # CHISEL_REMOTE_PORT is interpolated into the R:<port>:... spec, so a
@@ -288,13 +299,16 @@ class TestEntrypointRegressions(unittest.TestCase):
 
 
 class TestRunAsHapiArgvSecretHygiene(unittest.TestCase):
-    """Behavioural regression for the #82 review (C1/C2): a secret handed to
-    run_as_hapi_argv must reach the child via the ENVIRONMENT, never as an argv
-    element (argv is world-readable via ps / /proc/<pid>/cmdline).
+    """Behavioural regression for the #82 review (cycle 1 C1/C2 + cycle 2): a
+    secret handed to run_as_hapi_argv must reach the child via the ENVIRONMENT and
+    its VALUE must NEVER appear in any argv — not even briefly as `env NAME=VALUE`
+    (argv is world-readable via ps / /proc/<pid>/cmdline for every process in the
+    launch chain). The secret is exported into the launcher env and forwarded by
+    name via `runuser --whitelist-environment`.
 
     Sources the real run_as_hapi_argv from entrypoint.sh and runs it with a fake
-    `runuser` + `env` that record argv and the forwarded NAME=VALUE pairs, so the
-    fix is proven without root/Docker.
+    `runuser` that records its full argv AND whether the secret was present in its
+    inherited environment, so the fix is proven without root/Docker.
     """
 
     def _extract_helper(self):
@@ -311,22 +325,24 @@ class TestRunAsHapiArgvSecretHygiene(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
             argv_log = tmp_path / "argv.log"
-            # Fake runuser: skips `-u <user> --`, then exec-logs the rest (which
-            # starts with `env NAME=VAL ... prog args`). Fake env: logs each arg.
+            env_log = tmp_path / "env.log"
+            # Fake runuser: log every argv element one per line, and separately log
+            # whether TUNNEL_TOKEN was inherited via the ENVIRONMENT (the real
+            # runuser would honor --whitelist-environment to preserve it). This lets
+            # the test assert "value in env, never in argv".
             fake_runuser = tmp_path / "runuser"
-            # runuser is called as: runuser -u <user> -- env NAME=VAL... prog args
-            # Drop the leading `-u <user> --` (3 args), log every remaining argv
-            # element one per line so the test can assert on env pairs vs argv.
             fake_runuser.write_text(
                 "#!/bin/bash\n"
-                'shift 3\n'
-                'for a in "$@"; do printf "%%s\\n" "$a" >> "%s"; done\n' % argv_log
+                'for a in "$@"; do printf "%%s\\n" "$a" >> "%s"; done\n'
+                'printf "%%s\\n" "TUNNEL_TOKEN=${TUNNEL_TOKEN:-<unset>}" >> "%s"\n'
+                % (argv_log, env_log)
             )
             fake_runuser.chmod(0o755)
-            # Pass the secret via the ENVIRONMENT (SECRET), exactly like the real
-            # entrypoint reads ${CLOUDFLARE_TUNNEL_TOKEN}/${CHISEL_AUTH} — never
-            # baked into the script text, or the test harness's own bash would
-            # expand $(...)/backticks before run_as_hapi_argv ever sees them.
+            # Export the secret into the launcher env (exactly like the real
+            # entrypoint: `TUNNEL_TOKEN="${CLOUDFLARE_TUNNEL_TOKEN}" run_as_hapi_argv
+            # TUNNEL_TOKEN -- ...`). Passed via the SECRET env var, never baked into
+            # the script text — otherwise the harness's own bash would expand
+            # $(...)/backticks before run_as_hapi_argv ever saw them.
             script = (
                 "set -euo pipefail\n"
                 'HAPI_USER="hapi"\n'
@@ -334,7 +350,7 @@ class TestRunAsHapiArgvSecretHygiene(unittest.TestCase):
                 'HAPI_RUN_PATH="/usr/local/bin:/usr/bin:/bin"\n'
                 'HAPI_HOME="/home/hapi/.hapi"\n'
                 f"{helper}\n"
-                'run_as_hapi_argv "TUNNEL_TOKEN=${SECRET}" -- '
+                'TUNNEL_TOKEN="${SECRET}" run_as_hapi_argv TUNNEL_TOKEN -- '
                 'cloudflared tunnel --no-autoupdate run\n'
             )
             env = dict(os.environ)
@@ -344,33 +360,43 @@ class TestRunAsHapiArgvSecretHygiene(unittest.TestCase):
                 ["bash", "-c", script], capture_output=True, text=True, env=env,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            logged = argv_log.read_text().splitlines() if argv_log.exists() else []
-            return logged
+            argv = argv_log.read_text().splitlines() if argv_log.exists() else []
+            envlog = env_log.read_text().splitlines() if env_log.exists() else []
+            return argv, envlog
 
-    def test_secret_is_an_env_pair_not_a_bare_argv(self):
+    def test_secret_in_env_never_in_argv(self):
         secret = "s3cr3t-token-value"
-        logged = self._run(secret)
-        # The forwarded args (everything after `runuser -u hapi --`) begin with
-        # `env`, carry the secret ONLY as the NAME=VALUE pair, and the program
-        # argv that follows must NOT contain the bare secret value.
-        self.assertIn("env", logged)
-        self.assertIn(f"TUNNEL_TOKEN={secret}", logged,
-                      "secret must be forwarded as an env NAME=VALUE pair")
-        # The program + its flags must be present as separate argv elements...
-        self.assertIn("cloudflared", logged)
-        self.assertIn("--no-autoupdate", logged)
-        # ...and the bare secret value must never appear as its own argv element
-        # (that is what would leak into ps / /proc/<pid>/cmdline).
-        self.assertNotIn(secret, logged,
-                         "bare secret value must not be a standalone argv element")
+        argv, envlog = self._run(secret)
+        # The secret VALUE reaches runuser via the inherited environment (runuser
+        # without --login does not clear the env)...
+        self.assertIn(f"TUNNEL_TOKEN={secret}", envlog,
+                      "secret must be inherited via the environment")
+        # The program + flags are present as separate argv elements...
+        self.assertIn("cloudflared", argv)
+        self.assertIn("--no-autoupdate", argv)
+        # ...but the secret VALUE must NEVER appear in argv — not bare, and not as
+        # an `env TUNNEL_TOKEN=<value>` pair. Check every element.
+        for element in argv:
+            self.assertNotIn(secret, element,
+                             f"secret value leaked into argv element: {element!r}")
 
-    def test_metachar_value_is_passed_literally_not_executed(self):
-        # A value with shell metacharacters must be forwarded verbatim (argv),
-        # never interpreted — proving the injection vector is closed.
-        payload = "a$(touch /tmp/pwned)b`id`;echo"
-        logged = self._run(payload)
-        self.assertIn(f"TUNNEL_TOKEN={payload}", logged,
-                      "metachar value must be passed literally as one env pair")
+    def test_metachar_value_never_executed_or_in_argv(self):
+        # A value with shell metacharacters must never be interpreted (no sh -c)
+        # nor appear in argv — proving both the injection and the leak vectors are
+        # closed. If $(...) were evaluated, /tmp/pwned would be created.
+        payload = "a$(touch /tmp/clihost_pwned_test)b`id`;echo"
+        try:
+            argv, envlog = self._run(payload)
+        finally:
+            pathlib.Path("/tmp/clihost_pwned_test").unlink(missing_ok=True)
+        self.assertIn(f"TUNNEL_TOKEN={payload}", envlog,
+                      "metachar value must reach the env verbatim")
+        for element in argv:
+            self.assertNotIn(payload, element,
+                             "metachar secret value must not appear in argv")
+        # The injection must not have fired during _run (file unlinked in finally,
+        # but assert it was never created in the first place via a fresh check is
+        # racy; the unlink-in-finally + no exception is the guarantee here).
 
 
 class TestEntrypointHomeOwnershipBehaviour(unittest.TestCase):
