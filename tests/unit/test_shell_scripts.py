@@ -1,4 +1,5 @@
 """Static checks for shell scripts (syntax + known-bug regressions)."""
+import json
 import os
 import pathlib
 import re
@@ -16,6 +17,7 @@ TMUX_WRAPPER = REPO_ROOT / "bin/tmux-wrapper.sh"
 GLM = REPO_ROOT / "bin/glm"
 README = REPO_ROOT / "README.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+CLAUDE_SETTINGS_TEMPLATE = REPO_ROOT / "config/claude-settings.json"
 
 # Component keys whose INSTALL_<KEY> build args gate the modular image (issue #57).
 NPM_COMPONENT_KEYS = (
@@ -550,6 +552,172 @@ class TestClaudeConfigPersistence(unittest.TestCase):
         self.assertNotIn(".claude", body)
         # sanity: it does target the runner state files it is meant to clear.
         self.assertIn("runner.state.json", body)
+
+
+class TestClaudeNativeZaiConfig(unittest.TestCase):
+    """Native Claude Code configuration for z.ai Coding Plan (issue #60)."""
+
+    def _extract_helper(self):
+        text = ENTRYPOINT.read_text()
+        match = re.search(
+            r"^ensure_claude_settings\(\) \{\n.*?^\}",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, "ensure_claude_settings not found in entrypoint.sh")
+        assert match is not None
+        return match.group(0)
+
+    def _run_helper(self, settings_content=None, local_content="local hooks",
+                    settings_symlink_to=None, claude_symlink_to=None):
+        helper = self._extract_helper()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            home = tmp_path / "home" / "hapi"
+            claude_dir = home / ".claude"
+            if claude_symlink_to is not None:
+                # Attack: .claude itself is a symlink to an attacker-chosen dir.
+                home.mkdir(parents=True)
+                target = tmp_path / claude_symlink_to
+                target.mkdir(parents=True, exist_ok=True)
+                claude_dir.symlink_to(target)
+            else:
+                claude_dir.mkdir(parents=True)
+            template = tmp_path / "claude-settings.json"
+            template.write_text('{"env":{"from":"template"}}\n')
+            settings = claude_dir / "settings.json"
+            if settings_symlink_to is not None:
+                # Attack: settings.json is a symlink to an attacker-chosen path.
+                target = tmp_path / settings_symlink_to
+                target.mkdir(parents=True, exist_ok=True)
+                settings.symlink_to(target)
+            elif settings_content is not None:
+                settings.write_text(settings_content)
+            settings_local = claude_dir / "settings.local.json"
+            # When .claude is itself the attacker symlink, do NOT write through it
+            # (that would be the test corrupting the victim, not the helper).
+            if claude_symlink_to is None:
+                settings_local.write_text(local_content)
+            chown_log = tmp_path / "chown.log"
+            fake_chown = tmp_path / "chown"
+            fake_chown.write_text(
+                "#!/bin/bash\n"
+                'for a in "$@"; do case "$a" in -*) ;; *:*) ;; '
+                f'*) echo "$a" >> "{chown_log}" ;; esac; done\n'
+            )
+            fake_chown.chmod(0o755)
+            script = (
+                "set -euo pipefail\n"
+                'HAPI_USER="hapi"\n'
+                f'HAPI_USER_HOME="{home}"\n'
+                f'CLAUDE_SETTINGS_TEMPLATE="{template}"\n'
+                f"{helper}\n"
+                "ensure_claude_settings\n"
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            chown_targets = (
+                chown_log.read_text().splitlines() if chown_log.exists() else []
+            )
+            # For symlink-attack cases, report whether the template leaked into
+            # the attacker-controlled target directory (it must not). "Leaked" =
+            # the template content was written somewhere under the victim dir.
+            template_text = template.read_text()
+            leaked = False
+            for attack_target in (settings_symlink_to, claude_symlink_to):
+                if attack_target is not None:
+                    tgt = tmp_path / attack_target
+                    if tgt.is_dir():
+                        for child in tgt.rglob("*"):
+                            if child.is_file() and child.read_text() == template_text:
+                                leaked = True
+            return {
+                "template": template_text,
+                "settings": settings.read_text()
+                if settings.is_file() and not settings.is_symlink() else None,
+                "settings_local": settings_local.read_text()
+                if settings_local.is_file() else None,
+                "chown_targets": chown_targets,
+                "settings_path": str(settings),
+                "leaked": leaked,
+            }
+
+    def test_template_uses_zai_coding_plan_without_token(self):
+        data = json.loads(CLAUDE_SETTINGS_TEMPLATE.read_text())
+        self.assertEqual(
+            data,
+            {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.z.ai/api/coding/paas/v4",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2[1m]",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2[1m]",
+                    "API_TIMEOUT_MS": "3000000",
+                    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
+                }
+            },
+        )
+        text = CLAUDE_SETTINGS_TEMPLATE.read_text()
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", text)
+        self.assertNotIn("ZAI_TOKEN", text)
+
+    def test_dockerfile_copies_claude_settings_template_only(self):
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn(
+            "COPY config/claude-settings.json /etc/skel/.claude/settings.json",
+            dockerfile,
+        )
+        self.assertNotRegex(
+            dockerfile,
+            re.compile(r"(ANTHROPIC_(BASE_URL|AUTH_TOKEN)|ZAI_TOKEN)"),
+        )
+
+    def test_glm_wrapper_stays_compatible_with_zai_token(self):
+        glm = GLM.read_text()
+        self.assertIn("ANTHROPIC_BASE_URL=https://api.z.ai/api/coding/paas/v4", glm)
+        self.assertIn(
+            'ANTHROPIC_AUTH_TOKEN="${ZAI_TOKEN:?ZAI_TOKEN environment variable is required}"',
+            glm,
+        )
+        self.assertIn("ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.7", glm)
+        self.assertIn("ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2[1m]", glm)
+        self.assertIn("ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2[1m]", glm)
+        self.assertIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000", glm)
+
+    def test_entrypoint_copies_template_when_settings_missing(self):
+        result = self._run_helper()
+        self.assertEqual(result["settings"], result["template"])
+        self.assertEqual(result["settings_local"], "local hooks")
+        self.assertIn(result["settings_path"], result["chown_targets"])
+
+    def test_entrypoint_does_not_overwrite_existing_settings(self):
+        existing = '{"env":{"custom":"user"}}\n'
+        result = self._run_helper(settings_content=existing)
+        self.assertEqual(result["settings"], existing)
+        self.assertEqual(result["settings_local"], "local hooks")
+        self.assertNotIn(result["settings_path"], result["chown_targets"])
+
+    def test_entrypoint_rejects_settings_symlink_attack(self):
+        # The helper runs as root before the privilege drop, and /home/hapi is
+        # writable by the hapi user via the persistent volume. A planted
+        # settings.json *symlink* must NOT cause the root cp/chown to follow it
+        # (arbitrary-path write + ownership change). Gating on `! -f` alone would
+        # treat a symlink-to-dir as "missing"; the helper must bail on any
+        # pre-existing path including a symlink. (Codex finding, PR #88 review.)
+        result = self._run_helper(settings_symlink_to="victim")
+        self.assertFalse(result["leaked"], "template leaked through settings symlink")
+        self.assertNotIn(result["settings_path"], result["chown_targets"])
+
+    def test_entrypoint_rejects_claude_dir_symlink_attack(self):
+        # Same class of attack one level up: ~/.claude itself is a symlink. The
+        # helper must refuse to operate unless .claude is a real, non-symlink dir.
+        result = self._run_helper(claude_symlink_to="victim2")
+        self.assertFalse(result["leaked"], "template leaked through .claude symlink")
+        self.assertNotIn(result["settings_path"], result["chown_targets"])
 
 
 class TestClaudeAuthRootCause69(unittest.TestCase):

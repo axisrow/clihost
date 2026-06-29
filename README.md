@@ -80,6 +80,30 @@ Add persistent volume at `/home/hapi` via Railway dashboard → Service → Volu
 - `PORT` is injected automatically by Railway, `ttyd_proxy.py` reads it via `os.environ`
 - When `hapi` is installed, the dashboard builds the **HAPI Server** link on demand from `/home/hapi/.hapi/server.log` (latest `https://*.relay.hapi.run`) and `/home/hapi/.hapi/settings.json` (`cliApiToken`). `/home/hapi/url` remains a legacy fallback, but the dashboard no longer depends on the entrypoint's one-shot URL writer. If hapi is absent or the URL/token is not available yet, the menu item is omitted.
 
+### Claude Code with z.ai GLM Coding Plan
+
+The image preconfigures native Claude Code for z.ai GLM Coding Plan through
+`/home/hapi/.claude/settings.json`. On startup, `entrypoint.sh` copies
+`config/claude-settings.json` from `/etc/skel/.claude/settings.json` only when
+the user's `settings.json` is missing, so persisted volumes and custom Claude
+settings are not overwritten. `settings.local.json` is a separate Claude Code
+file and is never touched by this bootstrap.
+
+The template contains only non-secret Claude Code env settings:
+`ANTHROPIC_BASE_URL=https://api.z.ai/api/coding/paas/v4`,
+Sonnet/Opus `glm-5.2[1m]`, Haiku `glm-4.7`, and the long timeout/context
+window settings. It does **not** contain a token.
+
+For native `claude`, pass the z.ai Coding Plan token at runtime:
+
+```bash
+docker run --env-file .env -e ANTHROPIC_AUTH_TOKEN=your_zai_token clihost
+```
+
+`bin/glm` is still shipped for compatibility and still reads `ZAI_TOKEN`, but it
+is no longer required for GLM: ordinary `claude` uses the native settings file
+when `ANTHROPIC_AUTH_TOKEN` is present in the environment.
+
 ## Архитектура
 
 ```
@@ -140,6 +164,8 @@ Terminal iframe page и связанные JS/CSS-ассеты лежат в `ap
 | `AO_DAEMON_ENABLED` | false | Start `ao daemon` (agent-orchestrator); loopback-only, reach it through the SSH tunnel |
 | `AO_PORT` | 3001 | `ao daemon` bind port (loopback-only by design; understood by the daemon itself) |
 | `TTYD_SANDBOX` | false | Wrap each tmux session in a bubblewrap jail (see Multi-tenant sandbox below) |
+| `ANTHROPIC_AUTH_TOKEN` | - | z.ai Coding Plan token for native Claude Code GLM access; do not bake it into the image or settings file |
+| `ZAI_TOKEN` | - | Compatibility token for the legacy `bin/glm` wrapper only |
 
 ### Multi-tenant sandbox (optional)
 

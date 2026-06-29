@@ -41,6 +41,7 @@ HAPI_USER_HOME="/home/${HAPI_USER}"
 : "${HAPI_HOME:=${HAPI_USER_HOME}/.hapi}"
 : "${UPLOAD_DIR:=${CLEANUP_ROOT}/.uploads}"
 HAPI_RUN_PATH="/usr/local/bin:/usr/bin:/bin"
+CLAUDE_SETTINGS_TEMPLATE="${CLAUDE_SETTINGS_TEMPLATE:-/etc/skel/.claude/settings.json}"
 
 echo "Starting clihost container..."
 
@@ -119,6 +120,28 @@ EOF
   fi
 }
 
+ensure_claude_settings() {
+  local claude_dir="${HAPI_USER_HOME}/.claude"
+  local settings_file="${claude_dir}/settings.json"
+  # This runs as root before the privilege drop, and /home/hapi is writable by
+  # the (untrusted in multi-tenant forks) hapi user via the persistent volume.
+  # So treat ANY pre-existing destination as hands-off and never follow symlinks:
+  # gating only on `! -f` would let a hapi-planted settings.json *symlink* (e.g.
+  # -> a directory or /etc) pass the check, and the root `cp`/`chown` would then
+  # follow it — writing the template through the link and chowning its target
+  # (arbitrary-path write + ownership change). Mirrors the symlink hardening in
+  # uploads.py. Bail unless .claude is a real (non-symlink) dir and settings.json
+  # is genuinely absent (also rejecting a dangling/symlink settings.json via -L).
+  if [ ! -d "${claude_dir}" ] || [ -L "${claude_dir}" ]; then return 0; fi
+  if [ -e "${settings_file}" ] || [ -L "${settings_file}" ]; then return 0; fi
+  if [ ! -f "${CLAUDE_SETTINGS_TEMPLATE}" ]; then return 0; fi
+  # cp over a guaranteed-absent, non-symlink path; restrictive mode up front so a
+  # future credential-bearing template never lands world-readable (default umask).
+  cp "${CLAUDE_SETTINGS_TEMPLATE}" "${settings_file}"
+  chmod 600 "${settings_file}"
+  chown "${HAPI_USER}:${HAPI_USER}" "${settings_file}"
+}
+
 run_as_hapi() {
   local command="$1"
   runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"${HAPI_RUN_PATH}\" HAPI_HOME=\"${HAPI_HOME}\" ${command}"
@@ -173,6 +196,7 @@ ensure_home_owned
 ensure_dir_owned "${HAPI_USER_HOME}/.config/gh"
 ensure_dir_owned "${HAPI_USER_HOME}/.claude"
 ensure_local_bin_env
+ensure_claude_settings
 
 # Ensure tmux config exists (volume mount may overwrite it)
 if [ ! -f "${HAPI_USER_HOME}/.tmux.conf" ]; then

@@ -114,13 +114,27 @@ SSH Client → sshd (22) → shell
 hapi Client → HTTP API (HAPI_PORT) → hapi runner
 ```
 
-**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → optionally start ao daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → drop any stale dashboard URL → if `hapi` is installed, start `hapi server --relay`, write a best-effort legacy connection URL file, and optionally start hapi runner (otherwise warn and skip) → `exec sshd`.
+**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → copy the default Claude Code settings from `/etc/skel/.claude/settings.json` to `/home/hapi/.claude/settings.json` only if missing → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → optionally start ao daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → drop any stale dashboard URL → if `hapi` is installed, start `hapi server --relay`, write a best-effort legacy connection URL file, and optionally start hapi runner (otherwise warn and skip) → `exec sshd`.
 
 **Volume mount:** `/home/hapi` — persistent runner state, logs, configs. The mount overwrites permissions, hence the permission fixes in entrypoint.sh. **Mount at exactly `/home/hapi`, never the parent `/home`** (issue #69): a Docker volume is seeded from the image only while empty, so a persistent `/home` that survives one deploy stops being re-seeded — the entrypoint then recreates `/home/hapi/.claude` empty on top of it and the saved Claude Code login (`CLAUDE_CONFIG_DIR=/home/hapi/.claude`, set in the Dockerfile) is lost on every redeploy ("auth keeps resetting"). Mounting `/home/hapi` keeps the home dir itself as the persisted unit. Verified in Docker: a non-empty `/home` volume drops the creds on container recreate, a non-empty `/home/hapi` volume keeps them. **Migration caveat:** an existing `/home` volume holds its data under a `hapi/` subdir, so naively retargeting the *same* volume to `/home/hapi` buries it at `/home/hapi/hapi/` (invisible to the app) — move the volume's `hapi/` contents to its root first, or copy them into a fresh `/home/hapi` volume. The entrypoint warning spells this out at startup.
 
 **`bin/` helper scripts:**
 - `tmux-wrapper.sh` — wraps each ttyd's shell in a tmux session `ttyd-{id}` (and, when `TTYD_SANDBOX=true`, inside the bwrap jail). ttyd is launched against this script by `manager.py`.
-- `glm` — convenience wrapper that runs `claude` against the z.ai Anthropic-compatible endpoint (`ANTHROPIC_BASE_URL=https://api.z.ai/...`) with GLM models (`glm-4.6` for Sonnet/Opus, `glm-4.5-air` for Haiku). Requires `ZAI_TOKEN`.
+- `glm` — compatibility wrapper that runs `claude` against the z.ai GLM Coding Plan endpoint (`https://api.z.ai/api/coding/paas/v4`) with Sonnet/Opus mapped to `glm-5.2[1m]` and Haiku mapped to `glm-4.7`. Requires `ZAI_TOKEN`. Native `claude` no longer needs this wrapper when `ANTHROPIC_AUTH_TOKEN` is present.
+
+### Native Claude Code z.ai GLM configuration (issue #60)
+
+Claude Code is preconfigured for z.ai GLM Coding Plan through a template at `config/claude-settings.json`, copied into the image at `/etc/skel/.claude/settings.json`. At container startup, `entrypoint.sh` copies that file to `/home/hapi/.claude/settings.json` only when the user's file is missing. Existing `settings.json` is not overwritten, and `settings.local.json` is a separate Claude Code file and must not be touched by this bootstrap.
+
+The settings template contains only non-secret values:
+- `ANTHROPIC_BASE_URL=https://api.z.ai/api/coding/paas/v4`
+- `ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2[1m]`
+- `ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2[1m]`
+- `ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.7`
+- `API_TIMEOUT_MS=3000000`
+- `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`
+
+Tokens are runtime-only. Use `ANTHROPIC_AUTH_TOKEN` for ordinary `claude`; keep `ZAI_TOKEN` only for the compatibility `bin/glm` wrapper. Do not put `ANTHROPIC_*` or `ZAI_TOKEN` literals in `Dockerfile` or `entrypoint.sh`: `TestClaudeAuthRootCause69` deliberately guards against shell-level GLM env leakage that could affect normal Claude Code auth.
 
 ### ttyd proxy package (app/)
 
