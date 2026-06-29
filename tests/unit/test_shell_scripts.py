@@ -568,20 +568,36 @@ class TestClaudeNativeZaiConfig(unittest.TestCase):
         assert match is not None
         return match.group(0)
 
-    def _run_helper(self, settings_content=None, local_content="local hooks"):
+    def _run_helper(self, settings_content=None, local_content="local hooks",
+                    settings_symlink_to=None, claude_symlink_to=None):
         helper = self._extract_helper()
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
             home = tmp_path / "home" / "hapi"
             claude_dir = home / ".claude"
-            claude_dir.mkdir(parents=True)
+            if claude_symlink_to is not None:
+                # Attack: .claude itself is a symlink to an attacker-chosen dir.
+                home.mkdir(parents=True)
+                target = tmp_path / claude_symlink_to
+                target.mkdir(parents=True, exist_ok=True)
+                claude_dir.symlink_to(target)
+            else:
+                claude_dir.mkdir(parents=True)
             template = tmp_path / "claude-settings.json"
             template.write_text('{"env":{"from":"template"}}\n')
             settings = claude_dir / "settings.json"
-            if settings_content is not None:
+            if settings_symlink_to is not None:
+                # Attack: settings.json is a symlink to an attacker-chosen path.
+                target = tmp_path / settings_symlink_to
+                target.mkdir(parents=True, exist_ok=True)
+                settings.symlink_to(target)
+            elif settings_content is not None:
                 settings.write_text(settings_content)
             settings_local = claude_dir / "settings.local.json"
-            settings_local.write_text(local_content)
+            # When .claude is itself the attacker symlink, do NOT write through it
+            # (that would be the test corrupting the victim, not the helper).
+            if claude_symlink_to is None:
+                settings_local.write_text(local_content)
             chown_log = tmp_path / "chown.log"
             fake_chown = tmp_path / "chown"
             fake_chown.write_text(
@@ -607,12 +623,27 @@ class TestClaudeNativeZaiConfig(unittest.TestCase):
             chown_targets = (
                 chown_log.read_text().splitlines() if chown_log.exists() else []
             )
+            # For symlink-attack cases, report whether the template leaked into
+            # the attacker-controlled target directory (it must not). "Leaked" =
+            # the template content was written somewhere under the victim dir.
+            template_text = template.read_text()
+            leaked = False
+            for attack_target in (settings_symlink_to, claude_symlink_to):
+                if attack_target is not None:
+                    tgt = tmp_path / attack_target
+                    if tgt.is_dir():
+                        for child in tgt.rglob("*"):
+                            if child.is_file() and child.read_text() == template_text:
+                                leaked = True
             return {
-                "template": template.read_text(),
-                "settings": settings.read_text() if settings.exists() else None,
-                "settings_local": settings_local.read_text(),
+                "template": template_text,
+                "settings": settings.read_text()
+                if settings.is_file() and not settings.is_symlink() else None,
+                "settings_local": settings_local.read_text()
+                if settings_local.is_file() else None,
                 "chown_targets": chown_targets,
                 "settings_path": str(settings),
+                "leaked": leaked,
             }
 
     def test_template_uses_zai_coding_plan_without_token(self):
@@ -668,6 +699,24 @@ class TestClaudeNativeZaiConfig(unittest.TestCase):
         result = self._run_helper(settings_content=existing)
         self.assertEqual(result["settings"], existing)
         self.assertEqual(result["settings_local"], "local hooks")
+        self.assertNotIn(result["settings_path"], result["chown_targets"])
+
+    def test_entrypoint_rejects_settings_symlink_attack(self):
+        # The helper runs as root before the privilege drop, and /home/hapi is
+        # writable by the hapi user via the persistent volume. A planted
+        # settings.json *symlink* must NOT cause the root cp/chown to follow it
+        # (arbitrary-path write + ownership change). Gating on `! -f` alone would
+        # treat a symlink-to-dir as "missing"; the helper must bail on any
+        # pre-existing path including a symlink. (Codex finding, PR #88 review.)
+        result = self._run_helper(settings_symlink_to="victim")
+        self.assertFalse(result["leaked"], "template leaked through settings symlink")
+        self.assertNotIn(result["settings_path"], result["chown_targets"])
+
+    def test_entrypoint_rejects_claude_dir_symlink_attack(self):
+        # Same class of attack one level up: ~/.claude itself is a symlink. The
+        # helper must refuse to operate unless .claude is a real, non-symlink dir.
+        result = self._run_helper(claude_symlink_to="victim2")
+        self.assertFalse(result["leaked"], "template leaked through .claude symlink")
         self.assertNotIn(result["settings_path"], result["chown_targets"])
 
 

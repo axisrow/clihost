@@ -121,11 +121,25 @@ EOF
 }
 
 ensure_claude_settings() {
-  local settings_file="${HAPI_USER_HOME}/.claude/settings.json"
-  if [ ! -f "${settings_file}" ] && [ -f "${CLAUDE_SETTINGS_TEMPLATE}" ]; then
-    cp "${CLAUDE_SETTINGS_TEMPLATE}" "${settings_file}"
-    chown "${HAPI_USER}:${HAPI_USER}" "${settings_file}"
-  fi
+  local claude_dir="${HAPI_USER_HOME}/.claude"
+  local settings_file="${claude_dir}/settings.json"
+  # This runs as root before the privilege drop, and /home/hapi is writable by
+  # the (untrusted in multi-tenant forks) hapi user via the persistent volume.
+  # So treat ANY pre-existing destination as hands-off and never follow symlinks:
+  # gating only on `! -f` would let a hapi-planted settings.json *symlink* (e.g.
+  # -> a directory or /etc) pass the check, and the root `cp`/`chown` would then
+  # follow it — writing the template through the link and chowning its target
+  # (arbitrary-path write + ownership change). Mirrors the symlink hardening in
+  # uploads.py. Bail unless .claude is a real (non-symlink) dir and settings.json
+  # is genuinely absent (also rejecting a dangling/symlink settings.json via -L).
+  if [ ! -d "${claude_dir}" ] || [ -L "${claude_dir}" ]; then return 0; fi
+  if [ -e "${settings_file}" ] || [ -L "${settings_file}" ]; then return 0; fi
+  if [ ! -f "${CLAUDE_SETTINGS_TEMPLATE}" ]; then return 0; fi
+  # cp over a guaranteed-absent, non-symlink path; restrictive mode up front so a
+  # future credential-bearing template never lands world-readable (default umask).
+  cp "${CLAUDE_SETTINGS_TEMPLATE}" "${settings_file}"
+  chmod 600 "${settings_file}"
+  chown "${HAPI_USER}:${HAPI_USER}" "${settings_file}"
 }
 
 run_as_hapi() {
