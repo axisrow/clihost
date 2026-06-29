@@ -26,6 +26,7 @@ from ttydproxy.config import (
     CSRF_TOKEN_TTL,
     SECURE_COOKIES,
     HAPI_URL_FILE,
+    SSH_URL_FILE,
     MAX_UPLOAD_SIZE,
     UPLOAD_DIR,
     TTYD_ROUTE_PATTERN,
@@ -45,7 +46,7 @@ from ttydproxy.security import (
     user_exists,
     verify_pam_password,
 )
-from ttydproxy.views import load_hapi_url, render_login_page, render_menu_page, render_terminal_page, resolve_vkbd_enabled
+from ttydproxy.views import load_hapi_url, load_ssh_url, render_login_page, render_menu_page, render_terminal_page, resolve_vkbd_enabled
 
 
 _SERVER_START_TIME = time.time()
@@ -431,7 +432,8 @@ class TTYDProxyHandler(BaseHandler):
             return
         extra_headers, _csrf_token = self._auth_cookie_headers()
         hapi_url = load_hapi_url(HAPI_URL_FILE)
-        self.send_html(200, render_menu_page(username, hapi_url), extra_headers=extra_headers)
+        ssh_conn = load_ssh_url(SSH_URL_FILE)
+        self.send_html(200, render_menu_page(username, hapi_url, ssh_conn), extra_headers=extra_headers)
 
     def handle_ttyd(self, terminal_id):
         username = self._check_auth(redirect=True)

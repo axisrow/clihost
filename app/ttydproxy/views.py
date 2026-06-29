@@ -1,5 +1,6 @@
 """HTML rendering and template helpers for ttyd proxy pages."""
 import html as html_module
+import re
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -23,6 +24,22 @@ DEFAULT_TITLE = "clihost"
 # Placeholders substituted into every rendered page. {{TITLE}} defaults to the
 # neutral title here; pages that need a dynamic title (e.g. terminals) override it.
 BASE_REPLACEMENTS = {"{{FAVICON}}": FAVICON_LINKS, "{{TITLE}}": DEFAULT_TITLE}
+
+# Allowlist for the SSH connection string shown on the dashboard (issue #80).
+# The string is pasted into a shell by the user, so we accept ONLY two exact
+# grammars the tunnel writes (chisel / cloudflared). Anything else - arbitrary
+# ProxyCommand, -F, LocalCommand, extra options, non-numeric port, host with / or
+# :, shell metacharacters - fails to match and is rejected. re.fullmatch anchors
+# both ends, so no trailing/leading payload survives.
+_SSH_USER = r"[A-Za-z0-9._-]+"
+_SSH_HOST = r"[A-Za-z0-9.-]+"
+# 1. chisel: ssh -p <PORT> <USER>@<HOST>
+_SSH_CHISEL_RE = re.compile(rf"ssh -p [0-9]{{1,5}} {_SSH_USER}@{_SSH_HOST}")
+# 2. cloudflared: the ProxyCommand value is pinned to exactly this string, so a
+#    hostile ProxyCommand (executed locally by ssh before connecting) cannot ride it.
+_SSH_CLOUDFLARED_RE = re.compile(
+    rf'ssh -o ProxyCommand="cloudflared access ssh --hostname %h" {_SSH_USER}@{_SSH_HOST}'
+)
 
 
 @lru_cache(maxsize=None)
@@ -61,18 +78,24 @@ def render_login_page(csrf_token):
     return render_template("login.html", {"{{CSRF_TOKEN}}": csrf_token})
 
 
-def render_menu_page(username, hapi_url):
+def render_menu_page(username, hapi_url, ssh_conn=None):
     """Render the main dashboard menu."""
     if hapi_url:
         escaped_url = html_module.escape(hapi_url, quote=True)
         hapi_link = f'<a href="{escaped_url}" target="_blank" class="menu-link">HAPI Server</a>'
     else:
         hapi_link = ""  # without hapi the menu item disappears entirely (issue #63)
+    if ssh_conn:
+        escaped_conn = html_module.escape(ssh_conn, quote=True)
+        ssh_link = f'<code class="ssh-link">{escaped_conn}</code>'
+    else:
+        ssh_link = ""  # no tunnel -> no SSH block, like HAPI item disappears
     return render_template(
         "index.html",
         {
             "{{USERNAME}}": html_module.escape(username),
             "{{HAPI_LINK}}": hapi_link,
+            "{{SSH_LINK}}": ssh_link,
         },
     )
 
@@ -100,3 +123,29 @@ def load_hapi_url(url_file):
         return None
     return hapi_url
 
+
+def load_ssh_url(url_file):
+    """Read and validate the SSH connection-string file written by the tunnel.
+
+    The user copies this string into a shell, so it is accepted ONLY when it
+    matches one of two exact grammars (re.fullmatch, both ends anchored):
+      1. chisel:     ssh -p <PORT> <USER>@<HOST>
+      2. cloudflared: ssh -o ProxyCommand="cloudflared access ssh --hostname %h"
+                        <USER>@<HOST>
+    The cloudflared ProxyCommand value is pinned verbatim, so an arbitrary
+    ProxyCommand - which ssh executes locally before connecting (RCE) - cannot
+    pass. Any other option (-F, LocalCommand, extra flags), non-numeric port,
+    host containing / or :, and any shell metacharacter simply fail to match and
+    are rejected. Newlines/CR/NUL/control chars are rejected too (none are in the
+    allowed character classes). We never interpret the string, only display it.
+    """
+    try:
+        raw = Path(url_file).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    if _SSH_CHISEL_RE.fullmatch(candidate) or _SSH_CLOUDFLARED_RE.fullmatch(candidate):
+        return candidate
+    return None
