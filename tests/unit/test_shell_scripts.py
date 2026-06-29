@@ -13,6 +13,9 @@ DOCKERFILE = REPO_ROOT / "Dockerfile"
 CLI_PACKAGES = REPO_ROOT / "cli-packages.txt"
 INSTALL_CLI = REPO_ROOT / "bin/install-cli.sh"
 TMUX_WRAPPER = REPO_ROOT / "bin/tmux-wrapper.sh"
+GLM = REPO_ROOT / "bin/glm"
+README = REPO_ROOT / "README.md"
+CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 
 # Component keys whose INSTALL_<KEY> build args gate the modular image (issue #57).
 NPM_COMPONENT_KEYS = (
@@ -547,6 +550,73 @@ class TestClaudeConfigPersistence(unittest.TestCase):
         self.assertNotIn(".claude", body)
         # sanity: it does target the runner state files it is meant to clear.
         self.assertIn("runner.state.json", body)
+
+
+class TestClaudeAuthRootCause69(unittest.TestCase):
+    """Issue #69 — 'Claude Code auth keeps resetting'. The root cause was
+    established by reproducing it in Docker: the ONLY trigger is the persistent
+    volume being mounted at the parent `/home` instead of `/home/hapi`. A Docker
+    volume is seeded from the image only while empty, so once a platform's
+    persistent storage (Dokku/Railway) survives the first deploy and stays
+    non-empty, a `/home` mount is no longer re-seeded and the entrypoint recreates
+    `/home/hapi/.claude` empty on top of it — the saved login is gone. The three
+    rival hypotheses (entrypoint chown, cleanup_runner_state, glm leaking
+    ANTHROPIC_*) were all disproven. These tests pin the two artifacts that
+    actually prevent the bug — the credential path and the docs that warn against
+    the wrong mount point — plus the glm contract that keeps hypothesis #4 false.
+    """
+
+    def test_dockerfile_pins_claude_config_dir(self):
+        # Claude Code reads/writes credentials under CLAUDE_CONFIG_DIR; the whole
+        # persistence story depends on it living inside the home dir that the
+        # /home/hapi volume persists. Pin the exact path so a stray edit can't
+        # move credentials outside the persisted mount.
+        self.assertIn(
+            "CLAUDE_CONFIG_DIR=/home/hapi/.claude", DOCKERFILE.read_text()
+        )
+
+    def test_docs_warn_against_mounting_parent_home(self):
+        # The fix is operational (mount /home/hapi, not /home). It only lives in
+        # the docs, so pin the warning in both README and CLAUDE.md; if it is
+        # removed the footgun returns silently.
+        for path in (README, CLAUDE_MD):
+            text = path.read_text()
+            with self.subTest(doc=path.name):
+                self.assertIn("/home/hapi", text)
+                # an explicit "not/never the parent /home" caution must be present
+                self.assertRegex(
+                    text,
+                    re.compile(
+                        r"(not|never)\s+(the\s+parent\s+)?`?/home`?", re.IGNORECASE
+                    ),
+                )
+
+    def test_glm_does_not_leak_anthropic_env_into_normal_sessions(self):
+        # Hypothesis #4 (glm's ANTHROPIC_* override poisons the normal `claude`
+        # session) stays false ONLY because glm is a standalone wrapper that
+        # `exec`s claude — the exports replace the process and never return to a
+        # parent shell. Pin that contract: glm must end by exec-ing claude, and
+        # the ANTHROPIC_* exports must NOT be sourced into shell startup files.
+        glm = GLM.read_text()
+        self.assertRegex(glm, re.compile(r"^\s*exec\s+claude\b", re.MULTILINE))
+        # The exports must be the last things before exec (no command after exec
+        # could run in glm's env, and exec is the final line).
+        last_meaningful = [
+            ln.strip() for ln in glm.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ][-1]
+        self.assertTrue(
+            last_meaningful.startswith("exec claude"),
+            f"glm must end with 'exec claude', got: {last_meaningful!r}",
+        )
+        # ANTHROPIC_* / ZAI_TOKEN must not leak into global shell startup, where
+        # they WOULD poison every interactive `claude` invocation.
+        for path in (DOCKERFILE, ENTRYPOINT):
+            with self.subTest(file=path.name):
+                self.assertNotRegex(
+                    path.read_text(),
+                    re.compile(r"(ANTHROPIC_(BASE_URL|AUTH_TOKEN)|ZAI_TOKEN)"),
+                )
 
 
 class TestTmuxWrapperSandboxRegressions(unittest.TestCase):

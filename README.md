@@ -56,6 +56,15 @@ INSTALL_CODEX=false INSTALL_GEMINI=false ./build.sh
 
 Add persistent volume at `/home/hapi` via Railway dashboard → Service → Volumes.
 
+> **Mount the volume at exactly `/home/hapi`, not `/home`.** Mounting a persistent
+> volume at the parent `/home` breaks credential persistence on redeploy: a Docker
+> volume is only seeded from the image when it is *empty*, so once the platform's
+> persistent storage survives the first deploy and stays non-empty, subsequent
+> deploys do **not** re-copy the image's `/home/hapi`. The entrypoint then recreates
+> `/home/hapi/.claude` empty on top of the volume and the saved Claude Code login is
+> gone (it looks like "auth keeps resetting", issue #69). Mounting `/home/hapi`
+> directly keeps the home directory itself as the persisted unit and avoids this.
+
 ### Notes
 
 - By default SSH (port 22) is not reachable externally on Railway (no arbitrary port forwarding) — web terminal only. To get external SSH, enable the **external SSH tunnel** below (`SSH_TUNNEL_ENABLED=true`).
