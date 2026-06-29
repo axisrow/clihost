@@ -42,6 +42,7 @@ _SSH_CLOUDFLARED_RE = re.compile(
 )
 _HAPI_RELAY_URL_RE = re.compile(r"https://[A-Za-z0-9-]+\.relay\.hapi\.run")
 _HAPI_CLI_TOKEN_RE = re.compile(r'"cliApiToken"\s*:\s*"([^"]+)"')
+HAPI_SERVER_LOG_TAIL_BYTES = 8192
 
 
 @lru_cache(maxsize=None)
@@ -144,11 +145,21 @@ def build_hapi_url_from_runtime(server_log_text, settings_text):
 def load_runtime_hapi_url(server_log_file, settings_file):
     """Read live hapi runtime files and build the dashboard URL if available."""
     try:
-        server_log_text = Path(server_log_file).read_text(encoding="utf-8", errors="replace")
+        server_log_text = _read_text_tail(server_log_file, HAPI_SERVER_LOG_TAIL_BYTES)
         settings_text = Path(settings_file).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     return build_hapi_url_from_runtime(server_log_text, settings_text)
+
+
+def _read_text_tail(path, max_bytes):
+    """Read at most the trailing max_bytes from a text file."""
+    file_path = Path(path)
+    with file_path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - max_bytes))
+        return handle.read().decode("utf-8", errors="replace")
 
 
 def load_dashboard_hapi_url(hapi_home, url_file, hapi_available=True):

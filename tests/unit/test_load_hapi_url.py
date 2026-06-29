@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ttydproxy.views import (
     build_hapi_url_from_runtime,
+    HAPI_SERVER_LOG_TAIL_BYTES,
     load_dashboard_hapi_url,
     load_hapi_url,
     load_runtime_hapi_url,
@@ -104,6 +105,24 @@ class TestLoadRuntimeHapiUrl(unittest.TestCase):
                 load_runtime_hapi_url(server_log, settings),
                 "https://app.hapi.run/?hub=https%3A%2F%2Fmy-sub-01.relay.hapi.run&token=token-123",
             )
+
+    def test_reads_only_bounded_server_log_tail(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            server_log = root / "server.log"
+            settings = root / "settings.json"
+            old_url = "https://old-url.relay.hapi.run"
+            current_url = "https://current-url.relay.hapi.run"
+            server_log.write_text(
+                old_url + "\n" + ("x" * HAPI_SERVER_LOG_TAIL_BYTES) + "\n" + current_url + "\n",
+                encoding="utf-8",
+            )
+            settings.write_text('{"cliApiToken": "token-123"}', encoding="utf-8")
+
+            url = load_runtime_hapi_url(server_log, settings)
+
+            self.assertIn("current-url.relay.hapi.run", url)
+            self.assertNotIn("old-url.relay.hapi.run", url)
 
     def test_missing_files_return_none_without_exception(self):
         path = Path(tempfile.gettempdir()) / "clihost-missing-hapi-runtime"

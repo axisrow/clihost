@@ -67,6 +67,7 @@ FAVICON_ROUTES = {
     for icon in assets.FAVICONS
     if icon.body is not None
 }
+_HAPI_AVAILABLE = which("hapi") is not None
 
 
 def _get_memory_rss_mb():
@@ -435,7 +436,7 @@ class TTYDProxyHandler(BaseHandler):
         hapi_url = load_dashboard_hapi_url(
             HAPI_HOME,
             HAPI_URL_FILE,
-            hapi_available=which("hapi") is not None,
+            hapi_available=_HAPI_AVAILABLE,
         )
         ssh_conn = load_ssh_url(SSH_URL_FILE)
         self.send_html(200, render_menu_page(username, hapi_url, ssh_conn), extra_headers=extra_headers)
