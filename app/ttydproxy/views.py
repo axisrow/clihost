@@ -3,7 +3,7 @@ import html as html_module
 import re
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from ttydproxy import assets
 from ttydproxy.security import env_bool
@@ -40,6 +40,8 @@ _SSH_CHISEL_RE = re.compile(rf"ssh -p [0-9]{{1,5}} {_SSH_USER}@{_SSH_HOST}")
 _SSH_CLOUDFLARED_RE = re.compile(
     rf'ssh -o ProxyCommand="cloudflared access ssh --hostname %h" {_SSH_USER}@{_SSH_HOST}'
 )
+_HAPI_RELAY_URL_RE = re.compile(r"https://[A-Za-z0-9-]+\.relay\.hapi\.run")
+_HAPI_CLI_TOKEN_RE = re.compile(r'"cliApiToken"\s*:\s*"([^"]+)"')
 
 
 @lru_cache(maxsize=None)
@@ -122,6 +124,42 @@ def load_hapi_url(url_file):
     if parsed_url.scheme not in ("http", "https"):
         return None
     return hapi_url
+
+
+def build_hapi_url_from_runtime(server_log_text, settings_text):
+    """Build a HAPI app URL from the live relay log and hapi settings text."""
+    relay_urls = _HAPI_RELAY_URL_RE.findall(server_log_text or "")
+    token_match = _HAPI_CLI_TOKEN_RE.search(settings_text or "")
+    if not relay_urls or not token_match:
+        return None
+    relay_url = relay_urls[-1]
+    token = token_match.group(1)
+    if not token:
+        return None
+    encoded_relay_url = quote(relay_url, safe="")
+    encoded_token = quote(token, safe="")
+    return f"https://app.hapi.run/?hub={encoded_relay_url}&token={encoded_token}"
+
+
+def load_runtime_hapi_url(server_log_file, settings_file):
+    """Read live hapi runtime files and build the dashboard URL if available."""
+    try:
+        server_log_text = Path(server_log_file).read_text(encoding="utf-8", errors="replace")
+        settings_text = Path(settings_file).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return build_hapi_url_from_runtime(server_log_text, settings_text)
+
+
+def load_dashboard_hapi_url(hapi_home, url_file, hapi_available=True):
+    """Resolve the dashboard HAPI link from live runtime files, then fallback file."""
+    if not hapi_available:
+        return None
+    runtime_url = load_runtime_hapi_url(
+        Path(hapi_home) / "server.log",
+        Path(hapi_home) / "settings.json",
+    )
+    return runtime_url or load_hapi_url(url_file)
 
 
 def load_ssh_url(url_file):
