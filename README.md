@@ -78,6 +78,7 @@ Add persistent volume at `/home/hapi` via Railway dashboard → Service → Volu
 
 - By default SSH (port 22) is not reachable externally on Railway (no arbitrary port forwarding) — web terminal only. To get external SSH, enable the **external SSH tunnel** below (`SSH_TUNNEL_ENABLED=true`).
 - `PORT` is injected automatically by Railway, `ttyd_proxy.py` reads it via `os.environ`
+- When `hapi` is installed, the dashboard builds the **HAPI Server** link on demand from `/home/hapi/.hapi/server.log` (latest `https://*.relay.hapi.run`) and `/home/hapi/.hapi/settings.json` (`cliApiToken`). `/home/hapi/url` remains a legacy fallback, but the dashboard no longer depends on the entrypoint's one-shot URL writer. If hapi is absent or the URL/token is not available yet, the menu item is omitted.
 
 ## Архитектура
 
