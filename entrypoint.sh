@@ -44,6 +44,31 @@ HAPI_RUN_PATH="/usr/local/bin:/usr/bin:/bin"
 
 echo "Starting clihost container..."
 
+# Warn loudly if the persistent volume is mounted at the parent /home instead of
+# /home/hapi (issue #69). A Docker volume is seeded from the image only while
+# empty, so a /home volume that survives one deploy stops being re-seeded — the
+# entrypoint then recreates /home/hapi/.claude empty on top of it and the saved
+# Claude Code login is lost on every redeploy ("auth keeps resetting"). We detect
+# it from /proc/mounts: a separate mount AT /home with no separate mount at
+# /home/hapi means the volume is one level too high. Warn only (never abort) —
+# the container is still usable, the user just won't get credential persistence.
+warn_if_volume_mounted_at_parent_home() {
+  [ -r /proc/mounts ] || return 0
+  # A mount line's 2nd field is the mountpoint; match it exactly.
+  if awk '$2 == "/home" {found=1} END {exit !found}' /proc/mounts \
+     && ! awk '$2 == "/home/hapi" {found=1} END {exit !found}' /proc/mounts; then
+    echo "================================================================" >&2
+    echo "WARNING: a volume is mounted at /home, NOT at /home/hapi." >&2
+    echo "  Claude Code credentials (and other home-dir state) will NOT" >&2
+    echo "  persist across redeploys: a non-empty /home volume is no longer" >&2
+    echo "  seeded from the image, so ~/.claude is recreated empty each time" >&2
+    echo "  and the login keeps resetting (issue #69)." >&2
+    echo "  Fix: mount the persistent volume at exactly /home/hapi." >&2
+    echo "================================================================" >&2
+  fi
+}
+warn_if_volume_mounted_at_parent_home
+
 # Guarantee HAPI_USER owns its own $HOME (issue #65). On a fresh/empty /home
 # volume the very first `mkdir -p` of a subdir (e.g. .config/gh) creates the
 # parent /home/hapi as root, and a later `chown -R` on the subdir never touches

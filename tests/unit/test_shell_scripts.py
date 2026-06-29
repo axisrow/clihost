@@ -591,6 +591,30 @@ class TestClaudeAuthRootCause69(unittest.TestCase):
                     ),
                 )
 
+    def test_entrypoint_warns_on_parent_home_mount(self):
+        # The footgun is a runtime condition, so the entrypoint must detect the
+        # wrong mount and warn on the console (issue #69), not only the docs.
+        text = ENTRYPOINT.read_text()
+        # The detector function exists and is actually called.
+        self.assertIn("warn_if_volume_mounted_at_parent_home() {", text)
+        self.assertRegex(
+            text,
+            re.compile(r"^warn_if_volume_mounted_at_parent_home$", re.MULTILINE),
+        )
+        # It reads /proc/mounts and keys off the exact mountpoints.
+        self.assertIn("/proc/mounts", text)
+        self.assertRegex(text, re.compile(r'\$2\s*==\s*"/home"'))
+        self.assertRegex(text, re.compile(r'\$2\s*==\s*"/home/hapi"'))
+        # It must warn, and must NOT abort (warn-only: no-volume is valid too).
+        func = re.search(
+            r"warn_if_volume_mounted_at_parent_home\(\)\s*\{(.*?)\n\}",
+            text, re.DOTALL,
+        )
+        self.assertIsNotNone(func, "detector function body not found")
+        body = func.group(1)
+        self.assertIn("WARNING", body)
+        self.assertNotIn("exit 1", body)
+
     def test_glm_does_not_leak_anthropic_env_into_normal_sessions(self):
         # Hypothesis #4 (glm's ANTHROPIC_* override poisons the normal `claude`
         # session) stays false ONLY because glm is a standalone wrapper that

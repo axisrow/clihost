@@ -64,6 +64,8 @@ Add persistent volume at `/home/hapi` via Railway dashboard → Service → Volu
 > `/home/hapi/.claude` empty on top of the volume and the saved Claude Code login is
 > gone (it looks like "auth keeps resetting", issue #69). Mounting `/home/hapi`
 > directly keeps the home directory itself as the persisted unit and avoids this.
+> The entrypoint also detects this wrong mount at startup and prints a loud
+> `WARNING: a volume is mounted at /home, NOT at /home/hapi` to the container logs.
 
 ### Notes
 
