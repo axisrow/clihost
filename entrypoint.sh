@@ -41,6 +41,7 @@ HAPI_USER_HOME="/home/${HAPI_USER}"
 : "${HAPI_HOME:=${HAPI_USER_HOME}/.hapi}"
 : "${UPLOAD_DIR:=${CLEANUP_ROOT}/.uploads}"
 HAPI_RUN_PATH="/usr/local/bin:/usr/bin:/bin"
+CLAUDE_SETTINGS_TEMPLATE="${CLAUDE_SETTINGS_TEMPLATE:-/etc/skel/.claude/settings.json}"
 
 echo "Starting clihost container..."
 
@@ -119,6 +120,14 @@ EOF
   fi
 }
 
+ensure_claude_settings() {
+  local settings_file="${HAPI_USER_HOME}/.claude/settings.json"
+  if [ ! -f "${settings_file}" ] && [ -f "${CLAUDE_SETTINGS_TEMPLATE}" ]; then
+    cp "${CLAUDE_SETTINGS_TEMPLATE}" "${settings_file}"
+    chown "${HAPI_USER}:${HAPI_USER}" "${settings_file}"
+  fi
+}
+
 run_as_hapi() {
   local command="$1"
   runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"${HAPI_RUN_PATH}\" HAPI_HOME=\"${HAPI_HOME}\" ${command}"
@@ -173,6 +182,7 @@ ensure_home_owned
 ensure_dir_owned "${HAPI_USER_HOME}/.config/gh"
 ensure_dir_owned "${HAPI_USER_HOME}/.claude"
 ensure_local_bin_env
+ensure_claude_settings
 
 # Ensure tmux config exists (volume mount may overwrite it)
 if [ ! -f "${HAPI_USER_HOME}/.tmux.conf" ]; then

@@ -1,4 +1,5 @@
 """Static checks for shell scripts (syntax + known-bug regressions)."""
+import json
 import os
 import pathlib
 import re
@@ -16,6 +17,7 @@ TMUX_WRAPPER = REPO_ROOT / "bin/tmux-wrapper.sh"
 GLM = REPO_ROOT / "bin/glm"
 README = REPO_ROOT / "README.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+CLAUDE_SETTINGS_TEMPLATE = REPO_ROOT / "config/claude-settings.json"
 
 # Component keys whose INSTALL_<KEY> build args gate the modular image (issue #57).
 NPM_COMPONENT_KEYS = (
@@ -550,6 +552,123 @@ class TestClaudeConfigPersistence(unittest.TestCase):
         self.assertNotIn(".claude", body)
         # sanity: it does target the runner state files it is meant to clear.
         self.assertIn("runner.state.json", body)
+
+
+class TestClaudeNativeZaiConfig(unittest.TestCase):
+    """Native Claude Code configuration for z.ai Coding Plan (issue #60)."""
+
+    def _extract_helper(self):
+        text = ENTRYPOINT.read_text()
+        match = re.search(
+            r"^ensure_claude_settings\(\) \{\n.*?^\}",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, "ensure_claude_settings not found in entrypoint.sh")
+        assert match is not None
+        return match.group(0)
+
+    def _run_helper(self, settings_content=None, local_content="local hooks"):
+        helper = self._extract_helper()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            home = tmp_path / "home" / "hapi"
+            claude_dir = home / ".claude"
+            claude_dir.mkdir(parents=True)
+            template = tmp_path / "claude-settings.json"
+            template.write_text('{"env":{"from":"template"}}\n')
+            settings = claude_dir / "settings.json"
+            if settings_content is not None:
+                settings.write_text(settings_content)
+            settings_local = claude_dir / "settings.local.json"
+            settings_local.write_text(local_content)
+            chown_log = tmp_path / "chown.log"
+            fake_chown = tmp_path / "chown"
+            fake_chown.write_text(
+                "#!/bin/bash\n"
+                'for a in "$@"; do case "$a" in -*) ;; *:*) ;; '
+                f'*) echo "$a" >> "{chown_log}" ;; esac; done\n'
+            )
+            fake_chown.chmod(0o755)
+            script = (
+                "set -euo pipefail\n"
+                'HAPI_USER="hapi"\n'
+                f'HAPI_USER_HOME="{home}"\n'
+                f'CLAUDE_SETTINGS_TEMPLATE="{template}"\n'
+                f"{helper}\n"
+                "ensure_claude_settings\n"
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            chown_targets = (
+                chown_log.read_text().splitlines() if chown_log.exists() else []
+            )
+            return {
+                "template": template.read_text(),
+                "settings": settings.read_text() if settings.exists() else None,
+                "settings_local": settings_local.read_text(),
+                "chown_targets": chown_targets,
+                "settings_path": str(settings),
+            }
+
+    def test_template_uses_zai_coding_plan_without_token(self):
+        data = json.loads(CLAUDE_SETTINGS_TEMPLATE.read_text())
+        self.assertEqual(
+            data,
+            {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.z.ai/api/coding/paas/v4",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2[1m]",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2[1m]",
+                    "API_TIMEOUT_MS": "3000000",
+                    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
+                }
+            },
+        )
+        text = CLAUDE_SETTINGS_TEMPLATE.read_text()
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", text)
+        self.assertNotIn("ZAI_TOKEN", text)
+
+    def test_dockerfile_copies_claude_settings_template_only(self):
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn(
+            "COPY config/claude-settings.json /etc/skel/.claude/settings.json",
+            dockerfile,
+        )
+        self.assertNotRegex(
+            dockerfile,
+            re.compile(r"(ANTHROPIC_(BASE_URL|AUTH_TOKEN)|ZAI_TOKEN)"),
+        )
+
+    def test_glm_wrapper_stays_compatible_with_zai_token(self):
+        glm = GLM.read_text()
+        self.assertIn("ANTHROPIC_BASE_URL=https://api.z.ai/api/coding/paas/v4", glm)
+        self.assertIn(
+            'ANTHROPIC_AUTH_TOKEN="${ZAI_TOKEN:?ZAI_TOKEN environment variable is required}"',
+            glm,
+        )
+        self.assertIn("ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.7", glm)
+        self.assertIn("ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2[1m]", glm)
+        self.assertIn("ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2[1m]", glm)
+        self.assertIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000", glm)
+
+    def test_entrypoint_copies_template_when_settings_missing(self):
+        result = self._run_helper()
+        self.assertEqual(result["settings"], result["template"])
+        self.assertEqual(result["settings_local"], "local hooks")
+        self.assertIn(result["settings_path"], result["chown_targets"])
+
+    def test_entrypoint_does_not_overwrite_existing_settings(self):
+        existing = '{"env":{"custom":"user"}}\n'
+        result = self._run_helper(settings_content=existing)
+        self.assertEqual(result["settings"], existing)
+        self.assertEqual(result["settings_local"], "local hooks")
+        self.assertNotIn(result["settings_path"], result["chown_targets"])
 
 
 class TestClaudeAuthRootCause69(unittest.TestCase):
