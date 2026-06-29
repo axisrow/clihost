@@ -13,6 +13,9 @@ DOCKERFILE = REPO_ROOT / "Dockerfile"
 CLI_PACKAGES = REPO_ROOT / "cli-packages.txt"
 INSTALL_CLI = REPO_ROOT / "bin/install-cli.sh"
 TMUX_WRAPPER = REPO_ROOT / "bin/tmux-wrapper.sh"
+GLM = REPO_ROOT / "bin/glm"
+README = REPO_ROOT / "README.md"
+CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 
 # Component keys whose INSTALL_<KEY> build args gate the modular image (issue #57).
 NPM_COMPONENT_KEYS = (
@@ -547,6 +550,157 @@ class TestClaudeConfigPersistence(unittest.TestCase):
         self.assertNotIn(".claude", body)
         # sanity: it does target the runner state files it is meant to clear.
         self.assertIn("runner.state.json", body)
+
+
+class TestClaudeAuthRootCause69(unittest.TestCase):
+    """Issue #69 — 'Claude Code auth keeps resetting'. The root cause was
+    established by reproducing it in Docker: the ONLY trigger is the persistent
+    volume being mounted at the parent `/home` instead of `/home/hapi`. A Docker
+    volume is seeded from the image only while empty, so once a platform's
+    persistent storage (Dokku/Railway) survives the first deploy and stays
+    non-empty, a `/home` mount is no longer re-seeded and the entrypoint recreates
+    `/home/hapi/.claude` empty on top of it — the saved login is gone. The three
+    rival hypotheses (entrypoint chown, cleanup_runner_state, glm leaking
+    ANTHROPIC_*) were all disproven. These tests pin the two artifacts that
+    actually prevent the bug — the credential path and the docs that warn against
+    the wrong mount point — plus the glm contract that keeps hypothesis #4 false.
+    """
+
+    def test_dockerfile_pins_claude_config_dir(self):
+        # Claude Code reads/writes credentials under CLAUDE_CONFIG_DIR; the whole
+        # persistence story depends on it living inside the home dir that the
+        # /home/hapi volume persists. Pin the exact path so a stray edit can't
+        # move credentials outside the persisted mount.
+        self.assertIn(
+            "CLAUDE_CONFIG_DIR=/home/hapi/.claude", DOCKERFILE.read_text()
+        )
+
+    def test_docs_warn_against_mounting_parent_home(self):
+        # The fix is operational (mount /home/hapi, not /home). It only lives in
+        # the docs, so pin the warning in both README and CLAUDE.md; if it is
+        # removed the footgun returns silently.
+        for path in (README, CLAUDE_MD):
+            text = path.read_text()
+            with self.subTest(doc=path.name):
+                self.assertIn("/home/hapi", text)
+                # an explicit "not/never the parent /home" caution must be present
+                self.assertRegex(
+                    text,
+                    re.compile(
+                        r"(not|never)\s+(the\s+parent\s+)?`?/home`?", re.IGNORECASE
+                    ),
+                )
+
+    def test_entrypoint_warns_on_parent_home_mount(self):
+        # The footgun is a runtime condition, so the entrypoint must detect the
+        # wrong mount and warn on the console (issue #69), not only the docs.
+        text = ENTRYPOINT.read_text()
+        # The detector function exists and is actually called.
+        self.assertIn("warn_if_volume_mounted_at_parent_home() {", text)
+        self.assertRegex(
+            text,
+            re.compile(r"^warn_if_volume_mounted_at_parent_home$", re.MULTILINE),
+        )
+        # It reads /proc/mounts and keys off the exact mountpoints.
+        self.assertIn("/proc/mounts", text)
+        self.assertRegex(text, re.compile(r'\$2\s*==\s*"/home"'))
+        self.assertRegex(text, re.compile(r'\$2\s*==\s*"/home/hapi"'))
+        # It must warn, and must NOT abort (warn-only: no-volume is valid too).
+        func = re.search(
+            r"warn_if_volume_mounted_at_parent_home\(\)\s*\{(.*?)\n\}",
+            text, re.DOTALL,
+        )
+        self.assertIsNotNone(func, "detector function body not found")
+        body = func.group(1)
+        self.assertIn("WARNING", body)
+        self.assertNotIn("exit 1", body)
+
+    def test_warning_explains_volume_migration(self):
+        # A naive "mount at /home/hapi" fix orphans an existing /home volume's
+        # data (it ends up at /home/hapi/hapi/, invisible to the app). The
+        # warning AND both docs must call out the migration step (Codex finding,
+        # PR #86 review). Pin the migration guidance everywhere the fix appears.
+        entry = ENTRYPOINT.read_text()
+        self.assertRegex(entry, re.compile(r"MIGRATION", re.IGNORECASE))
+        self.assertIn("/home/hapi/hapi", entry)
+        for path in (README, CLAUDE_MD):
+            with self.subTest(doc=path.name):
+                text = path.read_text()
+                self.assertRegex(text, re.compile(r"migrat", re.IGNORECASE))
+                self.assertIn("/home/hapi/hapi", text)
+
+    def _run_detector(self, mounts_lines):
+        # Extract the real detector function from entrypoint.sh, point its
+        # /proc/mounts read at a temp file, and execute it under the same
+        # `set -euo pipefail` the entrypoint uses. This closes the coverage gap
+        # the static test leaves: it exercises the actual awk logic, not strings.
+        text = ENTRYPOINT.read_text()
+        func = re.search(
+            r"(warn_if_volume_mounted_at_parent_home\(\)\s*\{.*?\n\})",
+            text, re.DOTALL,
+        )
+        self.assertIsNotNone(func, "detector function not found")
+        body = func.group(1).replace("/proc/mounts", "${MOUNTS_FILE}")
+        with tempfile.TemporaryDirectory() as tmp:
+            mounts = pathlib.Path(tmp) / "mounts"
+            mounts.write_text("\n".join(mounts_lines) + "\n")
+            script = (
+                "set -euo pipefail\n"
+                f'MOUNTS_FILE="{mounts}"\n'
+                f"{body}\n"
+                "warn_if_volume_mounted_at_parent_home\n"
+            )
+            return subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True,
+            )
+
+    def test_detector_warns_only_on_parent_home_mount(self):
+        # Behavioral: run the real awk logic across every realistic mount table.
+        home = "/dev/sda1 /home ext4 rw 0 0"
+        hapi = "/dev/sda1 /home/hapi ext4 rw 0 0"
+        sibling = "/dev/sda1 /home/hapi-other ext4 rw 0 0"
+        proc = "proc /proc proc rw 0 0"
+        cases = {
+            "volume_at_home": ([proc, home], True),          # the bug → warn
+            "volume_at_hapi": ([proc, hapi], False),         # correct → silent
+            "both_mounted": ([proc, home, hapi], False),     # persistence ok → silent
+            "no_volume": ([proc], False),                    # valid → silent
+            "sibling_prefix": ([proc, sibling], False),      # no prefix bleed → silent
+        }
+        for name, (lines, should_warn) in cases.items():
+            with self.subTest(case=name):
+                result = self._run_detector(lines)
+                # warn-only: the function must never abort the container start.
+                self.assertEqual(result.returncode, 0, result.stderr)
+                warned = "WARNING: a volume is mounted at /home" in result.stderr
+                self.assertEqual(warned, should_warn, result.stderr)
+
+    def test_glm_does_not_leak_anthropic_env_into_normal_sessions(self):
+        # Hypothesis #4 (glm's ANTHROPIC_* override poisons the normal `claude`
+        # session) stays false ONLY because glm is a standalone wrapper that
+        # `exec`s claude — the exports replace the process and never return to a
+        # parent shell. Pin that contract: glm must end by exec-ing claude, and
+        # the ANTHROPIC_* exports must NOT be sourced into shell startup files.
+        glm = GLM.read_text()
+        self.assertRegex(glm, re.compile(r"^\s*exec\s+claude\b", re.MULTILINE))
+        # The exports must be the last things before exec (no command after exec
+        # could run in glm's env, and exec is the final line).
+        last_meaningful = [
+            ln.strip() for ln in glm.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ][-1]
+        self.assertTrue(
+            last_meaningful.startswith("exec claude"),
+            f"glm must end with 'exec claude', got: {last_meaningful!r}",
+        )
+        # ANTHROPIC_* / ZAI_TOKEN must not leak into global shell startup, where
+        # they WOULD poison every interactive `claude` invocation.
+        for path in (DOCKERFILE, ENTRYPOINT):
+            with self.subTest(file=path.name):
+                self.assertNotRegex(
+                    path.read_text(),
+                    re.compile(r"(ANTHROPIC_(BASE_URL|AUTH_TOKEN)|ZAI_TOKEN)"),
+                )
 
 
 class TestTmuxWrapperSandboxRegressions(unittest.TestCase):
