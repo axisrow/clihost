@@ -66,6 +66,13 @@ Add persistent volume at `/home/hapi` via Railway dashboard → Service → Volu
 > directly keeps the home directory itself as the persisted unit and avoids this.
 > The entrypoint also detects this wrong mount at startup and prints a loud
 > `WARNING: a volume is mounted at /home, NOT at /home/hapi` to the container logs.
+>
+> **Migrating an existing `/home` volume:** if you already ran with a volume at
+> `/home`, your data lives under that volume's `hapi/` subdirectory. Do **not** just
+> retarget the same volume to `/home/hapi` — its contents would then land at
+> `/home/hapi/hapi/` and stay invisible to the app (the very state you wanted to keep
+> looks lost). First move the volume's `hapi/` contents up to its root, or copy them
+> into a fresh volume mounted at `/home/hapi`.
 
 ### Notes
 

@@ -64,6 +64,11 @@ warn_if_volume_mounted_at_parent_home() {
     echo "  seeded from the image, so ~/.claude is recreated empty each time" >&2
     echo "  and the login keeps resetting (issue #69)." >&2
     echo "  Fix: mount the persistent volume at exactly /home/hapi." >&2
+    echo "  MIGRATION: this /home volume already holds your data under its" >&2
+    echo "  'hapi/' subdir. If you simply retarget the SAME volume to" >&2
+    echo "  /home/hapi, that data ends up at /home/hapi/hapi/ and stays" >&2
+    echo "  invisible to the app. First move the volume's 'hapi/' contents" >&2
+    echo "  up to its root (or copy them into a fresh /home/hapi volume)." >&2
     echo "================================================================" >&2
   fi
 }

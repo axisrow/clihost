@@ -615,6 +615,66 @@ class TestClaudeAuthRootCause69(unittest.TestCase):
         self.assertIn("WARNING", body)
         self.assertNotIn("exit 1", body)
 
+    def test_warning_explains_volume_migration(self):
+        # A naive "mount at /home/hapi" fix orphans an existing /home volume's
+        # data (it ends up at /home/hapi/hapi/, invisible to the app). The
+        # warning AND both docs must call out the migration step (Codex finding,
+        # PR #86 review). Pin the migration guidance everywhere the fix appears.
+        entry = ENTRYPOINT.read_text()
+        self.assertRegex(entry, re.compile(r"MIGRATION", re.IGNORECASE))
+        self.assertIn("/home/hapi/hapi", entry)
+        for path in (README, CLAUDE_MD):
+            with self.subTest(doc=path.name):
+                text = path.read_text()
+                self.assertRegex(text, re.compile(r"migrat", re.IGNORECASE))
+                self.assertIn("/home/hapi/hapi", text)
+
+    def _run_detector(self, mounts_lines):
+        # Extract the real detector function from entrypoint.sh, point its
+        # /proc/mounts read at a temp file, and execute it under the same
+        # `set -euo pipefail` the entrypoint uses. This closes the coverage gap
+        # the static test leaves: it exercises the actual awk logic, not strings.
+        text = ENTRYPOINT.read_text()
+        func = re.search(
+            r"(warn_if_volume_mounted_at_parent_home\(\)\s*\{.*?\n\})",
+            text, re.DOTALL,
+        )
+        self.assertIsNotNone(func, "detector function not found")
+        body = func.group(1).replace("/proc/mounts", "${MOUNTS_FILE}")
+        with tempfile.TemporaryDirectory() as tmp:
+            mounts = pathlib.Path(tmp) / "mounts"
+            mounts.write_text("\n".join(mounts_lines) + "\n")
+            script = (
+                "set -euo pipefail\n"
+                f'MOUNTS_FILE="{mounts}"\n'
+                f"{body}\n"
+                "warn_if_volume_mounted_at_parent_home\n"
+            )
+            return subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True,
+            )
+
+    def test_detector_warns_only_on_parent_home_mount(self):
+        # Behavioral: run the real awk logic across every realistic mount table.
+        home = "/dev/sda1 /home ext4 rw 0 0"
+        hapi = "/dev/sda1 /home/hapi ext4 rw 0 0"
+        sibling = "/dev/sda1 /home/hapi-other ext4 rw 0 0"
+        proc = "proc /proc proc rw 0 0"
+        cases = {
+            "volume_at_home": ([proc, home], True),          # the bug → warn
+            "volume_at_hapi": ([proc, hapi], False),         # correct → silent
+            "both_mounted": ([proc, home, hapi], False),     # persistence ok → silent
+            "no_volume": ([proc], False),                    # valid → silent
+            "sibling_prefix": ([proc, sibling], False),      # no prefix bleed → silent
+        }
+        for name, (lines, should_warn) in cases.items():
+            with self.subTest(case=name):
+                result = self._run_detector(lines)
+                # warn-only: the function must never abort the container start.
+                self.assertEqual(result.returncode, 0, result.stderr)
+                warned = "WARNING: a volume is mounted at /home" in result.stderr
+                self.assertEqual(warned, should_warn, result.stderr)
+
     def test_glm_does_not_leak_anthropic_env_into_normal_sessions(self):
         # Hypothesis #4 (glm's ANTHROPIC_* override poisons the normal `claude`
         # session) stays false ONLY because glm is a standalone wrapper that
