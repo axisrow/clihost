@@ -105,7 +105,7 @@ run_remote_preflight() {
   shift
   local -a ssh_args=("$@")
 
-  "${ssh_args[@]}" "${target}" bash -s -- "${REMOTE_HOME}" "/proc/mounts" <<'REMOTE'
+  "${ssh_args[@]}" -- "${target}" bash -s -- "${REMOTE_HOME}" "/proc/mounts" <<'REMOTE'
 set -euo pipefail
 
 die() {
@@ -241,6 +241,15 @@ main() {
 
   [ -n "${command}" ] || { usage; die "missing subcommand: pull or push"; }
   [ -n "${target}" ] || die "set --target or CLIHOST_SSH_TARGET"
+  # Reject an option-like target (leading '-'). printf %q protects against SHELL
+  # injection, but not OPTION injection: ssh/rsync parse a leading-dash argument
+  # as a flag, so a target like `-oProxyCommand=<cmd>` runs <cmd> LOCALLY on the
+  # host during preflight — before any mount/symlink guard. Same class as the
+  # dashboard ProxyCommand issue (#85). Guard the target, and pass `--` before the
+  # host in ssh and before the positional operands in rsync (see below).
+  case "${target}" in
+    -*) die "SSH target must not start with '-' (got: ${target})" ;;
+  esac
   case "${ssh_port}" in
     ""|*[!0-9]*) [ -z "${ssh_port}" ] || die "SSH port must be numeric: ${ssh_port}" ;;
   esac
@@ -311,7 +320,9 @@ main() {
     echo "Pushing ${SYNC_LABEL} from ${target}:${REMOTE_HOME} to host (${mode})"
   fi
 
-  rsync "${rsync_args[@]}" "${source}" "${destination}"
+  # `--` ends rsync option parsing so a `-`-leading source/dest (option injection,
+  # e.g. via a hostile target) is treated as a path operand, not a flag.
+  rsync "${rsync_args[@]}" -- "${source}" "${destination}"
 }
 
 main "$@"

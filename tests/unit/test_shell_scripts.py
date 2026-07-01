@@ -822,6 +822,41 @@ class TestClihostSyncScript(unittest.TestCase):
         self.assertIn("symlink", out["result"].stderr)
         self.assertEqual(out["rsync_args"], [])
 
+    def test_option_like_target_is_rejected_before_ssh_or_rsync(self):
+        # Codex + Claude finding (PR #96, both reproduced host RCE): printf %q
+        # guards SHELL injection but not OPTION injection — ssh/rsync parse a
+        # leading-dash target as a flag, so `-oProxyCommand=<cmd>` executes <cmd>
+        # LOCALLY during preflight, before any mount/symlink guard. Same class as
+        # the dashboard ProxyCommand issue (#85). The script must reject a target
+        # starting with '-' and never reach ssh/rsync. A canary file proves the
+        # ProxyCommand never ran.
+        with tempfile.TemporaryDirectory() as canary_dir:
+            canary = pathlib.Path(canary_dir) / "PWNED"
+            env = dict(os.environ)
+            # a real ssh would run this ProxyCommand locally on an option-like target
+            hostile = f'-oProxyCommand=touch {canary}'
+            env["CLIHOST_SSH_TARGET"] = hostile
+            # keep a real HOME so arg-parse reaches the target validation
+            with tempfile.TemporaryDirectory() as home:
+                (pathlib.Path(home) / ".gitconfig").write_text("")
+                env["HOME"] = home
+                result = subprocess.run(
+                    ["bash", str(CLIHOST_SYNC), "pull"],
+                    capture_output=True, text=True, env=env,
+                )
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("must not start with '-'", result.stderr)
+            self.assertFalse(canary.exists(),
+                             "ProxyCommand executed — option injection not blocked")
+
+    def test_ssh_and_rsync_calls_use_end_of_options_separator(self):
+        # Defence-in-depth alongside the target reject: the ssh preflight and the
+        # rsync invocation both pass `--` before the host/positional operands so a
+        # `-`-leading value can never be parsed as a flag.
+        text = CLIHOST_SYNC.read_text()
+        self.assertRegex(text, r'\$\{ssh_args\[@\]\}"\s+--\s+"\$\{target\}"')
+        self.assertRegex(text, r'rsync "\$\{rsync_args\[@\]\}"\s+--\s+')
+
     def test_dockerfile_installs_container_sync_script(self):
         dockerfile = DOCKERFILE.read_text()
         self.assertIn("COPY bin/clihost-sync.sh /bin/clihost-sync.sh", dockerfile)
