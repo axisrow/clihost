@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import re
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -515,6 +516,174 @@ class TestEntrypointHomeOwnershipBehaviour(unittest.TestCase):
                     target == home or target.startswith(f"{home}/"),
                     f"chown escaped HAPI_USER_HOME: {target}",
                 )
+
+
+class TestSyncFoundationBootstrap(unittest.TestCase):
+    """Bootstrap contract for sync foundation directories (issue #91).
+
+    Sources the real entrypoint helpers and runs them with fake chown/chmod
+    binaries on PATH, so ownership/mode intent is proven without root or Docker.
+    """
+
+    def _extract_helpers(self):
+        text = ENTRYPOINT.read_text()
+        helpers = []
+        for name in ("ensure_dir_owned", "ensure_ssh_dir", "ensure_gitconfig_file"):
+            match = re.search(
+                rf"^{name}\(\) \{{\n.*?^\}}", text, re.MULTILINE | re.DOTALL
+            )
+            self.assertIsNotNone(match, f"{name} not found in entrypoint.sh")
+            helpers.append(match.group(0))
+        return "\n\n".join(helpers)
+
+    def _run_helpers(self, existing_gitconfig=None):
+        helpers = self._extract_helpers()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            home = tmp_path / "home" / "hapi"
+            home.mkdir(parents=True)
+            gitconfig = home / ".gitconfig"
+            if existing_gitconfig is not None:
+                gitconfig.write_text(existing_gitconfig)
+
+            chown_log = tmp_path / "chown.log"
+            chmod_log = tmp_path / "chmod.log"
+
+            fake_chown = tmp_path / "chown"
+            fake_chown.write_text(
+                "#!/bin/bash\n"
+                'printf "%%s\\n" "$*" >> "%s"\n' % chown_log
+            )
+            fake_chown.chmod(0o755)
+
+            fake_chmod = tmp_path / "chmod"
+            fake_chmod.write_text(
+                "#!/bin/bash\n"
+                'printf "%%s\\n" "$*" >> "%s"\n'
+                'exec /bin/chmod "$@"\n' % chmod_log
+            )
+            fake_chmod.chmod(0o755)
+
+            script = (
+                "set -euo pipefail\n"
+                'HAPI_USER="hapi"\n'
+                f'HAPI_USER_HOME="{home}"\n'
+                f"{helpers}\n"
+                "ensure_ssh_dir\n"
+                "ensure_gitconfig_file\n"
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            ssh_dir = home / ".ssh"
+            return {
+                "home": str(home),
+                "ssh": str(ssh_dir),
+                "ssh_is_dir": ssh_dir.is_dir(),
+                "ssh_mode": stat.S_IMODE(ssh_dir.stat().st_mode)
+                if ssh_dir.exists() else None,
+                "gitconfig": str(gitconfig),
+                "gitconfig_is_file": gitconfig.is_file(),
+                "gitconfig_content": gitconfig.read_text()
+                if gitconfig.exists() else None,
+                "chown": chown_log.read_text().splitlines()
+                if chown_log.exists() else [],
+                "chmod": chmod_log.read_text().splitlines()
+                if chmod_log.exists() else [],
+            }
+
+    def test_dockerfile_installs_rsync_in_base_apt_layer(self):
+        self.assertRegex(
+            DOCKERFILE.read_text(),
+            r"apt-get install -y --no-install-recommends[^\n]*\brsync\b",
+        )
+
+    def test_ssh_dir_created_chowned_and_mode_700(self):
+        result = self._run_helpers()
+
+        self.assertTrue(result["ssh_is_dir"])
+        self.assertEqual(result["ssh_mode"], 0o700)
+        self.assertTrue(
+            any("hapi:hapi" in line and result["ssh"] in line
+                for line in result["chown"]),
+            f".ssh was not chowned to hapi: {result['chown']}",
+        )
+        self.assertTrue(
+            any(re.fullmatch(rf"0?700 {re.escape(result['ssh'])}", line)
+                for line in result["chmod"]),
+            f".ssh chmod 700 call missing: {result['chmod']}",
+        )
+
+    def test_gitconfig_created_when_missing_and_chowned(self):
+        result = self._run_helpers()
+
+        self.assertTrue(result["gitconfig_is_file"])
+        self.assertEqual(result["gitconfig_content"], "")
+        self.assertTrue(
+            any("hapi:hapi" in line and result["gitconfig"] in line
+                for line in result["chown"]),
+            f".gitconfig was not chowned to hapi: {result['chown']}",
+        )
+
+    def test_existing_gitconfig_is_not_overwritten(self):
+        existing = "[user]\n\tname = persisted\n"
+        result = self._run_helpers(existing_gitconfig=existing)
+
+        self.assertEqual(result["gitconfig_content"], existing)
+
+    def test_ssh_dir_symlink_attack_is_refused(self):
+        # Codex + Claude finding (PR #95): ensure_ssh_dir runs as root before the
+        # privilege drop over hapi-writable /home/hapi. A hapi-planted ~/.ssh
+        # *symlink* must NOT be followed — otherwise the root chmod/chown re-perms
+        # and re-owns the attacker-chosen target (arbitrary-path chmod+chown). Uses
+        # the REAL chmod (not the fake logger) so a follow-through actually mutates
+        # the victim and the assertion catches it. Mirrors the #90 symlink tests.
+        helpers = self._extract_helpers()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            home = tmp_path / "home" / "hapi"
+            home.mkdir(parents=True)
+            victim = tmp_path / "victim"
+            victim.mkdir()
+            victim.chmod(0o755)
+            (home / ".ssh").symlink_to(victim)  # attack: ~/.ssh -> victim dir
+
+            chown_log = tmp_path / "chown.log"
+            fake_chown = tmp_path / "chown"
+            fake_chown.write_text(
+                "#!/bin/bash\n" 'printf "%%s\\n" "$*" >> "%s"\n' % chown_log
+            )
+            fake_chown.chmod(0o755)
+            # NOTE: no fake chmod here — use the real one so a symlink follow bites.
+            script = (
+                "set -euo pipefail\n"
+                'HAPI_USER="hapi"\n'
+                f'HAPI_USER_HOME="{home}"\n'
+                f"{helpers}\n"
+                "ensure_ssh_dir\n"
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # victim must be untouched: mode still 0755, and it was never chowned.
+            self.assertEqual(
+                stat.S_IMODE(victim.stat().st_mode), 0o755,
+                "chmod followed the ~/.ssh symlink onto the victim dir",
+            )
+            self.assertFalse(
+                any(str(victim) in line for line in
+                    (chown_log.read_text().splitlines()
+                     if chown_log.exists() else [])),
+                "chown followed the ~/.ssh symlink onto the victim dir",
+            )
+            # the planted symlink itself is left as-is (not turned into a real dir)
+            self.assertTrue((home / ".ssh").is_symlink())
 
 
 class TestClaudeConfigPersistence(unittest.TestCase):

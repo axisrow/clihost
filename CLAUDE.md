@@ -95,7 +95,7 @@ npm test           # node --test over tests/js/**/*.test.mjs
 
 ## Architecture
 
-Docker container running hapi CLI runner alongside OpenSSH server, bundling AI CLI tools (Claude Code, Codex, Gemini CLI, Copilot, OpenCode, Droid, ao, Hermes Agent), with an integrated multi-terminal web UI (TTYD).
+Docker container running hapi CLI runner alongside OpenSSH server, bundling AI CLI tools (Claude Code, Codex, Gemini CLI, Copilot, OpenCode, Droid, ao, Hermes Agent), with an integrated multi-terminal web UI (TTYD). The base image also includes `rsync` as the transport foundation for the sync epic (#17); actual sync orchestration is intentionally outside this image bootstrap.
 
 **Multi-process layout:**
 - `sshd` (port 22) — SSH access, the container's main process (`exec` at end of entrypoint.sh)

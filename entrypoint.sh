@@ -102,6 +102,37 @@ ensure_dir_owned() {
   done
 }
 
+ensure_ssh_dir() {
+  local ssh_dir="${HAPI_USER_HOME}/.ssh"
+  # Runs as root before the privilege drop, and /home/hapi is hapi-writable via
+  # the persistent volume. A hapi-planted ~/.ssh *symlink* (e.g. -> /etc or another
+  # tenant's home) would be dereferenced by chown -R / chmod, letting root re-perm /
+  # re-own an attacker-chosen target (arbitrary-path chmod+chown). Bail on any
+  # pre-existing symlink, and only touch a real, non-symlink directory. Mirrors the
+  # symlink hardening in ensure_claude_settings / uploads.py.
+  if [ -L "${ssh_dir}" ]; then
+    echo "WARNING: ${ssh_dir} is a symlink; refusing to chmod/chown it" >&2
+    return 0
+  fi
+  if [ -e "${ssh_dir}" ] && [ ! -d "${ssh_dir}" ]; then
+    echo "WARNING: ${ssh_dir} exists but is not a directory; leaving it alone" >&2
+    return 0
+  fi
+  ensure_dir_owned "${ssh_dir}"
+  # Re-check after mkdir -p (defence in depth) before the root chmod follows the path.
+  if [ -d "${ssh_dir}" ] && [ ! -L "${ssh_dir}" ]; then
+    chmod 700 "${ssh_dir}"
+  fi
+}
+
+ensure_gitconfig_file() {
+  local gitconfig_file="${HAPI_USER_HOME}/.gitconfig"
+  if [ ! -e "${gitconfig_file}" ] && [ ! -L "${gitconfig_file}" ]; then
+    : > "${gitconfig_file}"
+    chown "${HAPI_USER}:${HAPI_USER}" "${gitconfig_file}"
+  fi
+}
+
 ensure_local_bin_env() {
   LOCAL_BIN_DIR="${HAPI_USER_HOME}/.local/bin"
   LOCAL_BIN_ENV="${LOCAL_BIN_DIR}/env"
@@ -195,6 +226,8 @@ cleanup_runner_state() {
 ensure_home_owned
 ensure_dir_owned "${HAPI_USER_HOME}/.config/gh"
 ensure_dir_owned "${HAPI_USER_HOME}/.claude"
+ensure_ssh_dir
+ensure_gitconfig_file
 ensure_local_bin_env
 ensure_claude_settings
 
