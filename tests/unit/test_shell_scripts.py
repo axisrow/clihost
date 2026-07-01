@@ -634,6 +634,57 @@ class TestSyncFoundationBootstrap(unittest.TestCase):
 
         self.assertEqual(result["gitconfig_content"], existing)
 
+    def test_ssh_dir_symlink_attack_is_refused(self):
+        # Codex + Claude finding (PR #95): ensure_ssh_dir runs as root before the
+        # privilege drop over hapi-writable /home/hapi. A hapi-planted ~/.ssh
+        # *symlink* must NOT be followed — otherwise the root chmod/chown re-perms
+        # and re-owns the attacker-chosen target (arbitrary-path chmod+chown). Uses
+        # the REAL chmod (not the fake logger) so a follow-through actually mutates
+        # the victim and the assertion catches it. Mirrors the #90 symlink tests.
+        helpers = self._extract_helpers()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            home = tmp_path / "home" / "hapi"
+            home.mkdir(parents=True)
+            victim = tmp_path / "victim"
+            victim.mkdir()
+            victim.chmod(0o755)
+            (home / ".ssh").symlink_to(victim)  # attack: ~/.ssh -> victim dir
+
+            chown_log = tmp_path / "chown.log"
+            fake_chown = tmp_path / "chown"
+            fake_chown.write_text(
+                "#!/bin/bash\n" 'printf "%%s\\n" "$*" >> "%s"\n' % chown_log
+            )
+            fake_chown.chmod(0o755)
+            # NOTE: no fake chmod here — use the real one so a symlink follow bites.
+            script = (
+                "set -euo pipefail\n"
+                'HAPI_USER="hapi"\n'
+                f'HAPI_USER_HOME="{home}"\n'
+                f"{helpers}\n"
+                "ensure_ssh_dir\n"
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # victim must be untouched: mode still 0755, and it was never chowned.
+            self.assertEqual(
+                stat.S_IMODE(victim.stat().st_mode), 0o755,
+                "chmod followed the ~/.ssh symlink onto the victim dir",
+            )
+            self.assertFalse(
+                any(str(victim) in line for line in
+                    (chown_log.read_text().splitlines()
+                     if chown_log.exists() else [])),
+                "chown followed the ~/.ssh symlink onto the victim dir",
+            )
+            # the planted symlink itself is left as-is (not turned into a real dir)
+            self.assertTrue((home / ".ssh").is_symlink())
+
 
 class TestClaudeConfigPersistence(unittest.TestCase):
     """The 'Claude Code login keeps resetting' report (issue #59 tail) blamed
