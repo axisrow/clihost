@@ -136,6 +136,57 @@ The settings template contains only non-secret values:
 
 Tokens are runtime-only. Use `ANTHROPIC_AUTH_TOKEN` for ordinary `claude`; keep `ZAI_TOKEN` only for the compatibility `bin/glm` wrapper. Do not put `ANTHROPIC_*` or `ZAI_TOKEN` literals in `Dockerfile` or `entrypoint.sh`: `TestClaudeAuthRootCause69` deliberately guards against shell-level GLM env leakage that could affect normal Claude Code auth.
 
+### Диагностика слёта Claude Code auth
+
+`bin/claude-auth-snapshot.sh` is copied into the image as
+`/bin/claude-auth-snapshot.sh` for diagnosing ordinary Claude Code OAuth
+logout/refresh failures. It reads
+`$CLAUDE_CONFIG_DIR/.credentials.json` (default
+`/home/hapi/.claude/.credentials.json`) and writes JSON snapshots under
+`${CLAUDE_AUTH_SNAPSHOT_DIR:-/home/hapi/.hapi/auth-snapshots}`. Secret hygiene is
+the main contract: токенов в снэпшоте нет. The snapshot must never contain
+`accessToken` or `refreshToken`; it stores only metadata such as `expiresAt`,
+`scopes`, `subscriptionType`, sha256/mtime, permissions, process uid, UTC time,
+uptime, and a no-token reachability check for `api.anthropic.com`.
+
+Operational flow:
+
+```bash
+# immediately after a successful claude login
+docker exec <container> bash /bin/claude-auth-snapshot.sh snapshot baseline
+
+# after Claude Code logs out
+docker exec <container> bash /bin/claude-auth-snapshot.sh snapshot failed
+docker exec <container> bash /bin/claude-auth-snapshot.sh diff
+docker exec <container> bash /bin/claude-auth-snapshot.sh list
+```
+
+The built-in `diff` compares two explicit files or, without args, the two latest
+container snapshots. Verdicts separate the expected root-cause buckets:
+refresh works when sha256/mtime/`expiresAt` changed; refresh is not happening
+when the file is unchanged and `expiresAt` is expired; permissions block refresh
+when `.credentials.json` becomes non-`hapi` or loses write access; Anthropic
+network loss is called out separately; missing credentials points back to
+mount/persistence.
+
+`bin/claude-auth-snapshot-host.sh` is a host-only wrapper and must not be copied
+into the image. It runs `docker inspect` for only `RestartCount`,
+`State.StartedAt`, `State.Status`, and `Mounts`, then executes the inner
+`claude-auth-snapshot.sh snapshot` and writes a host JSON snapshot under
+`./claude-auth-host-snapshots` (override with `CLAUDE_AUTH_HOST_SNAPSHOT_DIR`).
+Use it when you need to prove whether the container restarted or the `/home/hapi`
+mount changed:
+
+```bash
+bin/claude-auth-snapshot-host.sh <container> baseline
+bin/claude-auth-snapshot-host.sh <container> failed
+bin/claude-auth-snapshot-host.sh diff ./claude-auth-host-snapshots/<A>.json ./claude-auth-host-snapshots/<B>.json
+```
+
+This is diagnostic only. It distinguishes (a) mount/persistence, (b)
+permissions/refresh write failure, and (c) network/token refresh failure; it does
+not change OAuth state.
+
 ### ttyd proxy package (app/)
 
 `app/ttyd_proxy.py` is only a **thin process entry point** (imports `main` from `ttydproxy.app`; referenced by entrypoint.sh as `python3 /app/ttyd_proxy.py`); all logic lives in the `app/ttydproxy/` package:

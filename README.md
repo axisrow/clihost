@@ -104,6 +104,48 @@ docker run --env-file .env -e ANTHROPIC_AUTH_TOKEN=your_zai_token clihost
 is no longer required for GLM: ordinary `claude` uses the native settings file
 when `ANTHROPIC_AUTH_TOKEN` is present in the environment.
 
+### Диагностика слёта Claude Code auth
+
+Для обычного Claude Code OAuth (`claude login`, файл
+`/home/hapi/.claude/.credentials.json`) в образе есть диагностический snapshot
+без секретов: токенов в снэпшоте нет, сохраняются только `expiresAt`, scopes,
+тип подписки, sha256/mtime файла, права, время и быстрый сетевой чек Anthropic.
+
+Снимите baseline сразу после успешного `claude login` внутри живого контейнера:
+
+```bash
+docker exec <container> bash /bin/claude-auth-snapshot.sh snapshot baseline
+```
+
+Когда Claude Code разлогинился, снимите второй snapshot и сравните:
+
+```bash
+docker exec <container> bash /bin/claude-auth-snapshot.sh snapshot failed
+docker exec <container> bash /bin/claude-auth-snapshot.sh diff
+docker exec <container> bash /bin/claude-auth-snapshot.sh list
+```
+
+По умолчанию файлы пишутся в
+`/home/hapi/.hapi/auth-snapshots`; при необходимости путь меняется через
+`CLAUDE_AUTH_SNAPSHOT_DIR`. `diff` выдаёт подсказку причины: refresh работает,
+refresh не происходит при истёкшем `expiresAt`, права мешают записи
+`.credentials.json`, пропал доступ к `api.anthropic.com`, либо credentials-файл
+исчез.
+
+С хоста используйте wrapper, чтобы добавить `docker inspect`-мету
+(`RestartCount`, `State.StartedAt`, `State.Status`, mounts) и отделить
+mount/persistence-рестарт от token/refresh-проблемы:
+
+```bash
+bin/claude-auth-snapshot-host.sh <container> baseline
+bin/claude-auth-snapshot-host.sh <container> failed
+bin/claude-auth-snapshot-host.sh diff ./claude-auth-host-snapshots/<A>.json ./claude-auth-host-snapshots/<B>.json
+```
+
+Этот инструмент диагностический: он разделяет (а) mount/persistence, (б)
+права/refresh-запись, (в) сетевой или token-refresh провал, но сам OAuth не
+чинит.
+
 ## Архитектура
 
 ```
