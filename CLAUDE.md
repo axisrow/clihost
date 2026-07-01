@@ -187,6 +187,40 @@ This is diagnostic only. It distinguishes (a) mount/persistence, (b)
 permissions/refresh write failure, and (c) network/token refresh failure; it does
 not change OAuth state.
 
+### Safe config sync over SSH
+
+`bin/clihost-sync.sh` is the host-side rsync-over-SSH sync command for the safe
+non-secret subset in epic #17. It is copied into the image as
+`/bin/clihost-sync.sh` for parity, but the documented workflow runs it from the
+host against the container's SSH endpoint. `pull` means host to container;
+`push` means container to host.
+
+```bash
+CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull
+CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull --apply
+CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh push
+```
+
+The command is dry-run by default. `--apply` is required for a real transfer and enables
+rsync `--backup --backup-dir=...`; `--delete` is never used unless
+`--allow-delete` is passed explicitly.
+
+The include-list is intentionally narrow:
+
+- `~/.gitconfig`
+- `~/.config/gh`
+
+Non-goals: do not add `~/.claude` to this command because credential persistence
+belongs to the `/home/hapi` volume; do not add private `~/.ssh` material because
+that is a separate sync task; do not add Claude `settings.json` because that
+configuration is managed by the current template/bootstrap contract.
+
+Every run first SSHes into the container and fail-closed checks that the remote
+home is mounted exactly at `/home/hapi`. A parent `/home` mount, no distinct
+`/home/hapi` mount, or an unreadable mount table aborts before rsync. The command
+also guards every controlled path under `/home/hapi` against existing symlinks
+and passes `--no-links` to rsync so it never follows planted symlinks.
+
 ### ttyd proxy package (app/)
 
 `app/ttyd_proxy.py` is only a **thin process entry point** (imports `main` from `ttydproxy.app`; referenced by entrypoint.sh as `python3 /app/ttyd_proxy.py`); all logic lives in the `app/ttydproxy/` package:

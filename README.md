@@ -146,6 +146,39 @@ bin/claude-auth-snapshot-host.sh diff ./claude-auth-host-snapshots/<A>.json ./cl
 права/refresh-запись, (в) сетевой или token-refresh провал, но сам OAuth не
 чинит.
 
+### Safe config sync over SSH
+
+`bin/clihost-sync.sh` is a host-side rsync-over-SSH helper for the safe,
+non-secret sync subset in epic #17. It expects SSH access to the container's
+`sshd` as the `hapi` user. `pull` means host to container; `push` means
+container to host.
+
+```bash
+CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull
+CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull --apply
+CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh push
+```
+
+The command is dry-run by default and prints the rsync itemized changes. A real
+run requires `--apply`; apply mode also uses `--backup --backup-dir=...`.
+`--delete` is never passed to rsync unless you also pass `--allow-delete`.
+
+Only these paths are included:
+
+- `~/.gitconfig`
+- `~/.config/gh`
+
+These paths are intentionally not synced: `~/.claude` stays persisted by the
+`/home/hapi` volume, private `~/.ssh` keys are out of scope for this command,
+and Claude `settings.json` is not part of the sync contract.
+
+Before every run, the helper connects over SSH and refuses to continue unless
+the remote home is a separate mount at exactly `/home/hapi`. A parent `/home`
+mount, missing `/home/hapi` mount, or unreadable mount table aborts before
+`rsync`. The helper also refuses any existing symlink on the controlled
+`/home/hapi` paths and runs rsync with `--no-links`, so it does not read or write
+through planted symlinks.
+
 ## Архитектура
 
 ```

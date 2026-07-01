@@ -278,11 +278,12 @@ COPY app/ /app/
 COPY bin/tmux-wrapper.sh /bin/tmux-wrapper.sh
 COPY bin/glm /bin/glm
 COPY bin/claude-auth-snapshot.sh /bin/claude-auth-snapshot.sh
+COPY bin/clihost-sync.sh /bin/clihost-sync.sh
 COPY config/.tmux.conf /home/hapi/.tmux.conf
 COPY config/.tmux.conf /etc/skel/.tmux.conf
 RUN mkdir -p /etc/skel/.claude
 COPY config/claude-settings.json /etc/skel/.claude/settings.json
-RUN chmod +x /bin/tmux-wrapper.sh /bin/glm /bin/claude-auth-snapshot.sh && \
+RUN chmod +x /bin/tmux-wrapper.sh /bin/glm /bin/claude-auth-snapshot.sh /bin/clihost-sync.sh && \
     chown hapi:hapi /home/hapi/.tmux.conf
 
 COPY entrypoint.sh /entrypoint.sh

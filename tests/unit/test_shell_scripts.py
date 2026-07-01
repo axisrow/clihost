@@ -18,6 +18,7 @@ TMUX_WRAPPER = REPO_ROOT / "bin/tmux-wrapper.sh"
 GLM = REPO_ROOT / "bin/glm"
 CLAUDE_AUTH_SNAPSHOT = REPO_ROOT / "bin/claude-auth-snapshot.sh"
 CLAUDE_AUTH_SNAPSHOT_HOST = REPO_ROOT / "bin/claude-auth-snapshot-host.sh"
+CLIHOST_SYNC = REPO_ROOT / "bin/clihost-sync.sh"
 README = REPO_ROOT / "README.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 CLAUDE_SETTINGS_TEMPLATE = REPO_ROOT / "config/claude-settings.json"
@@ -47,6 +48,7 @@ class TestShellSyntax(unittest.TestCase):
             TMUX_WRAPPER,
             CLAUDE_AUTH_SNAPSHOT,
             CLAUDE_AUTH_SNAPSHOT_HOST,
+            CLIHOST_SYNC,
         ):
             with self.subTest(script=script.name):
                 result = subprocess.run(
@@ -684,6 +686,195 @@ class TestSyncFoundationBootstrap(unittest.TestCase):
             )
             # the planted symlink itself is left as-is (not turned into a real dir)
             self.assertTrue((home / ".ssh").is_symlink())
+
+
+class TestClihostSyncScript(unittest.TestCase):
+    """rsync-over-SSH sync command contract (issue #92)."""
+
+    def _run_sync(self, args, *, mounts=None, make_remote=None, make_local=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            fake_remote_home = tmp_path / "remote-home"
+            fake_local_home = tmp_path / "local-home"
+            fake_remote_home.mkdir()
+            fake_local_home.mkdir()
+            if mounts is None:
+                mounts = [
+                    "proc /proc proc rw 0 0",
+                    f"/dev/sda1 {fake_remote_home} ext4 rw 0 0",
+                ]
+            (fake_local_home / ".gitconfig").write_text("[user]\n\tname = host\n")
+            (fake_local_home / ".config" / "gh").mkdir(parents=True)
+            (fake_local_home / ".config" / "gh" / "hosts.yml").write_text(
+                "github.com:\n  user: axisrow\n"
+            )
+            if make_remote is not None:
+                make_remote(fake_remote_home)
+            if make_local is not None:
+                make_local(fake_local_home)
+
+            mounts_file = tmp_path / "mounts"
+            mounts_file.write_text("\n".join(mounts) + "\n")
+            ssh_log = tmp_path / "ssh.log"
+            rsync_log = tmp_path / "rsync.log"
+
+            fake_ssh = tmp_path / "ssh"
+            fake_ssh.write_text(
+                "#!/bin/bash\n"
+                f'printf "SSH"; printf " [%s]" "$@"; printf "\\n" >> "{ssh_log}"\n'
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  if [ \"$1\" = \"bash\" ]; then\n"
+                "    shift\n"
+                "    if [ \"${1:-}\" = \"-s\" ]; then shift; fi\n"
+                "    if [ \"${1:-}\" = \"--\" ]; then shift; fi\n"
+                f'    exec bash -s -- "{fake_remote_home}" "{mounts_file}" "$@"\n'
+                "  fi\n"
+                "  shift\n"
+                "done\n"
+                "cat >/dev/null\n"
+            )
+            fake_ssh.chmod(0o755)
+
+            fake_rsync = tmp_path / "rsync"
+            fake_rsync.write_text(
+                "#!/bin/bash\n"
+                f'for a in "$@"; do printf "%s\\n" "$a" >> "{rsync_log}"; done\n'
+                'printf "rsync %s\\n" "$*"\n'
+            )
+            fake_rsync.chmod(0o755)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+            env["HOME"] = str(fake_local_home)
+            env["CLIHOST_SSH_TARGET"] = "hapi@example.test"
+            result = subprocess.run(
+                ["bash", str(CLIHOST_SYNC), *args],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            return {
+                "result": result,
+                "rsync_args": rsync_log.read_text().splitlines()
+                if rsync_log.exists() else [],
+                "ssh_log": ssh_log.read_text() if ssh_log.exists() else "",
+                "local_home": fake_local_home,
+                "remote_home": fake_remote_home,
+            }
+
+    def test_pull_defaults_to_dry_run_and_never_deletes(self):
+        out = self._run_sync(["pull"])
+
+        self.assertEqual(out["result"].returncode, 0, out["result"].stderr)
+        self.assertIn("--dry-run", out["rsync_args"])
+        self.assertNotIn("--delete", out["rsync_args"])
+        self.assertIn("hapi@example.test:/home/hapi/", out["rsync_args"])
+
+    def test_apply_uses_backup_without_dry_run(self):
+        out = self._run_sync(["pull", "--apply"])
+
+        self.assertEqual(out["result"].returncode, 0, out["result"].stderr)
+        self.assertNotIn("--dry-run", out["rsync_args"])
+        self.assertIn("--backup", out["rsync_args"])
+        self.assertTrue(
+            any(arg.startswith("--backup-dir=/home/hapi/.clihost-sync-backups/")
+                for arg in out["rsync_args"]),
+            out["rsync_args"],
+        )
+
+    def test_allow_delete_is_the_only_way_to_pass_delete(self):
+        dry = self._run_sync(["pull"])
+        deleting = self._run_sync(["pull", "--allow-delete"])
+
+        self.assertNotIn("--delete", dry["rsync_args"])
+        self.assertIn("--delete", deleting["rsync_args"])
+
+    def test_aborts_when_home_is_not_mounted_at_home_hapi(self):
+        out = self._run_sync(
+            ["pull"],
+            mounts=["proc /proc proc rw 0 0", "/dev/sda1 /home ext4 rw 0 0"],
+        )
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("/home/hapi", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_include_list_is_only_gitconfig_and_gh_config(self):
+        out = self._run_sync(["pull"])
+        joined = "\n".join(out["rsync_args"])
+
+        self.assertEqual(out["result"].returncode, 0, out["result"].stderr)
+        self.assertIn("/.gitconfig", joined)
+        self.assertIn("/.config/gh/***", joined)
+        self.assertNotIn(".claude", joined)
+        self.assertNotIn(".ssh", joined)
+        self.assertNotIn("settings.json", joined)
+
+    def test_remote_symlink_guard_refuses_to_follow_target(self):
+        def make_remote(home):
+            victim = home.parent / "victim"
+            victim.mkdir()
+            (home / ".gitconfig").symlink_to(victim / "gitconfig")
+
+        out = self._run_sync(["pull"], make_remote=make_remote)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("symlink", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_option_like_target_is_rejected_before_ssh_or_rsync(self):
+        # Codex + Claude finding (PR #96, both reproduced host RCE): printf %q
+        # guards SHELL injection but not OPTION injection — ssh/rsync parse a
+        # leading-dash target as a flag, so `-oProxyCommand=<cmd>` executes <cmd>
+        # LOCALLY during preflight, before any mount/symlink guard. Same class as
+        # the dashboard ProxyCommand issue (#85). The script must reject a target
+        # starting with '-' and never reach ssh/rsync. A canary file proves the
+        # ProxyCommand never ran.
+        with tempfile.TemporaryDirectory() as canary_dir:
+            canary = pathlib.Path(canary_dir) / "PWNED"
+            env = dict(os.environ)
+            # a real ssh would run this ProxyCommand locally on an option-like target
+            hostile = f'-oProxyCommand=touch {canary}'
+            env["CLIHOST_SSH_TARGET"] = hostile
+            # keep a real HOME so arg-parse reaches the target validation
+            with tempfile.TemporaryDirectory() as home:
+                (pathlib.Path(home) / ".gitconfig").write_text("")
+                env["HOME"] = home
+                result = subprocess.run(
+                    ["bash", str(CLIHOST_SYNC), "pull"],
+                    capture_output=True, text=True, env=env,
+                )
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("must not start with '-'", result.stderr)
+            self.assertFalse(canary.exists(),
+                             "ProxyCommand executed — option injection not blocked")
+
+    def test_ssh_and_rsync_calls_use_end_of_options_separator(self):
+        # Defence-in-depth alongside the target reject: the ssh preflight and the
+        # rsync invocation both pass `--` before the host/positional operands so a
+        # `-`-leading value can never be parsed as a flag.
+        text = CLIHOST_SYNC.read_text()
+        self.assertRegex(text, r'\$\{ssh_args\[@\]\}"\s+--\s+"\$\{target\}"')
+        self.assertRegex(text, r'rsync "\$\{rsync_args\[@\]\}"\s+--\s+')
+
+    def test_dockerfile_installs_container_sync_script(self):
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn("COPY bin/clihost-sync.sh /bin/clihost-sync.sh", dockerfile)
+        self.assertIn("/bin/clihost-sync.sh", dockerfile)
+
+    def test_docs_and_env_document_safe_sync_command(self):
+        self.assertIn("CLIHOST_SSH_TARGET", (REPO_ROOT / ".env.example").read_text())
+        for path in (README, CLAUDE_MD):
+            with self.subTest(path=path.name):
+                text = path.read_text()
+                self.assertIn("clihost-sync.sh pull", text)
+                self.assertIn("dry-run", text)
+                self.assertIn("~/.gitconfig", text)
+                self.assertIn("~/.config/gh", text)
+                self.assertNotRegex(
+                    text,
+                    re.compile(r"clihost-sync\.sh[^\n]*(\.claude|\.ssh|settings\.json)"),
+                )
 
 
 class TestClaudeConfigPersistence(unittest.TestCase):
