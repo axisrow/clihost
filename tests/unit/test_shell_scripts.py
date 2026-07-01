@@ -667,6 +667,60 @@ class TestClaudeAuthSnapshotScript(unittest.TestCase):
             self.assertFalse(snapshot["credentials"]["has_credentials"])
             self.assertIsNone(snapshot["credentials"]["sha256"])
 
+    def test_snapshot_never_leaks_token_nested_in_scopes_or_subscription(self):
+        # Codex finding (PR #90): the redaction is a scalar allowlist, so a
+        # malformed/schema-drifted file that hides a token inside a nested object
+        # under scopes/subscriptionType must NOT leak it. Only plain-string scopes
+        # and a str/None subscriptionType survive; anything else is dropped.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            env, claude_dir, _ = self._env(tmp_path)
+            (claude_dir / ".credentials.json").write_text(json.dumps({
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-SECRET",
+                    "refreshToken": "sk-ant-REFRESH",
+                    "expiresAt": 4102444800000,
+                    # hostile nesting: token smuggled inside scopes / subscriptionType
+                    "scopes": ["user:inference", {"accessToken": "sk-ant-NESTED"}],
+                    "subscriptionType": {"refreshToken": "sk-ant-SUBTOK"},
+                }
+            }))
+            snapshot_path, snapshot = self._snapshot(env, "nested")
+            raw = snapshot_path.read_text()
+            for forbidden in (
+                "sk-ant-SECRET", "sk-ant-REFRESH",
+                "sk-ant-NESTED", "sk-ant-SUBTOK",
+                "accessToken", "refreshToken",
+            ):
+                self.assertNotIn(forbidden, raw)
+            oauth = snapshot["credentials"]["oauth"]
+            # non-string scope dropped, string scope kept
+            self.assertEqual(oauth["scopes"], ["user:inference"])
+            # non-str/None subscriptionType coerced to None
+            self.assertIsNone(oauth["subscriptionType"])
+
+    def test_snapshot_refuses_symlinked_snapshot_dir(self):
+        # Codex finding (PR #90): the tool may run as root via `docker exec` over
+        # hapi-writable storage, and Path write follows symlinks — a hapi-planted
+        # symlinked snapshot dir could steer a root write outside it. The script
+        # must refuse to operate on a symlinked snapshot dir.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            env, claude_dir, snapshot_dir = self._env(tmp_path)
+            self._write_credentials(claude_dir, 4102444800000)
+            # replace the real snapshot dir with a symlink to a victim dir
+            victim = tmp_path / "victim"
+            victim.mkdir()
+            snapshot_dir.rmdir()
+            snapshot_dir.symlink_to(victim)
+            result = subprocess.run(
+                ["bash", str(CLAUDE_AUTH_SNAPSHOT), "snapshot", "attack"],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            # nothing was written into the victim dir
+            self.assertEqual(list(victim.iterdir()), [], "wrote through symlink")
+
     def test_diff_verdict_refresh_works_when_file_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)

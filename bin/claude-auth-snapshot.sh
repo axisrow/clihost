@@ -64,7 +64,20 @@ create_snapshot() {
   local out
 
   dir="$(snapshot_dir)"
+  # The documented host flow runs this via `docker exec` as ROOT (the image sets
+  # no USER), while /home/hapi is writable by the hapi user — so a hapi process
+  # could pre-place the snapshot dir as a symlink and steer a root write outside
+  # it (arbitrary-path write). Refuse to operate on a symlinked dir, create it
+  # 0700, and let the Python writer create the file with O_NOFOLLOW|O_EXCL 0600.
+  # Mirrors the symlink hardening in uploads.py / ensure_claude_settings.
+  if [ -L "${dir}" ]; then
+    die "snapshot dir '${dir}' is a symlink; refusing (potential arbitrary-path write)"
+  fi
   mkdir -p "${dir}"
+  if [ -L "${dir}" ] || [ ! -d "${dir}" ]; then
+    die "snapshot dir '${dir}' is not a real directory"
+  fi
+  chmod 0700 "${dir}" 2>/dev/null || true
   out="$(unique_snapshot_path "${dir}" "${label}")"
 
   CLAUDE_AUTH_SNAPSHOT_LABEL="${label}" \
@@ -214,9 +227,19 @@ def read_credentials(credentials_path, now_ms):
         return meta
 
     expires_at = oauth.get("expiresAt")
-    scopes = oauth.get("scopes")
-    if not isinstance(scopes, list):
-        scopes = []
+    # Strict scalar allowlist: never serialize a value we did not shape ourselves.
+    # A malformed / schema-drifted credentials file could hide a token inside an
+    # unexpected nested object under scopes/subscriptionType; copying those through
+    # would leak it. So scopes is kept ONLY as a list of plain strings, and
+    # subscriptionType ONLY when it is a str/None — anything else is dropped.
+    raw_scopes = oauth.get("scopes")
+    scopes = (
+        [s for s in raw_scopes if isinstance(s, str)]
+        if isinstance(raw_scopes, list)
+        else []
+    )
+    raw_sub = oauth.get("subscriptionType")
+    subscription_type = raw_sub if isinstance(raw_sub, (str, type(None))) else None
     meta["oauth"] = {
         "expiresAt": expires_at if isinstance(expires_at, int) else None,
         "expires_in_minutes": (
@@ -230,7 +253,7 @@ def read_credentials(credentials_path, now_ms):
             else None
         ),
         "scopes": scopes,
-        "subscriptionType": oauth.get("subscriptionType"),
+        "subscriptionType": subscription_type,
     }
     return meta
 
@@ -362,8 +385,17 @@ def main():
         },
     }
 
-    out = Path(os.environ["CLAUDE_AUTH_SNAPSHOT_OUTPUT"])
-    out.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+    out = os.environ["CLAUDE_AUTH_SNAPSHOT_OUTPUT"]
+    payload = (json.dumps(snapshot, indent=2, sort_keys=True) + "\n").encode()
+    # Symlink-safe, exclusive create at 0600: this may run as root (docker exec)
+    # over hapi-writable storage, so never follow a symlink and never clobber an
+    # existing path. O_NOFOLLOW rejects a final-component symlink; O_EXCL rejects
+    # a pre-created file; 0600 keeps the snapshot non-world-readable.
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
 
 
 if __name__ == "__main__":
