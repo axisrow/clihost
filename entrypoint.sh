@@ -102,6 +102,20 @@ ensure_dir_owned() {
   done
 }
 
+ensure_ssh_dir() {
+  local ssh_dir="${HAPI_USER_HOME}/.ssh"
+  ensure_dir_owned "${ssh_dir}"
+  chmod 700 "${ssh_dir}"
+}
+
+ensure_gitconfig_file() {
+  local gitconfig_file="${HAPI_USER_HOME}/.gitconfig"
+  if [ ! -e "${gitconfig_file}" ] && [ ! -L "${gitconfig_file}" ]; then
+    : > "${gitconfig_file}"
+    chown "${HAPI_USER}:${HAPI_USER}" "${gitconfig_file}"
+  fi
+}
+
 ensure_local_bin_env() {
   LOCAL_BIN_DIR="${HAPI_USER_HOME}/.local/bin"
   LOCAL_BIN_ENV="${LOCAL_BIN_DIR}/env"
@@ -195,6 +209,8 @@ cleanup_runner_state() {
 ensure_home_owned
 ensure_dir_owned "${HAPI_USER_HOME}/.config/gh"
 ensure_dir_owned "${HAPI_USER_HOME}/.claude"
+ensure_ssh_dir
+ensure_gitconfig_file
 ensure_local_bin_env
 ensure_claude_settings
 
