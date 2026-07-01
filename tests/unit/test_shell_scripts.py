@@ -15,6 +15,8 @@ CLI_PACKAGES = REPO_ROOT / "cli-packages.txt"
 INSTALL_CLI = REPO_ROOT / "bin/install-cli.sh"
 TMUX_WRAPPER = REPO_ROOT / "bin/tmux-wrapper.sh"
 GLM = REPO_ROOT / "bin/glm"
+CLAUDE_AUTH_SNAPSHOT = REPO_ROOT / "bin/claude-auth-snapshot.sh"
+CLAUDE_AUTH_SNAPSHOT_HOST = REPO_ROOT / "bin/claude-auth-snapshot-host.sh"
 README = REPO_ROOT / "README.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 CLAUDE_SETTINGS_TEMPLATE = REPO_ROOT / "config/claude-settings.json"
@@ -37,7 +39,14 @@ NPM_MANIFEST_SLUGS = {
 
 class TestShellSyntax(unittest.TestCase):
     def test_scripts_parse(self):
-        for script in (ENTRYPOINT, BUILD_SH, INSTALL_CLI, TMUX_WRAPPER):
+        for script in (
+            ENTRYPOINT,
+            BUILD_SH,
+            INSTALL_CLI,
+            TMUX_WRAPPER,
+            CLAUDE_AUTH_SNAPSHOT,
+            CLAUDE_AUTH_SNAPSHOT_HOST,
+        ):
             with self.subTest(script=script.name):
                 result = subprocess.run(
                     ["bash", "-n", str(script)], capture_output=True, text=True
@@ -552,6 +561,205 @@ class TestClaudeConfigPersistence(unittest.TestCase):
         self.assertNotIn(".claude", body)
         # sanity: it does target the runner state files it is meant to clear.
         self.assertIn("runner.state.json", body)
+
+
+class TestClaudeAuthSnapshotScript(unittest.TestCase):
+    """Diagnostic snapshots for Claude Code OAuth must expose metadata only."""
+
+    def _write_fake_curl(self, tmp_path, http_code="200"):
+        fake_curl = tmp_path / "curl"
+        fake_curl.write_text(
+            "#!/bin/bash\n"
+            f"printf '{http_code}'\n"
+        )
+        fake_curl.chmod(0o755)
+
+    def _env(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        snapshot_dir = tmp_path / "snapshots"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        self._write_fake_curl(tmp_path)
+        env = dict(os.environ)
+        env["CLAUDE_CONFIG_DIR"] = str(claude_dir)
+        env["CLAUDE_AUTH_SNAPSHOT_DIR"] = str(snapshot_dir)
+        env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+        return env, claude_dir, snapshot_dir
+
+    def _write_credentials(self, claude_dir, expires_at):
+        credentials = claude_dir / ".credentials.json"
+        credentials.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-ant-SECRET",
+                "refreshToken": "sk-ant-REFRESH",
+                "expiresAt": expires_at,
+                "scopes": ["user:inference", "org:read"],
+                "subscriptionType": "pro",
+            }
+        }))
+        credentials.chmod(0o600)
+        return credentials
+
+    def _snapshot(self, env, label="baseline"):
+        result = subprocess.run(
+            ["bash", str(CLAUDE_AUTH_SNAPSHOT), "snapshot", label],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = pathlib.Path(result.stdout.strip())
+        self.assertTrue(path.is_file(), result.stdout)
+        return path, json.loads(path.read_text())
+
+    def _diff(self, a, b):
+        result = subprocess.run(
+            ["bash", str(CLAUDE_AUTH_SNAPSHOT), "diff", str(a), str(b)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_snapshot_redacts_oauth_tokens_and_extracts_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            env, claude_dir, _ = self._env(tmp_path)
+            self._write_credentials(claude_dir, 4102444800000)
+
+            snapshot_path, snapshot = self._snapshot(env)
+            raw = snapshot_path.read_text()
+
+            for forbidden in (
+                "sk-ant-SECRET",
+                "sk-ant-REFRESH",
+                "accessToken",
+                "refreshToken",
+            ):
+                self.assertNotIn(forbidden, raw)
+
+            credentials = snapshot["credentials"]
+            self.assertTrue(credentials["has_credentials"])
+            self.assertRegex(credentials["sha256"], r"^[0-9a-f]{64}$")
+            oauth = credentials["oauth"]
+            self.assertEqual(oauth["expiresAt"], 4102444800000)
+            self.assertEqual(oauth["scopes"], ["user:inference", "org:read"])
+            self.assertEqual(oauth["subscriptionType"], "pro")
+            self.assertFalse(oauth["is_expired"])
+            self.assertGreater(oauth["expires_in_minutes"], 0)
+
+    def test_snapshot_marks_expired_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            env, claude_dir, _ = self._env(tmp_path)
+            self._write_credentials(claude_dir, 946684800000)
+
+            _, snapshot = self._snapshot(env, "expired")
+
+            oauth = snapshot["credentials"]["oauth"]
+            self.assertTrue(oauth["is_expired"])
+            self.assertLess(oauth["expires_in_minutes"], 0)
+
+    def test_snapshot_without_credentials_does_not_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            env, _, _ = self._env(tmp_path)
+
+            _, snapshot = self._snapshot(env, "missing")
+
+            self.assertFalse(snapshot["credentials"]["has_credentials"])
+            self.assertIsNone(snapshot["credentials"]["sha256"])
+
+    def test_diff_verdict_refresh_works_when_file_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            env, claude_dir, _ = self._env(tmp_path)
+            self._write_credentials(claude_dir, 4102444800000)
+            before, _ = self._snapshot(env, "before")
+            self._write_credentials(claude_dir, 4102448400000)
+            after, _ = self._snapshot(env, "after")
+
+            output = self._diff(before, after)
+
+            self.assertIn("refresh работает", output)
+
+    def test_diff_verdict_no_refresh_when_expired_and_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            first = tmp_path / "a.json"
+            second = tmp_path / "b.json"
+            snapshot = {
+                "credentials": {
+                    "has_credentials": True,
+                    "sha256": "a" * 64,
+                    "mtime": 1000,
+                    "oauth": {"expiresAt": 946684800000, "is_expired": True},
+                },
+                "permissions": {
+                    "credentials": {
+                        "owner": "hapi:hapi",
+                        "mode": "600",
+                        "writable_by_hapi": True,
+                    }
+                },
+                "network": {"anthropic": {"ok": True}},
+            }
+            first.write_text(json.dumps(snapshot))
+            second.write_text(json.dumps(snapshot))
+
+            output = self._diff(first, second)
+
+            self.assertIn("refresh НЕ происходит", output)
+
+    def test_diff_verdict_permissions_block_refresh_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            first = tmp_path / "a.json"
+            second = tmp_path / "b.json"
+            before = {
+                "credentials": {
+                    "has_credentials": True,
+                    "sha256": "a" * 64,
+                    "mtime": 1000,
+                    "oauth": {"expiresAt": 4102444800000, "is_expired": False},
+                },
+                "permissions": {
+                    "credentials": {
+                        "owner": "hapi:hapi",
+                        "mode": "600",
+                        "writable_by_hapi": True,
+                    }
+                },
+                "network": {"anthropic": {"ok": True}},
+            }
+            after = json.loads(json.dumps(before))
+            after["permissions"]["credentials"] = {
+                "owner": "root:root",
+                "mode": "400",
+                "writable_by_hapi": False,
+            }
+            first.write_text(json.dumps(before))
+            second.write_text(json.dumps(after))
+
+            output = self._diff(first, second)
+
+            self.assertIn("права мешают", output)
+
+    def test_dockerfile_installs_only_container_snapshot_script(self):
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn(
+            "COPY bin/claude-auth-snapshot.sh /bin/claude-auth-snapshot.sh",
+            dockerfile,
+        )
+        self.assertIn("/bin/claude-auth-snapshot.sh", dockerfile)
+        self.assertNotIn("claude-auth-snapshot-host.sh /bin/", dockerfile)
+
+    def test_docs_and_env_document_snapshot_diagnostics(self):
+        self.assertIn("CLAUDE_AUTH_SNAPSHOT_DIR", (REPO_ROOT / ".env.example").read_text())
+        for path in (README, CLAUDE_MD):
+            with self.subTest(path=path.name):
+                text = path.read_text()
+                self.assertIn("Диагностика слёта Claude Code auth", text)
+                self.assertIn("claude-auth-snapshot.sh snapshot", text)
+                self.assertIn("claude-auth-snapshot-host.sh", text)
+                self.assertIn("токенов в снэпшоте нет", text)
 
 
 class TestClaudeNativeZaiConfig(unittest.TestCase):
