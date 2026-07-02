@@ -689,7 +689,23 @@ class TestSyncFoundationBootstrap(unittest.TestCase):
 
 
 class TestClihostSyncScript(unittest.TestCase):
-    """rsync-over-SSH sync command contract (issue #92)."""
+    """rsync-over-SSH sync command contract (issues #92 and #93)."""
+
+    def _make_ssh_material(self, home, *, dir_mode=0o700, key_mode=0o600):
+        ssh_dir = home / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "known_hosts").write_text("example.test ssh-ed25519 AAAA\n")
+        (ssh_dir / "config").write_text("Host example\n  HostName example.test\n")
+        (ssh_dir / "id_ed25519.pub").write_text("ssh-ed25519 AAAA public\n")
+        private_key = ssh_dir / "id_ed25519"
+        private_key.write_text(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+            "private-test-fixture\n"
+            "-----END OPENSSH PRIVATE KEY-----\n"
+        )
+        ssh_dir.chmod(dir_mode)
+        private_key.chmod(key_mode)
+        return ssh_dir
 
     def _run_sync(self, args, *, mounts=None, make_remote=None, make_local=None):
         with tempfile.TemporaryDirectory() as tmp:
@@ -721,12 +737,16 @@ class TestClihostSyncScript(unittest.TestCase):
             fake_ssh = tmp_path / "ssh"
             fake_ssh.write_text(
                 "#!/bin/bash\n"
-                f'printf "SSH"; printf " [%s]" "$@"; printf "\\n" >> "{ssh_log}"\n'
+                f'printf "SSH" >> "{ssh_log}"\n'
+                f'printf " [%s]" "$@" >> "{ssh_log}"\n'
+                f'printf "\\n" >> "{ssh_log}"\n'
                 "while [ \"$#\" -gt 0 ]; do\n"
                 "  if [ \"$1\" = \"bash\" ]; then\n"
                 "    shift\n"
                 "    if [ \"${1:-}\" = \"-s\" ]; then shift; fi\n"
                 "    if [ \"${1:-}\" = \"--\" ]; then shift; fi\n"
+                "    [ \"$#\" -ge 1 ] && shift\n"
+                "    [ \"$#\" -ge 1 ] && shift\n"
                 f'    exec bash -s -- "{fake_remote_home}" "{mounts_file}" "$@"\n'
                 "  fi\n"
                 "  shift\n"
@@ -769,6 +789,264 @@ class TestClihostSyncScript(unittest.TestCase):
         self.assertIn("--dry-run", out["rsync_args"])
         self.assertNotIn("--delete", out["rsync_args"])
         self.assertIn("hapi@example.test:/home/hapi/", out["rsync_args"])
+
+    def test_ssh_defaults_to_dry_run(self):
+        out = self._run_sync(["ssh"], make_local=self._make_ssh_material)
+
+        self.assertEqual(out["result"].returncode, 0, out["result"].stderr)
+        self.assertIn("--dry-run", out["rsync_args"])
+        self.assertNotIn("--delete", out["rsync_args"])
+        self.assertIn(str(out["local_home"] / ".ssh") + "/", out["rsync_args"])
+        self.assertIn("hapi@example.test:/home/hapi/.ssh/", out["rsync_args"])
+
+    def test_ssh_push_direction_syncs_container_to_host(self):
+        out = self._run_sync(["ssh", "push"], make_remote=self._make_ssh_material)
+
+        self.assertEqual(out["result"].returncode, 0, out["result"].stderr)
+        self.assertIn("--dry-run", out["rsync_args"])
+        self.assertIn("hapi@example.test:/home/hapi/.ssh/", out["rsync_args"])
+        self.assertIn(str(out["local_home"] / ".ssh") + "/", out["rsync_args"])
+
+    def test_ssh_default_include_list_is_public_material_only(self):
+        out = self._run_sync(["ssh"], make_local=self._make_ssh_material)
+
+        self.assertEqual(out["result"].returncode, 0, out["result"].stderr)
+        includes = [arg for arg in out["rsync_args"] if arg.startswith("--include=")]
+        self.assertEqual(
+            includes,
+            ["--include=/known_hosts", "--include=/*.pub", "--include=/config"],
+        )
+        joined = "\n".join(out["rsync_args"])
+        self.assertNotIn("id_ed25519", joined)
+
+    def test_ssh_include_private_keys_adds_private_material_and_warning(self):
+        out = self._run_sync(
+            ["ssh", "--include-private-keys"],
+            make_local=self._make_ssh_material,
+        )
+
+        self.assertEqual(out["result"].returncode, 0, out["result"].stderr)
+        self.assertIn("--include=/id_ed25519", out["rsync_args"])
+        self.assertIn("private key material", out["result"].stdout)
+        self.assertIn("relay/blast-radius", out["result"].stdout)
+
+    def test_ssh_rejects_local_private_key_name_with_control_character(self):
+        def make_local(home):
+            ssh_dir = self._make_ssh_material(home)
+            hostile = ssh_dir / "id\n--delete-excluded"
+            hostile.write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                "private-test-fixture\n"
+                "-----END OPENSSH PRIVATE KEY-----\n"
+            )
+            hostile.chmod(0o600)
+
+        out = self._run_sync(
+            ["ssh", "--include-private-keys"],
+            make_local=make_local,
+        )
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("control", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_remote_private_key_name_with_control_character(self):
+        def make_remote(home):
+            ssh_dir = self._make_ssh_material(home)
+            hostile = ssh_dir / "id\n--delete-excluded"
+            hostile.write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                "private-test-fixture\n"
+                "-----END OPENSSH PRIVATE KEY-----\n"
+            )
+            hostile.chmod(0o600)
+
+        out = self._run_sync(
+            ["ssh", "push", "--include-private-keys"],
+            make_remote=make_remote,
+        )
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("control", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_local_private_key_name_with_rsync_filter_glob(self):
+        def make_local(home):
+            ssh_dir = self._make_ssh_material(home)
+            for name in ("*", "***"):
+                hostile = ssh_dir / name
+                hostile.write_text(
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                    "private-test-fixture\n"
+                    "-----END OPENSSH PRIVATE KEY-----\n"
+                )
+                hostile.chmod(0o600)
+
+        out = self._run_sync(
+            ["ssh", "--include-private-keys"],
+            make_local=make_local,
+        )
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("rsync filter", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_remote_private_key_name_with_rsync_filter_glob(self):
+        def make_remote(home):
+            ssh_dir = self._make_ssh_material(home)
+            for name in ("*", "***"):
+                hostile = ssh_dir / name
+                hostile.write_text(
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                    "private-test-fixture\n"
+                    "-----END OPENSSH PRIVATE KEY-----\n"
+                )
+                hostile.chmod(0o600)
+
+        out = self._run_sync(
+            ["ssh", "push", "--include-private-keys"],
+            make_remote=make_remote,
+        )
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("rsync filter", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_private_key_disguised_as_public_file(self):
+        def make_local(home):
+            ssh_dir = self._make_ssh_material(home)
+            disguised = ssh_dir / "id_ed25519.pub"
+            disguised.write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                "private-test-fixture\n"
+                "-----END OPENSSH PRIVATE KEY-----\n"
+            )
+            disguised.chmod(0o600)
+
+        out = self._run_sync(["ssh"], make_local=make_local)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("public", out["result"].stderr)
+        self.assertIn("private key", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_private_key_disguised_as_public_file_with_crlf_pem(self):
+        def make_local(home):
+            ssh_dir = self._make_ssh_material(home)
+            disguised = ssh_dir / "id_ed25519.pub"
+            disguised.write_bytes(
+                b"-----BEGIN OPENSSH PRIVATE KEY-----\r\n"
+                b"private-test-fixture\r\n"
+                b"-----END OPENSSH PRIVATE KEY-----\r\n"
+            )
+            disguised.chmod(0o600)
+
+        out = self._run_sync(["ssh"], make_local=make_local)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("public", out["result"].stderr)
+        self.assertIn("private key", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_remote_private_key_disguised_as_public_file(self):
+        def make_remote(home):
+            ssh_dir = self._make_ssh_material(home)
+            disguised = ssh_dir / "id_ed25519.pub"
+            disguised.write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                "private-test-fixture\n"
+                "-----END OPENSSH PRIVATE KEY-----\n"
+            )
+            disguised.chmod(0o600)
+
+        out = self._run_sync(["ssh", "push"], make_remote=make_remote)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("public", out["result"].stderr)
+        self.assertIn("private key", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_remote_private_key_disguised_as_public_file_with_crlf_pem(self):
+        def make_remote(home):
+            ssh_dir = self._make_ssh_material(home)
+            disguised = ssh_dir / "id_ed25519.pub"
+            disguised.write_bytes(
+                b"-----BEGIN OPENSSH PRIVATE KEY-----\r\n"
+                b"private-test-fixture\r\n"
+                b"-----END OPENSSH PRIVATE KEY-----\r\n"
+            )
+            disguised.chmod(0o600)
+
+        out = self._run_sync(["ssh", "push"], make_remote=make_remote)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("public", out["result"].stderr)
+        self.assertIn("private key", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_refuses_open_private_key_permissions_before_rsync(self):
+        def make_local(home):
+            self._make_ssh_material(home, key_mode=0o644)
+
+        out = self._run_sync(["ssh"], make_local=make_local)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("private key", out["result"].stderr)
+        self.assertIn("600", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_refuses_open_ssh_dir_permissions_before_rsync(self):
+        def make_local(home):
+            self._make_ssh_material(home, dir_mode=0o755)
+
+        out = self._run_sync(["ssh"], make_local=make_local)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn(".ssh", out["result"].stderr)
+        self.assertIn("700", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_option_like_target_is_rejected_before_ssh_or_rsync(self):
+        out = self._run_sync(
+            ["ssh", "--target", "-oProxyCommand=touch /tmp/pwned"],
+            make_local=self._make_ssh_material,
+        )
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("must not start with '-'", out["result"].stderr)
+        self.assertEqual(out["ssh_log"], "")
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_option_like_identity_file_is_rejected_before_ssh_or_rsync(self):
+        out = self._run_sync(
+            ["ssh", "--identity-file", "-oProxyCommand=touch /tmp/pwned"],
+            make_local=self._make_ssh_material,
+        )
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("must not start with '-'", out["result"].stderr)
+        self.assertEqual(out["ssh_log"], "")
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_dir_symlink_attack_is_refused(self):
+        def make_local(home):
+            victim = home.parent / "victim-ssh"
+            victim.mkdir()
+            (home / ".ssh").symlink_to(victim)
+
+        out = self._run_sync(["ssh"], make_local=make_local)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("symlink", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_apply_without_allow_delete_does_not_delete(self):
+        out = self._run_sync(["ssh", "--apply"], make_local=self._make_ssh_material)
+
+        self.assertEqual(out["result"].returncode, 0, out["result"].stderr)
+        self.assertNotIn("--dry-run", out["rsync_args"])
+        self.assertIn("--backup", out["rsync_args"])
+        self.assertNotIn("--delete", out["rsync_args"])
 
     def test_apply_uses_backup_without_dry_run(self):
         out = self._run_sync(["pull", "--apply"])
@@ -868,12 +1146,17 @@ class TestClihostSyncScript(unittest.TestCase):
             with self.subTest(path=path.name):
                 text = path.read_text()
                 self.assertIn("clihost-sync.sh pull", text)
+                self.assertIn("clihost-sync.sh ssh", text)
                 self.assertIn("dry-run", text)
                 self.assertIn("~/.gitconfig", text)
                 self.assertIn("~/.config/gh", text)
+                self.assertIn("--include-private-keys", text)
+                self.assertIn("relay/blast-radius", text)
+                self.assertIn("PEM-only", text)
+                self.assertIn("flat", text)
                 self.assertNotRegex(
                     text,
-                    re.compile(r"clihost-sync\.sh[^\n]*(\.claude|\.ssh|settings\.json)"),
+                    re.compile(r"clihost-sync\.sh[^\n]*(\.claude|settings\.json)"),
                 )
 
 
