@@ -436,6 +436,7 @@ PRs should include:
 
 ## CI/CD
 
+- `.github/workflows/ci.yml` — pytest, `npm test`, and lightweight Docker build+smoke on every PR and push to `main` (`/health`, `sshd`, and root-context `~/.ssh` symlink hardening)
 - `.github/workflows/claude.yml` — Claude Code action, triggers on @claude mentions in issues/PR comments
 - `.github/workflows/claude-code-review.yml` — automatic code review on PR open/synchronize
 
