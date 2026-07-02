@@ -272,11 +272,13 @@ Fail-closed mount preflight:
 
 `run_remote_preflight` SSHes into the container before any rsync call. It refuses
 to continue unless the remote home is a separate mount exactly at `/home/hapi`.
-It aborts on a parent `/home` mount, a missing distinct `/home/hapi` mount, an
-unreadable `/proc/mounts`, or a symlink in a controlled path. Recovery is to fix
-the deployment mount first: mount the persistent volume at `/home/hapi`; if an
-old deployment mounted `/home`, move the volume's `hapi/` contents to the volume
-root or copy them into a fresh `/home/hapi` volume before retrying sync.
+A parent `/home` mount triggers that abort only when the distinct `/home/hapi`
+mount is absent; if both `/home` and `/home/hapi` are mounted, the `/home/hapi`
+mount satisfies preflight and sync continues. It also aborts on an unreadable
+`/proc/mounts` or a symlink in a controlled path. Recovery is to fix the
+deployment mount first: mount the persistent volume at `/home/hapi`; if an old
+deployment mounted `/home`, move the volume's `hapi/` contents to the volume root
+or copy them into a fresh `/home/hapi` volume before retrying sync.
 
 Recovery after a bad apply:
 
