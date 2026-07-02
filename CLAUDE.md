@@ -187,56 +187,116 @@ This is diagnostic only. It distinguishes (a) mount/persistence, (b)
 permissions/refresh write failure, and (c) network/token refresh failure; it does
 not change OAuth state.
 
-### Safe config sync over SSH
+### Синхронизация окружения хост↔контейнер
 
-`bin/clihost-sync.sh` is the host-side rsync-over-SSH sync command for the safe
-non-secret subset in epic #17. It is copied into the image as
-`/bin/clihost-sync.sh` for parity, but the documented workflow runs it from the
-host against the container's SSH endpoint. `pull` means host to container;
-`push` means container to host. The separate `ssh` subcommand syncs `~/.ssh`
-only when it is called explicitly; regular `pull`/`push` never include SSH
-material.
+This is the authoritative sync contract for epic #17. `bin/clihost-sync.sh` is
+the host-side rsync-over-SSH command for the config-level subset. It is not
+strictly non-secret: `~/.config/gh` may contain a GitHub OAuth token in plaintext
+in `hosts.yml` (`oauth_token:`) when `gh` is not using the OS keyring, which is
+common on headless servers and inside containers. Syncing `~/.config/gh` is a
+deliberate tradeoff, and that token crosses the SSH relay with the rest of the
+config-level data. The script is copied into the image as `/bin/clihost-sync.sh`
+for parity, but the documented workflow runs the repo script from the host
+against the container's SSH endpoint.
+
+Directions are intentionally named from the operator's host perspective:
+
+- `pull` copies host → container.
+- `push` copies container → host.
+- `ssh` copies `~/.ssh` separately; its default direction is `pull`, and it also
+  accepts `ssh push` or `--direction push`.
+
+The regular config-level include-list is intentionally narrow:
+
+- `~/.gitconfig`
+- `~/.config/gh`
+
+Examples:
 
 ```bash
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull --apply
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh push
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh ssh
-CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh ssh --apply
+CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh ssh push --apply
 ```
 
-The command is dry-run by default. `--apply` is required for a real transfer and enables
-rsync `--backup --backup-dir=...`; `--delete` is never used unless
-`--allow-delete` is passed explicitly.
+Target selection:
 
-The include-list is intentionally narrow:
+- Direct SSH: set `CLIHOST_SSH_TARGET`, `CLIHOST_SSH_PORT`, and optionally
+  `CLIHOST_SSH_IDENTITY_FILE`, or pass `--target`, `--ssh-port`, and
+  `--identity-file`.
+- chisel tunnel (#79): use the public chisel host as target and
+  `CHISEL_REMOTE_PORT` as `CLIHOST_SSH_PORT`.
+- cloudflared tunnel (#79): create a local `~/.ssh/config` Host with the
+  required `ProxyCommand`, then use that Host alias as `CLIHOST_SSH_TARGET`.
+  The helper intentionally exposes only target, port, and identity-file flags;
+  complex transport policy belongs in SSH config.
 
-- `~/.gitconfig`
-- `~/.config/gh`
+Safety defaults:
+
+- Every run is dry-run by default and prints rsync itemized changes.
+- `--apply` is required for a real transfer and enables rsync `--backup` plus
+  `--backup-dir=...`.
+- `--delete` is never used unless `--allow-delete` is passed explicitly.
+- rsync always uses `--no-links`, and local/remote guards reject controlled
+  symlink paths before transfer.
 
 The `ssh` subcommand is default-off and public-by-default. It includes only
 `~/.ssh/known_hosts`, `~/.ssh/*.pub`, and `~/.ssh/config` unless
 `--include-private-keys` is passed. That flag prints a warning because private
 key material crosses the SSH relay; this is the #17 risk B relay/blast-radius
-case that keeps `~/.ssh` out of the normal sync path. Before transfer, the
+case that keeps `~/.ssh` out of regular `pull`/`push`. Before transfer, the
 source `~/.ssh` directory must not be more open than `700`, and private keys
 must not be more open than `600`; apply mode also fixes those permissions on the
 receiver. The private-key detector is PEM-only, so PuTTY `.ppk` or DER keys are
-not selected by `--include-private-keys`. The sync contract is flat: it targets
-top-level files in `~/.ssh`; keys in subdirectories are permission-checked but
-not copied.
+not selected by `--include-private-keys`. The `~/.ssh` contract is flat: it
+targets top-level files; keys in subdirectories are permission-checked but not
+copied.
 
-Non-goals: do not add `~/.claude` to this command because credential persistence
-belongs to the `/home/hapi` volume; do not add private `~/.ssh` material to
-regular `pull`/`push`; do not add Claude `settings.json` because that
-configuration is managed by the current template/bootstrap contract.
+Non-goals:
 
-Every run first SSHes into the container and fail-closed checks that the remote
-home is mounted exactly at `/home/hapi`. A parent `/home` mount, no distinct
-`/home/hapi` mount, or an unreadable mount table aborts before rsync. The command
-also guards every controlled path under `/home/hapi` against existing symlinks
-including `~/.ssh` for the `ssh` subcommand, and passes `--no-links` to rsync so
-it never follows planted symlinks.
+- `~/.claude` is not part of sync. Credential persistence belongs to the
+  `/home/hapi` volume. Copying this tree from the host or an old container can
+  overwrite fresh Claude Code OAuth credentials during the refresh-token race
+  diagnosed in #69/#89. Treat the correctly mounted volume as the source of
+  truth.
+- Private `~/.ssh` material is not part of regular `pull`/`push` because it
+  expands blast radius and crosses the relay path. Keep it behind the explicit
+  `ssh` subcommand and the extra `--include-private-keys` opt-in.
+- Claude Code `settings.json` is not part of sync. It is managed by
+  `config/claude-settings.json` and the template/bootstrap contract from #60;
+  syncing arbitrary copies would make stale config drift harder to reason about.
+
+Fail-closed mount preflight:
+
+`run_remote_preflight` SSHes into the container before any rsync call. It refuses
+to continue unless the remote home is a separate mount exactly at `/home/hapi`.
+A parent `/home` mount triggers that abort only when the distinct `/home/hapi`
+mount is absent; if both `/home` and `/home/hapi` are mounted, the `/home/hapi`
+mount satisfies preflight and sync continues. It also aborts on an unreadable
+`/proc/mounts` or a symlink in a controlled path. Recovery is to fix the
+deployment mount first: mount the persistent volume at `/home/hapi`; if an old
+deployment mounted `/home`, move the volume's `hapi/` contents to the volume root
+or copy them into a fresh `/home/hapi` volume before retrying sync.
+
+Recovery after a bad apply:
+
+- Dry-run makes no changes, so there is nothing to restore.
+- Apply mode writes backups on the destination side. For host → container,
+  overwritten files go under `/home/hapi/.clihost-sync-backups/<UTC timestamp>`.
+  For container → host, overwritten files go under
+  `~/.clihost-sync-backups/<UTC timestamp>`.
+- Restore by inspecting the latest backup-dir and copying the needed files back
+  to the destination path. Do this manually instead of running a broad reverse
+  sync when the broken state is not yet understood.
+- `~/.claude` recovery is volume recovery, not sync recovery: fix the mount,
+  then use the known-good `/home/hapi` volume contents. The sync command should
+  not be expanded to repair Claude OAuth state.
+
+Syncthing / real-time sync is explicitly deferred. The accepted design is
+rsync-first for this release; a long-running bidirectional file watcher is
+over-engineering until the manual contract proves insufficient.
 
 ### ttyd proxy package (app/)
 

@@ -146,53 +146,76 @@ bin/claude-auth-snapshot-host.sh diff ./claude-auth-host-snapshots/<A>.json ./cl
 права/refresh-запись, (в) сетевой или token-refresh провал, но сам OAuth не
 чинит.
 
-### Safe config sync over SSH
+### Синхронизация окружения хост↔контейнер
 
-`bin/clihost-sync.sh` is a host-side rsync-over-SSH helper for the safe,
-non-secret sync subset in epic #17. It expects SSH access to the container's
-`sshd` as the `hapi` user. `pull` means host to container; `push` means
-container to host. The separate `ssh` subcommand syncs `~/.ssh` only when it is
-called explicitly; regular `pull`/`push` never include SSH material.
+`bin/clihost-sync.sh` запускается с хоста и синхронизирует через
+rsync-over-SSH только config-level subset с узким include-list, а не строго
+несекретный набор:
+
+- `~/.gitconfig`
+- `~/.config/gh`
+
+`~/.config/gh` может содержать GitHub OAuth-токен в plaintext в `hosts.yml`
+(`oauth_token:`), если `gh` не использует системный keyring. Такой режим типичен
+для headless-серверов и контейнеров. Синк `~/.config/gh` — осознанный выбор:
+этот токен пересекает SSH relay вместе с config-level данными.
+
+Команда подключается к `sshd` контейнера под пользователем `hapi`. В этом
+контракте `pull` означает хост → контейнер, а `push` — контейнер → хост.
+По умолчанию это dry-run с itemized output от rsync; реальная запись требует
+`--apply`. `--delete` не используется без явного `--allow-delete`.
 
 ```bash
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull --apply
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh push
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh ssh
-CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh ssh --apply
+CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh ssh pull --apply
 ```
 
-The command is dry-run by default and prints the rsync itemized changes. A real
-run requires `--apply`; apply mode also uses `--backup --backup-dir=...`.
-`--delete` is never passed to rsync unless you also pass `--allow-delete`.
+Для прямого SSH используйте `CLIHOST_SSH_TARGET`, `CLIHOST_SSH_PORT` и при
+необходимости `CLIHOST_SSH_IDENTITY_FILE` либо одноимённые флаги. Для туннеля
+#79: chisel обычно выглядит как обычный `ssh -p <port>`, а cloudflared удобнее
+завести в локальном `~/.ssh/config` как Host с `ProxyCommand`, после чего
+передать helper-у этот Host как target.
 
-Only these paths are included:
+`ssh`-подкоманда отделена от обычного `pull`/`push` и выключена по умолчанию.
+Без `--include-private-keys` она переносит только `~/.ssh/known_hosts`,
+`~/.ssh/*.pub` и `~/.ssh/config`. Приватные ключи требуют явного флага, потому
+что ключевой материал проходит через SSH relay; это risk B relay/blast-radius
+из #17. Детектор приватных ключей PEM-only, а контракт `~/.ssh` flat: копируются
+только top-level файлы, ключи в поддиректориях проверяются по правам, но не
+переносятся.
 
-- `~/.gitconfig`
-- `~/.config/gh`
+Non-goals:
 
-The `ssh` subcommand is default-off and public-by-default. It includes only
-`~/.ssh/known_hosts`, `~/.ssh/*.pub`, and `~/.ssh/config` unless
-`--include-private-keys` is passed. That flag prints a warning because private
-key material crosses the SSH relay; this is the #17 risk B relay/blast-radius
-case that keeps `~/.ssh` out of the normal sync path. Before transfer, the
-source `~/.ssh` directory must not be more open than `700`, and private keys
-must not be more open than `600`; apply mode also fixes those permissions on the
-receiver. The private-key detector is PEM-only, so PuTTY `.ppk` or DER keys are
-not selected by `--include-private-keys`. The sync contract is flat: it targets
-top-level files in `~/.ssh`; keys in subdirectories are permission-checked but
-not copied.
+- `~/.claude` не синкается: источник истины — volume `/home/hapi`. Синк мог бы
+  затереть свежие OAuth credentials во время refresh-token гонки (#69/#89).
+- Приватные `~/.ssh` не входят в основной subset из-за blast radius и relay-риска;
+  для них есть отдельная явная `ssh`-подкоманда.
+- Claude Code `settings.json` не синкается: он управляется
+  `config/claude-settings.json` и bootstrap-контрактом (#60), иначе легко
+  разнести устаревшую локальную конфигурацию.
 
-These paths are intentionally not synced: `~/.claude` stays persisted by the
-`/home/hapi` volume, private `~/.ssh` keys are out of scope for regular
-`pull`/`push`, and Claude `settings.json` is not part of the sync contract.
+Перед каждым запуском remote preflight работает fail-closed: если home на
+удалённой стороне не является отдельным mount ровно в `/home/hapi` или
+`/proc/mounts` нельзя прочитать, rsync не стартует. Parent mount на `/home`
+вызывает abort только при отсутствии отдельного `/home/hapi` mount; если
+смонтированы оба, preflight считает `/home/hapi` достаточным и sync продолжается.
+В таком случае исправьте volume mount на `/home/hapi`; если раньше
+использовался `/home`, перенесите содержимое `hapi/` в корень нового volume, как
+описано выше.
 
-Before every run, the helper connects over SSH and refuses to continue unless
-the remote home is a separate mount at exactly `/home/hapi`. A parent `/home`
-mount, missing `/home/hapi` mount, or unreadable mount table aborts before
-`rsync`. The helper also refuses any existing symlink on the controlled
-`/home/hapi` paths, including `~/.ssh` for the `ssh` subcommand, and runs rsync
-with `--no-links`, so it does not read or write through planted symlinks.
+Recovery: в режиме `--apply` helper включает rsync `--backup` и
+`--backup-dir`. Для `pull` backups остаются в контейнере под
+`/home/hapi/.clihost-sync-backups/<timestamp>`, для `push` — на хосте под
+`~/.clihost-sync-backups/<timestamp>`. Чтобы откатиться, возьмите нужные файлы
+из последнего backup-dir и скопируйте их обратно в сторону назначения.
+`~/.claude` восстанавливается не через sync, а из корректно смонтированного
+`/home/hapi` volume как known-good источника.
+
+Syncthing и real-time sync отложены: текущий релиз намеренно rsync-first, без
+постоянного фонового синка.
 
 ## Архитектура
 
