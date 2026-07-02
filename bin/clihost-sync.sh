@@ -60,6 +60,18 @@ reject_option_like() {
   esac
 }
 
+reject_control_chars() {
+  local label="$1"
+  local value="$2"
+
+  case "${value}" in
+    *$'\n'*|*$'\r'*) die "${label} must not contain control characters" ;;
+  esac
+  if LC_ALL=C printf '%s' "${value}" | grep -q '[[:cntrl:]]'; then
+    die "${label} must not contain control characters"
+  fi
+}
+
 path_mode() {
   local path="$1"
 
@@ -91,6 +103,19 @@ is_private_key_file() {
   LC_ALL=C grep -Eq -- '^-+BEGIN [A-Z0-9 ]*PRIVATE KEY-+$' "${path}" 2>/dev/null
 }
 
+validate_default_public_ssh_material() {
+  local ssh_dir="$1"
+  local path
+
+  for path in "${ssh_dir}/known_hosts" "${ssh_dir}/config" "${ssh_dir}"/*.pub; do
+    [ -e "${path}" ] || continue
+    [ -f "${path}" ] || continue
+    if is_private_key_file "${path}"; then
+      die "default SSH public material contains private key block: ${path}"
+    fi
+  done
+}
+
 validate_private_key_permissions() {
   local ssh_dir="$1"
   local path
@@ -103,6 +128,19 @@ validate_private_key_permissions() {
   done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
 }
 
+private_key_include_rule() {
+  local rel="$1"
+  local rule
+
+  reject_control_chars "SSH private key filename" "${rel}"
+  rule="--include=/${rel}"
+  case "${rule}" in
+    --include=/*) printf '%s\n' "${rule}" ;;
+    -*) die "generated rsync include rule must not start with '-' (got: ${rule})" ;;
+    *) die "invalid generated rsync include rule: ${rule}" ;;
+  esac
+}
+
 collect_local_private_key_includes() {
   local ssh_dir="$1"
   local path
@@ -112,13 +150,14 @@ collect_local_private_key_includes() {
   while IFS= read -r -d '' path; do
     if is_private_key_file "${path}"; then
       rel="${path#${ssh_dir}/}"
-      printf '%s\n' "--include=/${rel}"
+      private_key_include_rule "${rel}"
     fi
   done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
 }
 
 preflight_local_ssh_source() {
   local host_home="$1"
+  local include_private_keys="$2"
   local ssh_dir="${host_home}/.ssh"
 
   [ -n "${host_home}" ] || die "HOME is empty; refusing to sync"
@@ -128,6 +167,9 @@ preflight_local_ssh_source() {
   reject_group_or_other_permissions "${ssh_dir}" "700" ".ssh directory"
   guard_local_tree_no_symlinks "${ssh_dir}"
   validate_private_key_permissions "${ssh_dir}"
+  if [ "${include_private_keys}" != "true" ]; then
+    validate_default_public_ssh_material "${ssh_dir}"
+  fi
 }
 
 preflight_local_ssh_destination() {
@@ -158,6 +200,28 @@ fix_local_ssh_permissions() {
       chmod 600 "${path}"
     fi
   done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
+}
+
+append_generated_include_rule() {
+  local rule="$1"
+
+  reject_control_chars "generated rsync include rule" "${rule}"
+  case "${rule}" in
+    --include=/*) rsync_args+=("${rule}") ;;
+    -*) die "generated rsync include rule must not start with '-' (got: ${rule})" ;;
+    *) die "invalid generated rsync include rule: ${rule}" ;;
+  esac
+}
+
+append_generated_include_rules() {
+  local include_output="$1"
+  local include_rule
+
+  [ -n "${include_output}" ] || return 0
+  while IFS= read -r include_rule || [ -n "${include_rule}" ]; do
+    [ -n "${include_rule}" ] || continue
+    append_generated_include_rule "${include_rule}"
+  done <<< "${include_output}"
 }
 
 guard_local_path() {
@@ -296,10 +360,11 @@ run_remote_ssh_helper() {
   local action="$1"
   local target="$2"
   local direction="$3"
-  shift 3
+  local include_private_keys="$4"
+  shift 4
   local -a ssh_args=("$@")
 
-  "${ssh_args[@]}" -- "${target}" bash -s -- "${REMOTE_HOME}" "/proc/mounts" "${action}" "${direction}" <<'REMOTE'
+  "${ssh_args[@]}" -- "${target}" bash -s -- "${REMOTE_HOME}" "/proc/mounts" "${action}" "${direction}" "${include_private_keys}" <<'REMOTE'
 set -euo pipefail
 
 die() {
@@ -311,6 +376,7 @@ remote_home="$1"
 _mounts_file="$2"
 action="$3"
 direction="$4"
+include_private_keys="$5"
 ssh_dir="${remote_home}/.ssh"
 
 guard_remote_path() {
@@ -363,6 +429,18 @@ path_mode() {
   fi
 }
 
+reject_control_chars() {
+  local label="$1"
+  local value="$2"
+
+  case "${value}" in
+    *$'\n'*|*$'\r'*) die "${label} must not contain control characters" ;;
+  esac
+  if LC_ALL=C printf '%s' "${value}" | grep -q '[[:cntrl:]]'; then
+    die "${label} must not contain control characters"
+  fi
+}
+
 reject_group_or_other_permissions() {
   local path="$1"
   local expected="$2"
@@ -384,6 +462,18 @@ is_private_key_file() {
   LC_ALL=C grep -Eq -- '^-+BEGIN [A-Z0-9 ]*PRIVATE KEY-+$' "${path}" 2>/dev/null
 }
 
+validate_default_public_ssh_material() {
+  local path
+
+  for path in "${ssh_dir}/known_hosts" "${ssh_dir}/config" "${ssh_dir}"/*.pub; do
+    [ -e "${path}" ] || continue
+    [ -f "${path}" ] || continue
+    if is_private_key_file "${path}"; then
+      die "default SSH public material contains private key block: ${path}"
+    fi
+  done
+}
+
 validate_private_key_permissions() {
   local path
 
@@ -395,6 +485,19 @@ validate_private_key_permissions() {
   done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
 }
 
+private_key_include_rule() {
+  local rel="$1"
+  local rule
+
+  reject_control_chars "SSH private key filename" "${rel}"
+  rule="--include=/${rel}"
+  case "${rule}" in
+    --include=/*) printf '%s\n' "${rule}" ;;
+    -*) die "generated rsync include rule must not start with '-' (got: ${rule})" ;;
+    *) die "invalid generated rsync include rule: ${rule}" ;;
+  esac
+}
+
 print_private_key_includes() {
   local path
   local rel
@@ -403,7 +506,7 @@ print_private_key_includes() {
   while IFS= read -r -d '' path; do
     if is_private_key_file "${path}"; then
       rel="${path#${ssh_dir}/}"
-      printf '%s\n' "--include=/${rel}"
+      private_key_include_rule "${rel}"
     fi
   done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
 }
@@ -416,6 +519,9 @@ case "${action}" in
       reject_group_or_other_permissions "${ssh_dir}" "700" ".ssh directory"
       guard_remote_tree_no_symlinks "${ssh_dir}"
       validate_private_key_permissions
+      if [ "${include_private_keys}" != "true" ]; then
+        validate_default_public_ssh_material
+      fi
     else
       if [ -e "${ssh_dir}" ]; then
         [ -d "${ssh_dir}" ] || die "${ssh_dir} exists but is not a directory"
@@ -449,24 +555,24 @@ REMOTE
 run_remote_ssh_preflight() {
   local target="$1"
   local direction="$2"
-  local _include_private_keys="$3"
+  local include_private_keys="$3"
   shift 3
 
-  run_remote_ssh_helper "preflight" "${target}" "${direction}" "$@"
+  run_remote_ssh_helper "preflight" "${target}" "${direction}" "${include_private_keys}" "$@"
 }
 
 collect_remote_private_key_includes() {
   local target="$1"
   shift
 
-  run_remote_ssh_helper "collect-private-includes" "${target}" "push" "$@"
+  run_remote_ssh_helper "collect-private-includes" "${target}" "push" "true" "$@"
 }
 
 fix_remote_ssh_permissions() {
   local target="$1"
   shift
 
-  run_remote_ssh_helper "fix-permissions" "${target}" "pull" "$@"
+  run_remote_ssh_helper "fix-permissions" "${target}" "pull" "false" "$@"
 }
 
 main() {
@@ -609,7 +715,7 @@ main() {
 
   if [ "${command}" = "ssh" ]; then
     if [ "${ssh_direction}" = "pull" ]; then
-      preflight_local_ssh_source "${host_home}"
+      preflight_local_ssh_source "${host_home}" "${include_private_keys}"
     else
       preflight_local_ssh_destination "${host_home}"
     fi
@@ -621,18 +727,17 @@ main() {
     )
     if [ "${include_private_keys}" = "true" ]; then
       echo "WARNING: --include-private-keys selected; private key material will be copied across the SSH relay and leave its source machine. ~/.ssh stays outside the default sync because of #17 risk B (relay/blast-radius)."
-      local include_rule
+      local include_output
       if [ "${ssh_direction}" = "pull" ]; then
-        while IFS= read -r include_rule; do
-          [ -n "${include_rule}" ] || continue
-          rsync_args+=("${include_rule}")
-        done < <(collect_local_private_key_includes "${host_home}/.ssh")
+        if ! include_output="$(collect_local_private_key_includes "${host_home}/.ssh")"; then
+          exit 1
+        fi
       else
-        while IFS= read -r include_rule; do
-          [ -n "${include_rule}" ] || continue
-          rsync_args+=("${include_rule}")
-        done < <(collect_remote_private_key_includes "${target}" "${ssh_args[@]}")
+        if ! include_output="$(collect_remote_private_key_includes "${target}" "${ssh_args[@]}")"; then
+          exit 1
+        fi
       fi
+      append_generated_include_rules "${include_output}"
     fi
     rsync_args+=("--exclude=*")
   else

@@ -221,7 +221,10 @@ key material crosses the SSH relay; this is the #17 risk B relay/blast-radius
 case that keeps `~/.ssh` out of the normal sync path. Before transfer, the
 source `~/.ssh` directory must not be more open than `700`, and private keys
 must not be more open than `600`; apply mode also fixes those permissions on the
-receiver.
+receiver. The private-key detector is PEM-only, so PuTTY `.ppk` or DER keys are
+not selected by `--include-private-keys`. The sync contract is flat: it targets
+top-level files in `~/.ssh`; keys in subdirectories are permission-checked but
+not copied.
 
 Non-goals: do not add `~/.claude` to this command because credential persistence
 belongs to the `/home/hapi` volume; do not add private `~/.ssh` material to

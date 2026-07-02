@@ -737,7 +737,9 @@ class TestClihostSyncScript(unittest.TestCase):
             fake_ssh = tmp_path / "ssh"
             fake_ssh.write_text(
                 "#!/bin/bash\n"
-                f'printf "SSH"; printf " [%s]" "$@"; printf "\\n" >> "{ssh_log}"\n'
+                f'printf "SSH" >> "{ssh_log}"\n'
+                f'printf " [%s]" "$@" >> "{ssh_log}"\n'
+                f'printf "\\n" >> "{ssh_log}"\n'
                 "while [ \"$#\" -gt 0 ]; do\n"
                 "  if [ \"$1\" = \"bash\" ]; then\n"
                 "    shift\n"
@@ -827,6 +829,82 @@ class TestClihostSyncScript(unittest.TestCase):
         self.assertIn("--include=/id_ed25519", out["rsync_args"])
         self.assertIn("private key material", out["result"].stdout)
         self.assertIn("relay/blast-radius", out["result"].stdout)
+
+    def test_ssh_rejects_local_private_key_name_with_control_character(self):
+        def make_local(home):
+            ssh_dir = self._make_ssh_material(home)
+            hostile = ssh_dir / "id\n--delete-excluded"
+            hostile.write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                "private-test-fixture\n"
+                "-----END OPENSSH PRIVATE KEY-----\n"
+            )
+            hostile.chmod(0o600)
+
+        out = self._run_sync(
+            ["ssh", "--include-private-keys"],
+            make_local=make_local,
+        )
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("control", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_remote_private_key_name_with_control_character(self):
+        def make_remote(home):
+            ssh_dir = self._make_ssh_material(home)
+            hostile = ssh_dir / "id\n--delete-excluded"
+            hostile.write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                "private-test-fixture\n"
+                "-----END OPENSSH PRIVATE KEY-----\n"
+            )
+            hostile.chmod(0o600)
+
+        out = self._run_sync(
+            ["ssh", "push", "--include-private-keys"],
+            make_remote=make_remote,
+        )
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("control", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_private_key_disguised_as_public_file(self):
+        def make_local(home):
+            ssh_dir = self._make_ssh_material(home)
+            disguised = ssh_dir / "id_ed25519.pub"
+            disguised.write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                "private-test-fixture\n"
+                "-----END OPENSSH PRIVATE KEY-----\n"
+            )
+            disguised.chmod(0o600)
+
+        out = self._run_sync(["ssh"], make_local=make_local)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("public", out["result"].stderr)
+        self.assertIn("private key", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_remote_private_key_disguised_as_public_file(self):
+        def make_remote(home):
+            ssh_dir = self._make_ssh_material(home)
+            disguised = ssh_dir / "id_ed25519.pub"
+            disguised.write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                "private-test-fixture\n"
+                "-----END OPENSSH PRIVATE KEY-----\n"
+            )
+            disguised.chmod(0o600)
+
+        out = self._run_sync(["ssh", "push"], make_remote=make_remote)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("public", out["result"].stderr)
+        self.assertIn("private key", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
 
     def test_ssh_refuses_open_private_key_permissions_before_rsync(self):
         def make_local(home):
@@ -996,6 +1074,8 @@ class TestClihostSyncScript(unittest.TestCase):
                 self.assertIn("~/.config/gh", text)
                 self.assertIn("--include-private-keys", text)
                 self.assertIn("relay/blast-radius", text)
+                self.assertIn("PEM-only", text)
+                self.assertIn("flat", text)
                 self.assertNotRegex(
                     text,
                     re.compile(r"clihost-sync\.sh[^\n]*(\.claude|settings\.json)"),
