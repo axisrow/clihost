@@ -193,12 +193,16 @@ not change OAuth state.
 non-secret subset in epic #17. It is copied into the image as
 `/bin/clihost-sync.sh` for parity, but the documented workflow runs it from the
 host against the container's SSH endpoint. `pull` means host to container;
-`push` means container to host.
+`push` means container to host. The separate `ssh` subcommand syncs `~/.ssh`
+only when it is called explicitly; regular `pull`/`push` never include SSH
+material.
 
 ```bash
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull --apply
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh push
+CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh ssh
+CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh ssh --apply
 ```
 
 The command is dry-run by default. `--apply` is required for a real transfer and enables
@@ -210,16 +214,26 @@ The include-list is intentionally narrow:
 - `~/.gitconfig`
 - `~/.config/gh`
 
+The `ssh` subcommand is default-off and public-by-default. It includes only
+`~/.ssh/known_hosts`, `~/.ssh/*.pub`, and `~/.ssh/config` unless
+`--include-private-keys` is passed. That flag prints a warning because private
+key material crosses the SSH relay; this is the #17 risk B relay/blast-radius
+case that keeps `~/.ssh` out of the normal sync path. Before transfer, the
+source `~/.ssh` directory must not be more open than `700`, and private keys
+must not be more open than `600`; apply mode also fixes those permissions on the
+receiver.
+
 Non-goals: do not add `~/.claude` to this command because credential persistence
-belongs to the `/home/hapi` volume; do not add private `~/.ssh` material because
-that is a separate sync task; do not add Claude `settings.json` because that
+belongs to the `/home/hapi` volume; do not add private `~/.ssh` material to
+regular `pull`/`push`; do not add Claude `settings.json` because that
 configuration is managed by the current template/bootstrap contract.
 
 Every run first SSHes into the container and fail-closed checks that the remote
 home is mounted exactly at `/home/hapi`. A parent `/home` mount, no distinct
 `/home/hapi` mount, or an unreadable mount table aborts before rsync. The command
 also guards every controlled path under `/home/hapi` against existing symlinks
-and passes `--no-links` to rsync so it never follows planted symlinks.
+including `~/.ssh` for the `ssh` subcommand, and passes `--no-links` to rsync so
+it never follows planted symlinks.
 
 ### ttyd proxy package (app/)
 

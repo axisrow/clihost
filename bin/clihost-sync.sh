@@ -3,6 +3,7 @@ set -euo pipefail
 
 REMOTE_HOME="/home/hapi"
 SYNC_LABEL="~/.gitconfig and ~/.config/gh"
+SSH_SYNC_LABEL="~/.ssh"
 
 die() {
   echo "ERROR: $*" >&2
@@ -14,19 +15,24 @@ usage() {
 Usage:
   clihost-sync.sh pull [--target user@host] [--ssh-port port] [--identity-file path] [--apply] [--allow-delete]
   clihost-sync.sh push [--target user@host] [--ssh-port port] [--identity-file path] [--apply] [--allow-delete]
+  clihost-sync.sh ssh [pull|push] [--target user@host] [--ssh-port port] [--identity-file path] [--include-private-keys] [--apply] [--allow-delete]
 
 Direction:
   pull  copies the safe host config subset into the clihost container.
   push  copies the same safe subset from the clihost container back to the host.
+  ssh   copies ~/.ssh separately; default direction is pull (host to container).
 
 Safety:
   Dry-run is the default. Use --apply for a real rsync run.
   --delete is never used unless --allow-delete is passed explicitly.
   The remote home must be mounted exactly at /home/hapi.
+  ssh sync includes only known_hosts, *.pub, and config by default.
+  Private keys require --include-private-keys and secure source permissions.
 
 Target:
   Set --target or CLIHOST_SSH_TARGET to the SSH destination, for example:
     CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 clihost-sync.sh pull
+    CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 clihost-sync.sh ssh
 EOF
 }
 
@@ -43,6 +49,115 @@ quote_join() {
     fi
   done
   printf "%s\n" "${out}"
+}
+
+reject_option_like() {
+  local label="$1"
+  local value="$2"
+
+  case "${value}" in
+    -*) die "${label} must not start with '-' (got: ${value})" ;;
+  esac
+}
+
+path_mode() {
+  local path="$1"
+
+  if stat -c '%a' "${path}" >/dev/null 2>&1; then
+    stat -c '%a' "${path}"
+  else
+    stat -f '%Lp' "${path}"
+  fi
+}
+
+reject_group_or_other_permissions() {
+  local path="$1"
+  local expected="$2"
+  local label="$3"
+  local mode
+  local mode_value
+
+  mode="$(path_mode "${path}")" || die "cannot inspect permissions for ${path}"
+  mode_value=$((8#${mode}))
+  if (( mode_value & 077 )); then
+    die "${label} permissions must be ${expected} or stricter; got ${mode} at ${path}"
+  fi
+}
+
+is_private_key_file() {
+  local path="$1"
+
+  [ -f "${path}" ] || return 1
+  LC_ALL=C grep -Eq -- '^-+BEGIN [A-Z0-9 ]*PRIVATE KEY-+$' "${path}" 2>/dev/null
+}
+
+validate_private_key_permissions() {
+  local ssh_dir="$1"
+  local path
+
+  [ -d "${ssh_dir}" ] || return 0
+  while IFS= read -r -d '' path; do
+    if is_private_key_file "${path}"; then
+      reject_group_or_other_permissions "${path}" "600" "private key"
+    fi
+  done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
+}
+
+collect_local_private_key_includes() {
+  local ssh_dir="$1"
+  local path
+  local rel
+
+  [ -d "${ssh_dir}" ] || return 0
+  while IFS= read -r -d '' path; do
+    if is_private_key_file "${path}"; then
+      rel="${path#${ssh_dir}/}"
+      printf '%s\n' "--include=/${rel}"
+    fi
+  done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
+}
+
+preflight_local_ssh_source() {
+  local host_home="$1"
+  local ssh_dir="${host_home}/.ssh"
+
+  [ -n "${host_home}" ] || die "HOME is empty; refusing to sync"
+  [ -d "${host_home}" ] || die "HOME '${host_home}' is not a directory"
+  guard_local_path "${host_home}" "${ssh_dir}"
+  [ -d "${ssh_dir}" ] || die "source SSH directory not found: ${ssh_dir}"
+  reject_group_or_other_permissions "${ssh_dir}" "700" ".ssh directory"
+  guard_local_tree_no_symlinks "${ssh_dir}"
+  validate_private_key_permissions "${ssh_dir}"
+}
+
+preflight_local_ssh_destination() {
+  local host_home="$1"
+  local ssh_dir="${host_home}/.ssh"
+
+  [ -n "${host_home}" ] || die "HOME is empty; refusing to sync"
+  [ -d "${host_home}" ] || die "HOME '${host_home}' is not a directory"
+  guard_local_path "${host_home}" "${ssh_dir}"
+  if [ -e "${ssh_dir}" ]; then
+    [ -d "${ssh_dir}" ] || die "${ssh_dir} exists but is not a directory"
+    guard_local_tree_no_symlinks "${ssh_dir}"
+  fi
+}
+
+fix_local_ssh_permissions() {
+  local host_home="$1"
+  local ssh_dir="${host_home}/.ssh"
+  local path
+
+  [ -e "${ssh_dir}" ] || return 0
+  guard_local_path "${host_home}" "${ssh_dir}"
+  [ -d "${ssh_dir}" ] || die "${ssh_dir} exists but is not a directory"
+  guard_local_tree_no_symlinks "${ssh_dir}"
+  chmod 700 "${ssh_dir}"
+  while IFS= read -r -d '' path; do
+    if is_private_key_file "${path}"; then
+      chmod 600 "${path}"
+    fi
+  done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
 }
 
 guard_local_path() {
@@ -177,10 +292,190 @@ guard_remote_tree_no_symlinks "${backup_root}"
 REMOTE
 }
 
+run_remote_ssh_helper() {
+  local action="$1"
+  local target="$2"
+  local direction="$3"
+  shift 3
+  local -a ssh_args=("$@")
+
+  "${ssh_args[@]}" -- "${target}" bash -s -- "${REMOTE_HOME}" "/proc/mounts" "${action}" "${direction}" <<'REMOTE'
+set -euo pipefail
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+remote_home="$1"
+_mounts_file="$2"
+action="$3"
+direction="$4"
+ssh_dir="${remote_home}/.ssh"
+
+guard_remote_path() {
+  local path="$1"
+  local rel
+  local current
+  local part
+  local old_ifs
+  local -a parts
+
+  case "${path}" in
+    "${remote_home}" | "${remote_home}"/*) ;;
+    *) die "refusing to touch remote path outside /home/hapi: ${path}" ;;
+  esac
+
+  rel="${path#${remote_home}/}"
+  current="${remote_home}"
+  old_ifs="${IFS}"
+  IFS="/"
+  read -r -a parts <<< "${rel}"
+  IFS="${old_ifs}"
+  for part in "${parts[@]}"; do
+    [ -n "${part}" ] || continue
+    current="${current}/${part}"
+    if [ -L "${current}" ]; then
+      die "${current} is a symlink; refusing to sync through it"
+    fi
+  done
+}
+
+guard_remote_tree_no_symlinks() {
+  local path="$1"
+  local found
+
+  [ -d "${path}" ] || return 0
+  found="$(find "${path}" -type l -print 2>/dev/null)" \
+    || die "cannot inspect ${path} for symlinks"
+  if [ -n "${found}" ]; then
+    die "$(printf "%s\n" "${found}" | sed -n '1p') is a symlink; refusing to sync through it"
+  fi
+}
+
+path_mode() {
+  local path="$1"
+
+  if stat -c '%a' "${path}" >/dev/null 2>&1; then
+    stat -c '%a' "${path}"
+  else
+    stat -f '%Lp' "${path}"
+  fi
+}
+
+reject_group_or_other_permissions() {
+  local path="$1"
+  local expected="$2"
+  local label="$3"
+  local mode
+  local mode_value
+
+  mode="$(path_mode "${path}")" || die "cannot inspect permissions for ${path}"
+  mode_value=$((8#${mode}))
+  if (( mode_value & 077 )); then
+    die "${label} permissions must be ${expected} or stricter; got ${mode} at ${path}"
+  fi
+}
+
+is_private_key_file() {
+  local path="$1"
+
+  [ -f "${path}" ] || return 1
+  LC_ALL=C grep -Eq -- '^-+BEGIN [A-Z0-9 ]*PRIVATE KEY-+$' "${path}" 2>/dev/null
+}
+
+validate_private_key_permissions() {
+  local path
+
+  [ -d "${ssh_dir}" ] || return 0
+  while IFS= read -r -d '' path; do
+    if is_private_key_file "${path}"; then
+      reject_group_or_other_permissions "${path}" "600" "private key"
+    fi
+  done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
+}
+
+print_private_key_includes() {
+  local path
+  local rel
+
+  [ -d "${ssh_dir}" ] || return 0
+  while IFS= read -r -d '' path; do
+    if is_private_key_file "${path}"; then
+      rel="${path#${ssh_dir}/}"
+      printf '%s\n' "--include=/${rel}"
+    fi
+  done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
+}
+
+guard_remote_path "${ssh_dir}"
+case "${action}" in
+  preflight)
+    if [ "${direction}" = "push" ]; then
+      [ -d "${ssh_dir}" ] || die "source SSH directory not found: ${ssh_dir}"
+      reject_group_or_other_permissions "${ssh_dir}" "700" ".ssh directory"
+      guard_remote_tree_no_symlinks "${ssh_dir}"
+      validate_private_key_permissions
+    else
+      if [ -e "${ssh_dir}" ]; then
+        [ -d "${ssh_dir}" ] || die "${ssh_dir} exists but is not a directory"
+        guard_remote_tree_no_symlinks "${ssh_dir}"
+      fi
+    fi
+    ;;
+  collect-private-includes)
+    [ -d "${ssh_dir}" ] || exit 0
+    guard_remote_tree_no_symlinks "${ssh_dir}"
+    print_private_key_includes
+    ;;
+  fix-permissions)
+    [ -e "${ssh_dir}" ] || exit 0
+    [ -d "${ssh_dir}" ] || die "${ssh_dir} exists but is not a directory"
+    guard_remote_tree_no_symlinks "${ssh_dir}"
+    chmod 700 "${ssh_dir}"
+    while IFS= read -r -d '' path; do
+      if is_private_key_file "${path}"; then
+        chmod 600 "${path}"
+      fi
+    done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
+    ;;
+  *)
+    die "unknown remote ssh action: ${action}"
+    ;;
+esac
+REMOTE
+}
+
+run_remote_ssh_preflight() {
+  local target="$1"
+  local direction="$2"
+  local _include_private_keys="$3"
+  shift 3
+
+  run_remote_ssh_helper "preflight" "${target}" "${direction}" "$@"
+}
+
+collect_remote_private_key_includes() {
+  local target="$1"
+  shift
+
+  run_remote_ssh_helper "collect-private-includes" "${target}" "push" "$@"
+}
+
+fix_remote_ssh_permissions() {
+  local target="$1"
+  shift
+
+  run_remote_ssh_helper "fix-permissions" "${target}" "pull" "$@"
+}
+
 main() {
   local command=""
   local apply="false"
   local allow_delete="false"
+  local ssh_direction="pull"
+  local ssh_direction_set="false"
+  local include_private_keys="false"
   local target="${CLIHOST_SSH_TARGET:-}"
   local ssh_port="${CLIHOST_SSH_PORT:-}"
   local identity_file="${CLIHOST_SSH_IDENTITY_FILE:-}"
@@ -189,8 +484,40 @@ main() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       pull|push)
+        if [ "${command}" = "ssh" ]; then
+          [ "${ssh_direction_set}" = "false" ] || die "multiple ssh directions provided"
+          ssh_direction="$1"
+          ssh_direction_set="true"
+        else
+          [ -z "${command}" ] || die "multiple subcommands provided"
+          command="$1"
+        fi
+        shift
+        ;;
+      ssh)
         [ -z "${command}" ] || die "multiple subcommands provided"
-        command="$1"
+        command="ssh"
+        shift
+        ;;
+      --direction)
+        [ "$#" -ge 2 ] || die "--direction requires a value"
+        case "$2" in
+          pull|push) ssh_direction="$2" ;;
+          *) die "--direction must be pull or push" ;;
+        esac
+        ssh_direction_set="true"
+        shift 2
+        ;;
+      --direction=*)
+        case "${1#--direction=}" in
+          pull|push) ssh_direction="${1#--direction=}" ;;
+          *) die "--direction must be pull or push" ;;
+        esac
+        ssh_direction_set="true"
+        shift
+        ;;
+      --include-private-keys)
+        include_private_keys="true"
         shift
         ;;
       --apply)
@@ -239,7 +566,7 @@ main() {
     esac
   done
 
-  [ -n "${command}" ] || { usage; die "missing subcommand: pull or push"; }
+  [ -n "${command}" ] || { usage; die "missing subcommand: pull, push, or ssh"; }
   [ -n "${target}" ] || die "set --target or CLIHOST_SSH_TARGET"
   # Reject an option-like target (leading '-'). printf %q protects against SHELL
   # injection, but not OPTION injection: ssh/rsync parse a leading-dash argument
@@ -247,20 +574,17 @@ main() {
   # host during preflight — before any mount/symlink guard. Same class as the
   # dashboard ProxyCommand issue (#85). Guard the target, and pass `--` before the
   # host in ssh and before the positional operands in rsync (see below).
-  case "${target}" in
-    -*) die "SSH target must not start with '-' (got: ${target})" ;;
-  esac
+  reject_option_like "SSH target" "${target}"
   case "${ssh_port}" in
     ""|*[!0-9]*) [ -z "${ssh_port}" ] || die "SSH port must be numeric: ${ssh_port}" ;;
   esac
+  [ -z "${identity_file}" ] || reject_option_like "identity file" "${identity_file}"
   [ -z "${identity_file}" ] || [ -f "${identity_file}" ] || die "identity file not found: ${identity_file}"
 
   local backup_stamp
   backup_stamp="$(date -u '+%Y%m%dT%H%M%SZ')"
   local local_backup_root="${host_home}/.clihost-sync-backups"
   local remote_backup_root="${REMOTE_HOME}/.clihost-sync-backups"
-
-  preflight_local "${host_home}" "${local_backup_root}"
 
   local -a ssh_args=(ssh -o BatchMode=yes)
   if [ -n "${ssh_port}" ]; then
@@ -281,19 +605,53 @@ main() {
     --human-readable
     --no-links
     --delay-updates
-    "--include=/.gitconfig"
-    "--include=/.config/"
-    "--include=/.config/gh/***"
-    "--exclude=*"
-    -e "${ssh_remote_shell}"
   )
+
+  if [ "${command}" = "ssh" ]; then
+    if [ "${ssh_direction}" = "pull" ]; then
+      preflight_local_ssh_source "${host_home}"
+    else
+      preflight_local_ssh_destination "${host_home}"
+    fi
+    run_remote_ssh_preflight "${target}" "${ssh_direction}" "${include_private_keys}" "${ssh_args[@]}"
+    rsync_args+=(
+      "--include=/known_hosts"
+      "--include=/*.pub"
+      "--include=/config"
+    )
+    if [ "${include_private_keys}" = "true" ]; then
+      echo "WARNING: --include-private-keys selected; private key material will be copied across the SSH relay and leave its source machine. ~/.ssh stays outside the default sync because of #17 risk B (relay/blast-radius)."
+      local include_rule
+      if [ "${ssh_direction}" = "pull" ]; then
+        while IFS= read -r include_rule; do
+          [ -n "${include_rule}" ] || continue
+          rsync_args+=("${include_rule}")
+        done < <(collect_local_private_key_includes "${host_home}/.ssh")
+      else
+        while IFS= read -r include_rule; do
+          [ -n "${include_rule}" ] || continue
+          rsync_args+=("${include_rule}")
+        done < <(collect_remote_private_key_includes "${target}" "${ssh_args[@]}")
+      fi
+    fi
+    rsync_args+=("--exclude=*")
+  else
+    preflight_local "${host_home}" "${local_backup_root}"
+    rsync_args+=(
+      "--include=/.gitconfig"
+      "--include=/.config/"
+      "--include=/.config/gh/***"
+      "--exclude=*"
+    )
+  fi
+  rsync_args+=(-e "${ssh_remote_shell}")
 
   if [ "${apply}" != "true" ]; then
     rsync_args+=(--dry-run)
   fi
   if [ "${apply}" = "true" ]; then
     rsync_args+=(--backup)
-    if [ "${command}" = "pull" ]; then
+    if { [ "${command}" = "pull" ]; } || { [ "${command}" = "ssh" ] && [ "${ssh_direction}" = "pull" ]; }; then
       rsync_args+=("--backup-dir=${remote_backup_root}/${backup_stamp}")
     else
       guard_local_path "${host_home}" "${local_backup_root}/${backup_stamp}"
@@ -307,10 +665,22 @@ main() {
   local source
   local destination
   local mode="dry-run"
+  local transfer_direction="${command}"
   if [ "${apply}" = "true" ]; then
     mode="apply"
   fi
-  if [ "${command}" = "pull" ]; then
+  if [ "${command}" = "ssh" ]; then
+    transfer_direction="${ssh_direction}"
+  fi
+  if [ "${command}" = "ssh" ] && [ "${transfer_direction}" = "pull" ]; then
+    source="${host_home%/}/.ssh/"
+    destination="${target}:${REMOTE_HOME}/.ssh/"
+    echo "Syncing ${SSH_SYNC_LABEL} from host to ${target}:${REMOTE_HOME}/.ssh (${mode})"
+  elif [ "${command}" = "ssh" ]; then
+    source="${target}:${REMOTE_HOME}/.ssh/"
+    destination="${host_home%/}/.ssh/"
+    echo "Syncing ${SSH_SYNC_LABEL} from ${target}:${REMOTE_HOME}/.ssh to host (${mode})"
+  elif [ "${command}" = "pull" ]; then
     source="${host_home%/}/"
     destination="${target}:${REMOTE_HOME}/"
     echo "Pulling ${SYNC_LABEL} from host to ${target}:${REMOTE_HOME} (${mode})"
@@ -323,6 +693,14 @@ main() {
   # `--` ends rsync option parsing so a `-`-leading source/dest (option injection,
   # e.g. via a hostile target) is treated as a path operand, not a flag.
   rsync "${rsync_args[@]}" -- "${source}" "${destination}"
+
+  if [ "${apply}" = "true" ] && [ "${command}" = "ssh" ]; then
+    if [ "${transfer_direction}" = "pull" ]; then
+      fix_remote_ssh_permissions "${target}" "${ssh_args[@]}"
+    else
+      fix_local_ssh_permissions "${host_home}"
+    fi
+  fi
 }
 
 main "$@"
