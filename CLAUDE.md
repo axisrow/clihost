@@ -190,9 +190,14 @@ not change OAuth state.
 ### Синхронизация окружения хост↔контейнер
 
 This is the authoritative sync contract for epic #17. `bin/clihost-sync.sh` is
-the host-side rsync-over-SSH command for the safe non-secret subset. It is copied
-into the image as `/bin/clihost-sync.sh` for parity, but the documented workflow
-runs the repo script from the host against the container's SSH endpoint.
+the host-side rsync-over-SSH command for the config-level subset. It is not
+strictly non-secret: `~/.config/gh` may contain a GitHub OAuth token in plaintext
+in `hosts.yml` (`oauth_token:`) when `gh` is not using the OS keyring, which is
+common on headless servers and inside containers. Syncing `~/.config/gh` is a
+deliberate tradeoff, and that token crosses the SSH relay with the rest of the
+config-level data. The script is copied into the image as `/bin/clihost-sync.sh`
+for parity, but the documented workflow runs the repo script from the host
+against the container's SSH endpoint.
 
 Directions are intentionally named from the operator's host perspective:
 
@@ -201,7 +206,7 @@ Directions are intentionally named from the operator's host perspective:
 - `ssh` copies `~/.ssh` separately; its default direction is `pull`, and it also
   accepts `ssh push` or `--direction push`.
 
-The regular include-list is intentionally narrow:
+The regular config-level include-list is intentionally narrow:
 
 - `~/.gitconfig`
 - `~/.config/gh`

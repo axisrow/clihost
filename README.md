@@ -149,10 +149,16 @@ bin/claude-auth-snapshot-host.sh diff ./claude-auth-host-snapshots/<A>.json ./cl
 ### Синхронизация окружения хост↔контейнер
 
 `bin/clihost-sync.sh` запускается с хоста и синхронизирует через
-rsync-over-SSH только безопасный несекретный subset:
+rsync-over-SSH только config-level subset с узким include-list, а не строго
+несекретный набор:
 
 - `~/.gitconfig`
 - `~/.config/gh`
+
+`~/.config/gh` может содержать GitHub OAuth-токен в plaintext в `hosts.yml`
+(`oauth_token:`), если `gh` не использует системный keyring. Такой режим типичен
+для headless-серверов и контейнеров. Синк `~/.config/gh` — осознанный выбор:
+этот токен пересекает SSH relay вместе с config-level данными.
 
 Команда подключается к `sshd` контейнера под пользователем `hapi`. В этом
 контракте `pull` означает хост → контейнер, а `push` — контейнер → хост.
@@ -164,7 +170,7 @@ CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh pull --apply
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh push
 CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh ssh
-CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh ssh --apply
+CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 bin/clihost-sync.sh ssh pull --apply
 ```
 
 Для прямого SSH используйте `CLIHOST_SSH_TARGET`, `CLIHOST_SSH_PORT` и при
