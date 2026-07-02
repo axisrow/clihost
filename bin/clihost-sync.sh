@@ -100,7 +100,8 @@ is_private_key_file() {
   local path="$1"
 
   [ -f "${path}" ] || return 1
-  LC_ALL=C grep -Eq -- '^-+BEGIN [A-Z0-9 ]*PRIVATE KEY-+$' "${path}" 2>/dev/null
+  LC_ALL=C tr -d '\r' < "${path}" 2>/dev/null \
+    | grep -Eq -- '^-+BEGIN [A-Z0-9 ]*PRIVATE KEY-+$'
 }
 
 validate_default_public_ssh_material() {
@@ -133,6 +134,11 @@ private_key_include_rule() {
   local rule
 
   reject_control_chars "SSH private key filename" "${rel}"
+  case "${rel}" in
+    *'*'*|*'?'*|*'['*|*']'*)
+      die "SSH private key filename must not contain rsync filter metacharacters: ${rel}"
+      ;;
+  esac
   rule="--include=/${rel}"
   case "${rule}" in
     --include=/*) printf '%s\n' "${rule}" ;;
@@ -207,7 +213,14 @@ append_generated_include_rule() {
 
   reject_control_chars "generated rsync include rule" "${rule}"
   case "${rule}" in
-    --include=/*) rsync_args+=("${rule}") ;;
+    --include=/*)
+      case "${rule#--include=/}" in
+        *'*'*|*'?'*|*'['*|*']'*)
+          die "generated rsync include rule must not contain rsync filter metacharacters: ${rule}"
+          ;;
+      esac
+      rsync_args+=("${rule}")
+      ;;
     -*) die "generated rsync include rule must not start with '-' (got: ${rule})" ;;
     *) die "invalid generated rsync include rule: ${rule}" ;;
   esac
@@ -459,7 +472,8 @@ is_private_key_file() {
   local path="$1"
 
   [ -f "${path}" ] || return 1
-  LC_ALL=C grep -Eq -- '^-+BEGIN [A-Z0-9 ]*PRIVATE KEY-+$' "${path}" 2>/dev/null
+  LC_ALL=C tr -d '\r' < "${path}" 2>/dev/null \
+    | grep -Eq -- '^-+BEGIN [A-Z0-9 ]*PRIVATE KEY-+$'
 }
 
 validate_default_public_ssh_material() {
@@ -490,6 +504,11 @@ private_key_include_rule() {
   local rule
 
   reject_control_chars "SSH private key filename" "${rel}"
+  case "${rel}" in
+    *'*'*|*'?'*|*'['*|*']'*)
+      die "SSH private key filename must not contain rsync filter metacharacters: ${rel}"
+      ;;
+  esac
   rule="--include=/${rel}"
   case "${rule}" in
     --include=/*) printf '%s\n' "${rule}" ;;

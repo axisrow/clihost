@@ -870,6 +870,48 @@ class TestClihostSyncScript(unittest.TestCase):
         self.assertIn("control", out["result"].stderr)
         self.assertEqual(out["rsync_args"], [])
 
+    def test_ssh_rejects_local_private_key_name_with_rsync_filter_glob(self):
+        def make_local(home):
+            ssh_dir = self._make_ssh_material(home)
+            for name in ("*", "***"):
+                hostile = ssh_dir / name
+                hostile.write_text(
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                    "private-test-fixture\n"
+                    "-----END OPENSSH PRIVATE KEY-----\n"
+                )
+                hostile.chmod(0o600)
+
+        out = self._run_sync(
+            ["ssh", "--include-private-keys"],
+            make_local=make_local,
+        )
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("rsync filter", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_remote_private_key_name_with_rsync_filter_glob(self):
+        def make_remote(home):
+            ssh_dir = self._make_ssh_material(home)
+            for name in ("*", "***"):
+                hostile = ssh_dir / name
+                hostile.write_text(
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                    "private-test-fixture\n"
+                    "-----END OPENSSH PRIVATE KEY-----\n"
+                )
+                hostile.chmod(0o600)
+
+        out = self._run_sync(
+            ["ssh", "push", "--include-private-keys"],
+            make_remote=make_remote,
+        )
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("rsync filter", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
     def test_ssh_rejects_private_key_disguised_as_public_file(self):
         def make_local(home):
             ssh_dir = self._make_ssh_material(home)
@@ -888,6 +930,24 @@ class TestClihostSyncScript(unittest.TestCase):
         self.assertIn("private key", out["result"].stderr)
         self.assertEqual(out["rsync_args"], [])
 
+    def test_ssh_rejects_private_key_disguised_as_public_file_with_crlf_pem(self):
+        def make_local(home):
+            ssh_dir = self._make_ssh_material(home)
+            disguised = ssh_dir / "id_ed25519.pub"
+            disguised.write_bytes(
+                b"-----BEGIN OPENSSH PRIVATE KEY-----\r\n"
+                b"private-test-fixture\r\n"
+                b"-----END OPENSSH PRIVATE KEY-----\r\n"
+            )
+            disguised.chmod(0o600)
+
+        out = self._run_sync(["ssh"], make_local=make_local)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("public", out["result"].stderr)
+        self.assertIn("private key", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
     def test_ssh_rejects_remote_private_key_disguised_as_public_file(self):
         def make_remote(home):
             ssh_dir = self._make_ssh_material(home)
@@ -896,6 +956,24 @@ class TestClihostSyncScript(unittest.TestCase):
                 "-----BEGIN OPENSSH PRIVATE KEY-----\n"
                 "private-test-fixture\n"
                 "-----END OPENSSH PRIVATE KEY-----\n"
+            )
+            disguised.chmod(0o600)
+
+        out = self._run_sync(["ssh", "push"], make_remote=make_remote)
+
+        self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
+        self.assertIn("public", out["result"].stderr)
+        self.assertIn("private key", out["result"].stderr)
+        self.assertEqual(out["rsync_args"], [])
+
+    def test_ssh_rejects_remote_private_key_disguised_as_public_file_with_crlf_pem(self):
+        def make_remote(home):
+            ssh_dir = self._make_ssh_material(home)
+            disguised = ssh_dir / "id_ed25519.pub"
+            disguised.write_bytes(
+                b"-----BEGIN OPENSSH PRIVATE KEY-----\r\n"
+                b"private-test-fixture\r\n"
+                b"-----END OPENSSH PRIVATE KEY-----\r\n"
             )
             disguised.chmod(0o600)
 
