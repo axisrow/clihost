@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  tests:
+    name: Python and JS tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run pytest
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m pytest tests/
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: npm
+
+      - name: Run npm tests
+        run: |
+          npm ci
+          npm test
+
+  docker-smoke:
+    name: Docker build and smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build lightweight image
+        run: |
+          docker build \
+            --build-arg INSTALL_CODEX=false --build-arg INSTALL_GEMINI=false \
+            --build-arg INSTALL_COPILOT=false --build-arg INSTALL_OPENCODE=false \
+            --build-arg INSTALL_DROID=false --build-arg INSTALL_HERMES=false \
+            --build-arg INSTALL_AO=false --build-arg INSTALL_CLOUDFLARED=false \
+            --build-arg INSTALL_CHISEL=false \
+            -t clihost-ci .
+
+      - name: Run health, sshd, and symlink smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          container_running() {
+            docker ps \
+              --filter 'name=^/clihost-ci$' \
+              --filter 'status=running' \
+              --format '{{.Names}}' | grep -Fxq clihost-ci
+          }
+
+          wait_for_health() {
+            local label="$1"
+            local response
+            for _attempt in $(seq 1 40); do
+              response="$(curl -fsS http://localhost:8080/health 2>/dev/null || true)"
+              if RESPONSE="${response}" python3 -c 'import json, os, sys; data = json.loads(os.environ["RESPONSE"]); sys.exit(0 if data.get("status") == "ok" and data.get("ttyd") == "running" else 1)' 2>/dev/null; then
+                echo "Health ready for ${label}: ${response}"
+                return 0
+              fi
+
+              if ! container_running; then
+                echo "Container exited while waiting for ${label}" >&2
+                docker logs clihost-ci || true
+                return 1
+              fi
+              sleep 1
+            done
+
+            echo "Timed out waiting for ${label} health endpoint" >&2
+            docker logs clihost-ci || true
+            return 1
+          }
+
+          docker rm -f clihost-ci >/dev/null 2>&1 || true
+          docker volume rm clihost-ci-vol >/dev/null 2>&1 || true
+          docker volume create clihost-ci-vol >/dev/null
+
+          docker run -d --name clihost-ci -p 8080:8080 -v clihost-ci-vol:/home/hapi clihost-ci
+          wait_for_health "normal startup"
+          container_running
+          docker exec clihost-ci pgrep -x sshd
+
+          docker rm -f clihost-ci
+          docker run --rm --entrypoint sh -v clihost-ci-vol:/home/hapi clihost-ci -euxc '
+            rm -rf /home/hapi/.ssh
+            ln -s /etc /home/hapi/.ssh
+            test -L /home/hapi/.ssh
+          '
+
+          docker run -d --name clihost-ci -p 8080:8080 -v clihost-ci-vol:/home/hapi clihost-ci
+          wait_for_health "symlink attack startup"
+          container_running
+          docker exec clihost-ci pgrep -x sshd
+
+          docker logs clihost-ci 2>&1 | grep -F "WARNING: /home/hapi/.ssh is a symlink; refusing to chmod/chown it"
+
+          etc_stat="$(docker exec clihost-ci stat -c '%u:%g %a' /etc)"
+          echo "/etc stat after symlink smoke: ${etc_stat}"
+          test "${etc_stat}" = "0:0 755"
+
+      - name: Clean up Docker resources
+        if: always()
+        run: |
+          docker rm -f clihost-ci >/dev/null 2>&1 || true
+          docker volume rm clihost-ci-vol >/dev/null 2>&1 || true

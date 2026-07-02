@@ -14,6 +14,10 @@ docker run -p 22:22 -p 8080:8080 clihost
 
 Open http://localhost:8080 for web terminal access.
 
+## Testing and CI
+
+CI runs `python -m pytest tests/`, `npm ci && npm test`, and a lightweight Docker build+smoke on every PR and push to `main`, including `/health`, `sshd`, and root-context `~/.ssh` symlink hardening checks.
+
 ## Модульный состав образа
 
 Каждый CLI-инструмент можно исключить из образа на этапе сборки, чтобы получить более лёгкий, заточенный под конкретный деплой образ. Управление — через **build-time** аргументы `INSTALL_<KEY>` (по умолчанию `true`, ставится всё):
