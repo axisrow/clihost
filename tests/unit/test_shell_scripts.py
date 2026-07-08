@@ -22,6 +22,7 @@ CLIHOST_SYNC = REPO_ROOT / "bin/clihost-sync.sh"
 README = REPO_ROOT / "README.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 CLAUDE_SETTINGS_TEMPLATE = REPO_ROOT / "config/claude-settings.json"
+ENV_EXAMPLE = REPO_ROOT / ".env.example"
 
 # Component keys whose INSTALL_<KEY> build args gate the modular image (issue #57).
 NPM_COMPONENT_KEYS = (
@@ -1099,6 +1100,24 @@ class TestClihostSyncScript(unittest.TestCase):
         self.assertNotEqual(out["result"].returncode, 0, out["result"].stdout)
         self.assertIn("symlink", out["result"].stderr)
         self.assertEqual(out["rsync_args"], [])
+
+    def test_remote_symlink_guards_defined_exactly_once(self):
+        # #101/#10: the remote guard pair used to be byte-identical triplicates
+        # (local pair + one copy in each of the two `bash -s` heredocs), so
+        # hardening one copy silently bypassed the others — the exact class of
+        # bug caught 3× before (#88/#90/#95). The remote guards must now live in
+        # a single shared prelude (emit_remote_prelude), defined ONCE.
+        text = CLIHOST_SYNC.read_text()
+        self.assertEqual(
+            text.count("guard_remote_path() {"), 1,
+            "guard_remote_path must be defined exactly once (shared prelude)",
+        )
+        self.assertEqual(
+            text.count("guard_remote_tree_no_symlinks() {"), 1,
+            "guard_remote_tree_no_symlinks must be defined exactly once",
+        )
+        # The single copy must live inside the shared prelude emitter.
+        self.assertIn("emit_remote_prelude() {", text)
 
     def test_option_like_target_is_rejected_before_ssh_or_rsync(self):
         # Codex + Claude finding (PR #96, both reproduced host RCE): printf %q
@@ -2285,6 +2304,35 @@ class TestBuildShGetVersion(unittest.TestCase):
 
     def test_source_requires_nonempty_version(self):
         self.assertIn('[ -n "$ver" ]', BUILD_SH.read_text())
+
+
+class TestEnvExampleDocumentsRuntimeVars(unittest.TestCase):
+    """`.env.example` must document the runtime knobs the code reads (#101/#11).
+
+    An operator copying .env.example as the source of truth otherwise cannot
+    discover how to set the session lifetime or enable root SSH, even though
+    CLAUDE.md lists them and config.py / entrypoint.sh read them.
+    """
+
+    def setUp(self):
+        self.text = ENV_EXAMPLE.read_text()
+
+    def test_runtime_vars_present(self):
+        # Previously-missing first-class runtime variables (#101/#11) plus the
+        # new slowloris timeout (#101/#2), which must also stay documented.
+        for var in (
+            "SESSION_TIMEOUT",
+            "CLEANUP_ROOT",
+            "ROOT_PASSWORD",
+            "HAPI_USER",
+            "HERMES_AUTO_UPDATE",
+            "REQUEST_TIMEOUT",
+        ):
+            self.assertRegex(
+                self.text,
+                re.compile(rf"^#?\s*{re.escape(var)}=", re.MULTILINE),
+                f"{var} is read by the code but not documented in .env.example",
+            )
 
 
 if __name__ == "__main__":

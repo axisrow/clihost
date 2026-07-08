@@ -21,6 +21,11 @@ HOP_BY_HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailer", "trailers", "transfer-encoding", "upgrade",
     "content-length", "authorization",
+    # Never forward the client's Cookie to upstream ttyd: it carries the signed
+    # ttyd_session + csrf_token. ttyd is loopback-only and started with -W (no
+    # auth) so there is no proven leak, but the proxy's auth tokens have no
+    # business reaching an internal service — defense in depth (#101/#6).
+    "cookie",
 }
 
 TUNNEL_RECV_SIZE = 8192
@@ -99,6 +104,16 @@ def tunnel_sockets(handler, upstream):
     client = handler.connection
     client.setblocking(False)
     upstream.setblocking(False)
+    # Enable TCP keepalive on both ends so a client that vanishes without a FIN
+    # (laptop sleep, NAT timeout) is eventually detected by the OS: the dead
+    # socket surfaces an error from recv/send and the loop returns, freeing the
+    # thread + both sockets. Without it an idle tunnel (empty write_set) never
+    # hits the "peer vanished" bail-out and leaks forever (#101/#3).
+    for sock in (client, upstream):
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            pass
     peer = {client: upstream, upstream: client}
     pending = {client: bytearray(), upstream: bytearray()}
     eof = {client: False, upstream: False}

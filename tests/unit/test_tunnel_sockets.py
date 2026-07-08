@@ -210,5 +210,67 @@ class TunnelSocketsTest(unittest.TestCase):
         self.join_tunnel()
 
 
+class TunnelKeepaliveTest(unittest.TestCase):
+    """SO_KEEPALIVE must be enabled on both ends so a silently-dead peer is
+    eventually detected by the OS and the tunnel thread + sockets are freed
+    instead of leaking on an idle connection (#101/#3)."""
+
+    def _tcp_pair(self):
+        """A connected loopback TCP socket pair (keepalive is TCP-only)."""
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        a = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        a.connect(listener.getsockname())
+        b, _ = listener.accept()
+        listener.close()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        return a, b
+
+    def test_keepalive_enabled_on_both_ends(self):
+        client, client_peer = self._tcp_pair()
+        upstream, upstream_peer = self._tcp_pair()
+
+        # Both ends start with keepalive OFF so the assertion proves the tunnel
+        # turned it ON (not that it was inherited).
+        self.assertEqual(
+            client.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE), 0
+        )
+        self.assertEqual(
+            upstream.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE), 0
+        )
+
+        def run():
+            proxy.tunnel_sockets(FakeHandler(client), upstream)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        try:
+            # Give the tunnel a moment to enter the loop and set the option,
+            # then read it back before tearing the connections down.
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if (
+                    client.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+                    and upstream.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+                ):
+                    break
+                time.sleep(0.02)
+            self.assertTrue(
+                client.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE),
+                "keepalive not set on client socket",
+            )
+            self.assertTrue(
+                upstream.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE),
+                "keepalive not set on upstream socket",
+            )
+        finally:
+            # Unblock the tunnel: closing both peers EOFs both directions.
+            client_peer.close()
+            upstream_peer.close()
+            thread.join(timeout=5)
+
+
 if __name__ == "__main__":
     unittest.main()

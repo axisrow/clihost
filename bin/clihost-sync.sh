@@ -10,6 +10,75 @@ die() {
   exit 1
 }
 
+# Emit the shared remote prelude, then a per-action body (read from this
+# function's stdin), as one script on stdout ready to pipe into `ssh ... bash
+# -s`. The remote heredocs are quoted (<<'PRELUDE' / <<'REMOTE'), so this text
+# is NOT expanded locally — it runs on the container.
+#
+# Defining the symlink guards ONCE here is the #101/#10 fix: `guard_remote_path`
+# and `guard_remote_tree_no_symlinks` were byte-identical triplicates (one local
+# pair plus one copy in each of the two remote heredocs), so hardening one copy
+# silently bypassed the others — exactly the class of bug caught 3× before
+# (#88/#90/#95). Now the two remote payloads share this single definition.
+#
+# Contract for callers: pass "${REMOTE_HOME}" as $1 of `bash -s` (positionally
+# identical in both payloads) so `remote_home` resolves; the prelude reads only
+# $1 and does not assume a fixed $# (payloads pass extra positional args). After
+# the prelude, `die`, `remote_home`, and both guards are in scope for the body.
+emit_remote_prelude() {
+  cat <<'PRELUDE'
+set -euo pipefail
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+remote_home="$1"
+
+guard_remote_path() {
+  local path="$1"
+  local rel
+  local current
+  local part
+  local old_ifs
+  local -a parts
+
+  case "${path}" in
+    "${remote_home}" | "${remote_home}"/*) ;;
+    *) die "refusing to touch remote path outside /home/hapi: ${path}" ;;
+  esac
+
+  rel="${path#${remote_home}/}"
+  current="${remote_home}"
+  old_ifs="${IFS}"
+  IFS="/"
+  read -r -a parts <<< "${rel}"
+  IFS="${old_ifs}"
+  for part in "${parts[@]}"; do
+    [ -n "${part}" ] || continue
+    current="${current}/${part}"
+    if [ -L "${current}" ]; then
+      die "${current} is a symlink; refusing to sync through it"
+    fi
+  done
+}
+
+guard_remote_tree_no_symlinks() {
+  local path="$1"
+  local found
+
+  [ -d "${path}" ] || return 0
+  found="$(find "${path}" -type l -print 2>/dev/null)" \
+    || die "cannot inspect ${path} for symlinks"
+  if [ -n "${found}" ]; then
+    die "$(printf "%s\n" "${found}" | sed -n '1p') is a symlink; refusing to sync through it"
+  fi
+}
+PRELUDE
+  cat
+}
+
 usage() {
   cat >&2 <<'EOF'
 Usage:
@@ -297,15 +366,10 @@ run_remote_preflight() {
   shift
   local -a ssh_args=("$@")
 
-  "${ssh_args[@]}" -- "${target}" bash -s -- "${REMOTE_HOME}" "/proc/mounts" <<'REMOTE'
-set -euo pipefail
-
-die() {
-  echo "ERROR: $*" >&2
-  exit 1
-}
-
-remote_home="$1"
+  # The shared guard prelude (die + remote_home + guard_remote_*) is prepended
+  # by emit_remote_prelude; this body only adds the mount-preflight checks and
+  # the per-path guard calls. mounts_file is $2 here (matching the extra arg).
+  emit_remote_prelude <<'REMOTE' | "${ssh_args[@]}" -- "${target}" bash -s -- "${REMOTE_HOME}" "/proc/mounts"
 mounts_file="$2"
 backup_root="${remote_home}/.clihost-sync-backups"
 
@@ -319,46 +383,6 @@ if ! awk -v home="${remote_home}" '$2 == home {found=1} END {exit !found}' "${mo
   fi
   die "no separate volume mount at /home/hapi; refusing to sync"
 fi
-
-guard_remote_path() {
-  local path="$1"
-  local rel
-  local current
-  local part
-  local old_ifs
-  local -a parts
-
-  case "${path}" in
-    "${remote_home}" | "${remote_home}"/*) ;;
-    *) die "refusing to touch remote path outside /home/hapi: ${path}" ;;
-  esac
-
-  rel="${path#${remote_home}/}"
-  current="${remote_home}"
-  old_ifs="${IFS}"
-  IFS="/"
-  read -r -a parts <<< "${rel}"
-  IFS="${old_ifs}"
-  for part in "${parts[@]}"; do
-    [ -n "${part}" ] || continue
-    current="${current}/${part}"
-    if [ -L "${current}" ]; then
-      die "${current} is a symlink; refusing to sync through it"
-    fi
-  done
-}
-
-guard_remote_tree_no_symlinks() {
-  local path="$1"
-  local found
-
-  [ -d "${path}" ] || return 0
-  found="$(find "${path}" -type l -print 2>/dev/null)" \
-    || die "cannot inspect ${path} for symlinks"
-  if [ -n "${found}" ]; then
-    die "$(printf "%s\n" "${found}" | sed -n '1p') is a symlink; refusing to sync through it"
-  fi
-}
 
 guard_remote_path "${remote_home}/.gitconfig"
 guard_remote_path "${remote_home}/.config"
@@ -377,60 +401,15 @@ run_remote_ssh_helper() {
   shift 4
   local -a ssh_args=("$@")
 
-  "${ssh_args[@]}" -- "${target}" bash -s -- "${REMOTE_HOME}" "/proc/mounts" "${action}" "${direction}" "${include_private_keys}" <<'REMOTE'
-set -euo pipefail
-
-die() {
-  echo "ERROR: $*" >&2
-  exit 1
-}
-
-remote_home="$1"
+  # Shared guard prelude (die + remote_home + guard_remote_*) is prepended by
+  # emit_remote_prelude; this body only adds the ssh-helper-specific args and
+  # logic. Positional args after $1 (remote_home) match the extra values passed.
+  emit_remote_prelude <<'REMOTE' | "${ssh_args[@]}" -- "${target}" bash -s -- "${REMOTE_HOME}" "/proc/mounts" "${action}" "${direction}" "${include_private_keys}"
 _mounts_file="$2"
 action="$3"
 direction="$4"
 include_private_keys="$5"
 ssh_dir="${remote_home}/.ssh"
-
-guard_remote_path() {
-  local path="$1"
-  local rel
-  local current
-  local part
-  local old_ifs
-  local -a parts
-
-  case "${path}" in
-    "${remote_home}" | "${remote_home}"/*) ;;
-    *) die "refusing to touch remote path outside /home/hapi: ${path}" ;;
-  esac
-
-  rel="${path#${remote_home}/}"
-  current="${remote_home}"
-  old_ifs="${IFS}"
-  IFS="/"
-  read -r -a parts <<< "${rel}"
-  IFS="${old_ifs}"
-  for part in "${parts[@]}"; do
-    [ -n "${part}" ] || continue
-    current="${current}/${part}"
-    if [ -L "${current}" ]; then
-      die "${current} is a symlink; refusing to sync through it"
-    fi
-  done
-}
-
-guard_remote_tree_no_symlinks() {
-  local path="$1"
-  local found
-
-  [ -d "${path}" ] || return 0
-  found="$(find "${path}" -type l -print 2>/dev/null)" \
-    || die "cannot inspect ${path} for symlinks"
-  if [ -n "${found}" ]; then
-    die "$(printf "%s\n" "${found}" | sed -n '1p') is a symlink; refusing to sync through it"
-  fi
-}
 
 path_mode() {
   local path="$1"
