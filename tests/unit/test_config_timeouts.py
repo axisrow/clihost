@@ -74,9 +74,12 @@ class TestRequestTimeout(unittest.TestCase):
         # BaseHTTPRequestHandler.setup() calls connection.settimeout(self.timeout);
         # the proxy handler must carry a positive class-level timeout so slow
         # clients cannot pin a ThreadingHTTPServer worker forever (#101/#2).
-        from ttydproxy import app
+        # Assert it is wired to the config value (not merely positive) so a
+        # regression that hard-codes or drops the wiring is caught.
+        from ttydproxy import app, config
         self.assertIsNotNone(app.TTYDProxyHandler.timeout)
         self.assertGreater(app.TTYDProxyHandler.timeout, 0)
+        self.assertEqual(app.TTYDProxyHandler.timeout, config.REQUEST_TIMEOUT)
 
 
 class TestSessionTokenSurvivesFlooredTimeout(unittest.TestCase):
