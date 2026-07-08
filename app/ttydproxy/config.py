@@ -27,6 +27,13 @@ SSH_URL_FILE = os.environ.get("SSH_URL_FILE", "/home/hapi/ssh-url")
 MAX_UPLOAD_SIZE = env_int(os.environ.get("MAX_UPLOAD_SIZE"), 10485760, name="MAX_UPLOAD_SIZE")
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", f"{CLEANUP_ROOT}/.uploads")
 
+# Per-connection socket read timeout (seconds). Without it a slow client
+# (slowloris) holds a ThreadingHTTPServer worker thread forever: header parsing
+# and rfile.read(Content-Length) block indefinitely, and the login rate-limiter
+# only fires inside handle_login — after the slow window. minimum=1 keeps a
+# misconfigured value from disabling the timeout (0 would mean "block forever").
+REQUEST_TIMEOUT = env_int(os.environ.get("REQUEST_TIMEOUT"), 30, name="REQUEST_TIMEOUT", minimum=1)
+
 # Single source of truth for the terminal-id digit cap. Bounding the length
 # keeps int() from ever hitting Python's 4300-digit string-conversion limit on
 # an unauthenticated path; an over-long id fails to match / fails the guard and

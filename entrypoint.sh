@@ -466,6 +466,14 @@ ensure_dir_owned "${UPLOAD_DIR}"
 PROXY_SECRET_FILE="/run/ttyd-proxy.secret"
 install -m 400 -o "${TTYD_USER}" /dev/null "${PROXY_SECRET_FILE}"
 printf '%s' "${PASSWORD_SECRET}" > "${PROXY_SECRET_FILE}"
+# Drop PASSWORD_SECRET from this shell's environment before launching the proxy.
+# runuser (without --login) inherits the caller's whole environment, so an
+# operator-supplied `-e PASSWORD_SECRET=...` would otherwise land in the proxy's
+# /proc/<pid>/environ — readable by any TTYD_USER process (including terminal
+# shells) and enough to forge session/CSRF tokens. The file above (mode 400,
+# owner TTYD_USER) is the only channel; CLAUDE.md guarantees the secret "never
+# appears in the proxy's environment". PASSWORD_SECRET is unused past this point.
+unset PASSWORD_SECRET
 echo "Starting TTYD HTTP proxy on port ${PORT} as ${TTYD_USER}"
 PORT="${PORT}" \
 TTYD_USER="${TTYD_USER}" \

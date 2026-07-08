@@ -76,6 +76,25 @@ class TestEntrypointRegressions(unittest.TestCase):
             re.compile(r'^PASSWORD_SECRET="\$\{PASSWORD_SECRET\}"', re.MULTILINE),
         )
 
+    def test_password_secret_unset_before_proxy_launch(self):
+        # runuser (no --login) inherits the caller's whole environment, so an
+        # operator-supplied `-e PASSWORD_SECRET=...` would land in the proxy's
+        # /proc/<pid>/environ unless the entrypoint drops it first. The secret
+        # must be unset AFTER it is written to the file and BEFORE the proxy is
+        # launched, so the file (mode 400) is the only channel (#101/#1).
+        unset_pos = self.text.find("unset PASSWORD_SECRET")
+        secret_file_write_pos = self.text.find('> "${PROXY_SECRET_FILE}"')
+        proxy_pos = self.text.find('runuser -u "${TTYD_USER}" -- python3')
+        self.assertGreater(unset_pos, -1, "PASSWORD_SECRET is never unset")
+        self.assertGreater(
+            unset_pos, secret_file_write_pos,
+            "PASSWORD_SECRET must be unset only after it is written to the file",
+        )
+        self.assertLess(
+            unset_pos, proxy_pos,
+            "PASSWORD_SECRET must be unset before the proxy is launched",
+        )
+
     def test_proxy_started_as_ttyd_user(self):
         # The proxy must drop root (issue #52): launched via runuser, with the
         # secret file owned by TTYD_USER so the unprivileged proxy can read it.
