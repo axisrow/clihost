@@ -295,7 +295,9 @@ if [ "${DROID_DAEMON_ENABLED}" = "true" ]; then
     fi
 
     DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"
-    touch "${DROID_DAEMON_LOG}"
+    # `: >` (truncate-or-create), not `touch`: the launch appends via `>>`, so
+    # truncate at startup to cap unbounded growth on the persistent volume.
+    : > "${DROID_DAEMON_LOG}"
     chown "${HAPI_USER}:${HAPI_USER}" "${DROID_DAEMON_LOG}"
     echo "Starting droid daemon --remote-access in background (logs: ${DROID_DAEMON_LOG})..."
     # argv form (no `sh -c` interpolation): the log is written via a redirect
@@ -334,7 +336,9 @@ if [ "${AO_DAEMON_ENABLED}" = "true" ]; then
   esac
   if PATH="${HAPI_RUN_PATH}" command -v ao >/dev/null 2>&1; then
     AO_DAEMON_LOG="${HAPI_HOME}/ao-daemon.log"
-    touch "${AO_DAEMON_LOG}"
+    # `: >` (truncate-or-create), not `touch`: the launch appends via `>>`, so
+    # truncate at startup to cap unbounded growth on the persistent volume.
+    : > "${AO_DAEMON_LOG}"
     chown "${HAPI_USER}:${HAPI_USER}" "${AO_DAEMON_LOG}"
     echo "Starting ao daemon on 127.0.0.1:${AO_PORT} in background (logs: ${AO_DAEMON_LOG})..."
     # argv form: AO_PORT is passed as an env assignment consumed by run_as_hapi_argv's
@@ -497,8 +501,13 @@ rm -f "${HAPI_URL_FILE}" 2>/dev/null || true
 if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then
   # Start hapi server with relay in background (logs to file, force TCP relay)
   HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
-  # Pre-create the log so the URL-extraction loop's -f check passes immediately
-  touch "${HAPI_SERVER_LOG}"
+  # Truncate-or-create the log at startup (`: >`, not `touch`): the launch now
+  # appends via `>>` instead of the old `| tee` which truncated on open, so
+  # without this a persistent-volume server.log would keep stale relay URLs
+  # across restarts (a brief window where the /home/hapi/url fallback pairs a
+  # fresh token with an old URL) and grow unbounded. `: >` restores the old
+  # truncate semantics. Also makes the URL-extraction loop's -f check pass.
+  : > "${HAPI_SERVER_LOG}"
   chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_SERVER_LOG}"
   echo "Starting hapi server --relay in background (logs: ${HAPI_SERVER_LOG})..."
   # argv form: HAPI_RELAY_FORCE_TCP via env, log via redirect not `| tee` (#101/#9).

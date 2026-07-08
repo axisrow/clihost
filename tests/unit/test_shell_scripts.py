@@ -142,13 +142,16 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertIn('chown "${HAPI_USER}:${HAPI_USER}" "${LOCAL_BIN_ENV}"', self.text)
 
     def test_hapi_server_log_precreated(self):
-        # The log file must exist before the URL-extraction loop starts so the
-        # [ -f "$HAPI_SERVER_LOG" ] guard passes on the first iteration.
-        touch_pos = self.text.find('touch "${HAPI_SERVER_LOG}"')
+        # The log file must be truncated-or-created before the URL-extraction
+        # loop starts so the [ -f "$HAPI_SERVER_LOG" ] guard passes on the first
+        # iteration. `: >` (not `touch`) restores the old `| tee` truncate-at-
+        # startup semantics now that the launch appends via `>>` (#101/#9), so a
+        # persistent server.log can't retain stale relay URLs or grow unbounded.
+        precreate_pos = self.text.find(': > "${HAPI_SERVER_LOG}"')
         server_start_pos = self.text.find("stdbuf -oL hapi server --relay")
-        self.assertGreater(touch_pos, -1, "HAPI_SERVER_LOG is not pre-created")
+        self.assertGreater(precreate_pos, -1, "HAPI_SERVER_LOG is not truncated/pre-created")
         self.assertGreater(server_start_pos, -1, "hapi server --relay start not found")
-        self.assertLess(touch_pos, server_start_pos)
+        self.assertLess(precreate_pos, server_start_pos)
 
     def test_hapi_commands_are_skipped_when_cli_missing(self):
         guard_pos = self.text.find(
