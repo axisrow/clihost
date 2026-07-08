@@ -32,6 +32,7 @@ from ttydproxy.config import (
     UPLOAD_DIR,
     TTYD_ROUTE_PATTERN,
     MAX_TERMINAL_ID_DIGITS,
+    REQUEST_TIMEOUT,
 )
 from ttydproxy.manager import TTYDManager
 from ttydproxy.proxy import is_websocket_request, proxy_ttyd_http, proxy_ttyd_websocket
@@ -85,6 +86,12 @@ def _get_memory_rss_mb():
 
 class TTYDProxyHandler(BaseHandler):
     """HTTP request handler for ttyd proxy routes."""
+
+    # Socket read timeout applied per connection by BaseHTTPRequestHandler
+    # (setup() calls self.connection.settimeout(self.timeout)). Caps slow-client
+    # (slowloris) threads that would otherwise block header parsing and body
+    # reads forever on a ThreadingHTTPServer worker (#101/#2).
+    timeout = REQUEST_TIMEOUT
 
     def do_GET(self):
         parsed = urlparse(self.path)

@@ -24,7 +24,7 @@ class TestConfigTimeoutFloor(unittest.TestCase):
         # Restore module to a pristine (env-free) state for other tests.
         config = importlib.import_module("ttydproxy.config")
         with patch.dict(os.environ, {}, clear=False):
-            for key in ("SESSION_TIMEOUT", "CSRF_TOKEN_TTL"):
+            for key in ("SESSION_TIMEOUT", "CSRF_TOKEN_TTL", "REQUEST_TIMEOUT"):
                 os.environ.pop(key, None)
             importlib.reload(config)
 
@@ -44,6 +44,39 @@ class TestConfigTimeoutFloor(unittest.TestCase):
         )
         self.assertEqual(config.SESSION_TIMEOUT, 3600)
         self.assertEqual(config.CSRF_TOKEN_TTL, 7200)
+
+
+class TestRequestTimeout(unittest.TestCase):
+    """Slowloris guard: the per-connection read timeout must be set + fail-closed."""
+
+    def _reload_config_with(self, **env):
+        with patch.dict(os.environ, env, clear=False):
+            config = importlib.import_module("ttydproxy.config")
+            return importlib.reload(config)
+
+    def tearDown(self):
+        config = importlib.import_module("ttydproxy.config")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("REQUEST_TIMEOUT", None)
+            importlib.reload(config)
+
+    def test_default_request_timeout_is_positive(self):
+        config = self._reload_config_with()
+        self.assertEqual(config.REQUEST_TIMEOUT, 30)
+
+    def test_zero_request_timeout_clamps_to_minimum(self):
+        # 0 would mean "block forever" — the very slowloris condition the timeout
+        # exists to prevent. A non-positive value must clamp up, not disable it.
+        config = self._reload_config_with(REQUEST_TIMEOUT="0")
+        self.assertEqual(config.REQUEST_TIMEOUT, 1)
+
+    def test_handler_applies_the_timeout(self):
+        # BaseHTTPRequestHandler.setup() calls connection.settimeout(self.timeout);
+        # the proxy handler must carry a positive class-level timeout so slow
+        # clients cannot pin a ThreadingHTTPServer worker forever (#101/#2).
+        from ttydproxy import app
+        self.assertIsNotNone(app.TTYDProxyHandler.timeout)
+        self.assertGreater(app.TTYDProxyHandler.timeout, 0)
 
 
 class TestSessionTokenSurvivesFlooredTimeout(unittest.TestCase):
