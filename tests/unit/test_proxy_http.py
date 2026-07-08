@@ -166,5 +166,33 @@ class TestContentTypeCaseInsensitivity(unittest.TestCase):
         self.assertNotIn("default-src *", csps)
 
 
+class TestBuildTtydHeaders(unittest.TestCase):
+    """The proxy must strip auth-bearing headers before forwarding to ttyd."""
+
+    def _build(self, client_headers):
+        handler = StubHandler(headers=client_headers)
+        return proxy.build_ttyd_headers(handler, 7681)
+
+    def test_cookie_is_not_forwarded_to_ttyd(self):
+        # The client Cookie carries the signed ttyd_session + csrf_token; it must
+        # not reach the internal ttyd service (#101/#6).
+        headers = self._build(
+            {"Cookie": "ttyd_session=signed; csrf_token=abc", "Accept": "*/*"}
+        )
+        lowered = {k.lower() for k in headers}
+        self.assertNotIn("cookie", lowered)
+        # Non-sensitive headers still pass through.
+        self.assertIn("Accept", headers)
+
+    def test_authorization_is_not_forwarded(self):
+        headers = self._build({"Authorization": "Bearer x"})
+        self.assertNotIn("authorization", {k.lower() for k in headers})
+
+    def test_host_and_forwarded_for_are_set(self):
+        headers = self._build({})
+        self.assertEqual(headers["Host"], "127.0.0.1:7681")
+        self.assertEqual(headers["X-Forwarded-For"], "127.0.0.1")
+
+
 if __name__ == "__main__":
     unittest.main()

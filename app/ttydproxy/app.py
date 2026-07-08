@@ -176,7 +176,15 @@ class TTYDProxyHandler(BaseHandler):
                 self.send_json(401, {"error": "Authentication required"})
             return None
         if not user_exists(username):
-            self.send_json(403, {"error": "Invalid session"})
+            # A valid cookie whose account was since removed/renamed must, for a
+            # browser navigation (redirect=True), land on /login like the
+            # no-token branch above — not a raw 403 JSON blob (#101/#5).
+            if redirect:
+                self.send_response(302)
+                self.send_header("Location", "/login")
+                self.end_headers()
+            else:
+                self.send_json(403, {"error": "Invalid session"})
             return None
         return username
 
