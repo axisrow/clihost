@@ -41,7 +41,11 @@ class TestVKBDEnabled(unittest.TestCase):
     def test_updated_javascript_present(self):
         self.assertIn("function sendKey(key)", self.html)
         self.assertIn("navigator.clipboard.readText()", self.html)
-        self.assertIn("socket.send('0' + data)", self.html)
+        # Keys are now sent through the iframe's shared __sendToTTYD helper (owns
+        # socket discovery + the '0' INPUT prefix) instead of an inline
+        # socket.send('0' + data) copy (#101/#14).
+        self.assertIn("win.__sendToTTYD(data)", self.html)
+        self.assertNotIn("socket.send('0' + data)", self.html)
         self.assertIn("win.sendTabKey", self.html)
 
     def test_ctrl_v_uses_term_paste_with_socket_fallback(self):

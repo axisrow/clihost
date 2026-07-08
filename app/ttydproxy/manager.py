@@ -26,9 +26,24 @@ class TTYDManager:
         self.ttyd_user = ttyd_user
         self.ttyd_binary = ttyd_binary
         self.tmux_wrapper = tmux_wrapper
+        # Background reaper state (#101/#7). Without it, a dead ttyd is only
+        # reaped lazily inside list_terminals()/get_terminal(); with no
+        # list/get/health traffic a defunct zombie would pin its PID slot
+        # forever. The reaper thread polls periodically as a safety net.
+        self._reaper_thread = None
+        self._reaper_stop = threading.Event()
 
     def _allocate_port(self):
-        """Find the next available port, reusing freed ports."""
+        """Find the next available port, reusing freed ports.
+
+        NOTE (#101/#8, deferred): lowest-free reuse means a just-freed port can
+        be handed to a new terminal immediately. Combined with the connect-time
+        gap in handle_ttyd_proxy (the lock is dropped before connect), an
+        in-flight request to a deleted terminal could reach the new terminal's
+        ttyd. The window is narrow and not a security boundary; the proper fix
+        (a per-terminal lease that holds the port for the request's lifetime) is
+        tracked separately.
+        """
         used_ports = {terminal["port"] for terminal in self.terminals.values()}
         max_port = self.base_port + self.max_terminals
         port = self.base_port
@@ -106,6 +121,46 @@ class TTYDManager:
             if process and process.poll() is not None:
                 dead.append((terminal_id, info))
         return dead
+
+    def reap_dead_terminals(self):
+        """Collect dead ttyd processes under the lock, then clean them up
+        outside it (tmux kill can block). Returns the number reaped. Safe to
+        call from the background reaper or any request path (#101/#7)."""
+        with self.lock:
+            dead = self._collect_dead_terminals()
+            for terminal_id, _info in dead:
+                del self.terminals[terminal_id]
+        for terminal_id, info in dead:
+            self._cleanup_terminal(
+                terminal_id, info, f"Terminal ttyd{terminal_id} died, reaped"
+            )
+        return len(dead)
+
+    def _reaper_loop(self, interval):
+        # Poll until stop() is signalled. Event.wait doubles as the sleep so a
+        # shutdown returns promptly instead of after a full interval.
+        while not self._reaper_stop.wait(interval):
+            try:
+                self.reap_dead_terminals()
+            except Exception as exc:  # never let the daemon thread die
+                print(f"Reaper error: {exc}", file=sys.stderr, flush=True)
+
+    def start_reaper(self, interval=30):
+        """Start the background reaper thread (idempotent)."""
+        if self._reaper_thread and self._reaper_thread.is_alive():
+            return
+        self._reaper_stop.clear()
+        self._reaper_thread = threading.Thread(
+            target=self._reaper_loop, args=(interval,), daemon=True, name="ttyd-reaper"
+        )
+        self._reaper_thread.start()
+
+    def stop_reaper(self):
+        """Signal the reaper thread to stop and join it briefly."""
+        self._reaper_stop.set()
+        thread = self._reaper_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=5)
 
     def create_terminal(self, wait=False):
         """Spawn a new ttyd process. Returns terminal info dict, 'limit', or None."""

@@ -141,6 +141,13 @@
   // path so it keeps working on mobile, where the parent receives the event and
   // the iOS gesture exposes an empty getData('text/plain') (regression #66).
   window.__handleImageTransfer = handleImageTransfer;
+  // Shared helpers exported so the parent page and the virtual keyboard delegate
+  // here instead of keeping their own copies (#101/#14): containsFiles had two
+  // byte-identical definitions and the socket-discovery + '0' ttyd-protocol
+  // prefix were hard-coded in three places, so a protocol/quirk change silently
+  // diverged. sendToTTYD owns the '0' INPUT prefix — the single place to change.
+  window.__containsFiles = containsFiles;
+  window.__sendToTTYD = sendToTTYD;
 
   document.addEventListener('paste', function(e) {
     // Only images are consumed on the iframe paste path: pasted text stays

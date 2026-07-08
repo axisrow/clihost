@@ -19,11 +19,13 @@ class FakeResponse:
         self.reason = reason
         self._headers = headers or []
         self._body = body
+        self.getheaders_calls = 0
 
     def read(self):
         return self._body
 
     def getheaders(self):
+        self.getheaders_calls += 1
         return self._headers
 
 
@@ -192,6 +194,26 @@ class TestBuildTtydHeaders(unittest.TestCase):
         headers = self._build({})
         self.assertEqual(headers["Host"], "127.0.0.1:7681")
         self.assertEqual(headers["X-Forwarded-For"], "127.0.0.1")
+
+
+class TestResponseHeaderEfficiency(unittest.TestCase):
+    """#13: response headers must be read once and skip-sets are constants."""
+
+    def test_getheaders_called_once(self):
+        resp = FakeResponse(
+            headers=[("Content-Type", "text/html"), ("X-Extra", "1")], body=b"<html>"
+        )
+        _reset_conn(resp)
+        handler = StubHandler(headers={}, command="GET")
+        with patch.object(proxy.http.client, "HTTPConnection", FakeConn):
+            proxy.proxy_ttyd_http(handler, "/", 7681)
+        # Old code called resp.getheaders() twice (content-type sniff + forward).
+        self.assertEqual(resp.getheaders_calls, 1)
+
+    def test_skip_sets_are_frozenset_constants(self):
+        self.assertIsInstance(proxy.HOP_BY_HOP_HEADERS, frozenset)
+        self.assertIsInstance(proxy._SKIP_RESPONSE_HEADERS_HTML, frozenset)
+        self.assertIn("content-security-policy", proxy._SKIP_RESPONSE_HEADERS_HTML)
 
 
 if __name__ == "__main__":
