@@ -19,6 +19,8 @@ GLM = REPO_ROOT / "bin/glm"
 CLAUDE_AUTH_SNAPSHOT = REPO_ROOT / "bin/claude-auth-snapshot.sh"
 CLAUDE_AUTH_SNAPSHOT_HOST = REPO_ROOT / "bin/claude-auth-snapshot-host.sh"
 CLIHOST_SYNC = REPO_ROOT / "bin/clihost-sync.sh"
+CLIHOST_BILLING = REPO_ROOT / "bin/clihost-billing.sh"
+CLIHOST_BILLING_LIB = REPO_ROOT / "bin/clihost_billing_lib.py"
 README = REPO_ROOT / "README.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 CLAUDE_SETTINGS_TEMPLATE = REPO_ROOT / "config/claude-settings.json"
@@ -50,6 +52,7 @@ class TestShellSyntax(unittest.TestCase):
             CLAUDE_AUTH_SNAPSHOT,
             CLAUDE_AUTH_SNAPSHOT_HOST,
             CLIHOST_SYNC,
+            CLIHOST_BILLING,
         ):
             with self.subTest(script=script.name):
                 result = subprocess.run(
@@ -2463,6 +2466,265 @@ class TestEnvExampleDocumentsRuntimeVars(unittest.TestCase):
                 re.compile(rf"^#?\s*{re.escape(var)}=", re.MULTILINE),
                 f"{var} is read by the code but not documented in .env.example",
             )
+
+
+class TestClihostBillingScript(unittest.TestCase):
+    """Host-side billing dispatcher contract (issue #37, PR1 + PR2).
+
+    Static invariants + an end-to-end `report`/`raw`/`collect` run against a
+    synthetic JSONL store and fake docker/flock binaries, so the tool is proven
+    without a Dokku host, root, or Docker.
+    """
+
+    def setUp(self):
+        self.text = CLIHOST_BILLING.read_text()
+
+    # --- static invariants ------------------------------------------------- #
+
+    def test_uses_strict_bash_mode(self):
+        self.assertTrue(self.text.startswith("#!/bin/bash\nset -euo pipefail\n"))
+
+    def test_is_host_only_not_copied_into_image(self):
+        # Like claude-auth-snapshot-host.sh: the billing tool must NOT be COPY'd
+        # into the image (inside the container it has no docker.sock and is unsafe).
+        dockerfile = DOCKERFILE.read_text()
+        self.assertNotIn("clihost-billing.sh", dockerfile)
+        self.assertNotIn("clihost_billing_lib.py", dockerfile)
+
+    def test_storage_under_configurable_billing_dir(self):
+        self.assertIn(': "${CLIHOST_BILLING_DIR:=/home/dokku/.clihost-billing}"', self.text)
+        self.assertIn('SAMPLES_DIR="${CLIHOST_BILLING_DIR}/samples"', self.text)
+        self.assertIn('STATE_DIR="${CLIHOST_BILLING_DIR}/state"', self.text)
+
+    def _code_lines(self):
+        # Non-comment, non-blank lines only (a mention of `sudo`/`crontab` in a
+        # comment or printed heredoc instruction is fine; an executable call is
+        # not). This is a coarse filter — heredoc bodies also survive it — so the
+        # callers additionally scope what they assert.
+        return [
+            line for line in self.text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+    def test_collect_uses_docker_not_du(self):
+        # HDD is measured via docker ps -s / images, never sudo du (dokku can't
+        # read the root storage mount, and sudo needs a password).
+        self.assertIn("docker stats --no-stream", self.text)
+        self.assertIn("docker ps -a -s", self.text)
+        self.assertNotIn("du -s", self.text)
+        # `sudo` must never be executed (it may appear in a comment explaining
+        # why it is avoided; those lines are filtered out).
+        for line in self._code_lines():
+            self.assertNotRegex(line, re.compile(r'(^|[|;&(`$]\s*)sudo\b'))
+
+    def test_collect_serialized_with_flock(self):
+        self.assertIn("flock -n 9", self.text)
+        self.assertIn('LOCK_FILE="${STATE_DIR}/collect.lock"', self.text)
+
+    def test_cron_line_does_not_auto_install(self):
+        # cron-line only PRINTS a crontab line; it must never EXECUTE `crontab`
+        # (the string "crontab -e" appears only inside the printed heredoc as an
+        # instruction to the operator). Assert no code line invokes crontab as a
+        # command.
+        for line in self._code_lines():
+            self.assertNotRegex(line, re.compile(r'(^|[|;&(`$]\s*)crontab\b'))
+        self.assertIn("crontab -e", self.text)  # printed instruction only
+
+    def test_python_is_stdlib_only(self):
+        # The library must not import any third-party package.
+        lib_text = CLIHOST_BILLING_LIB.read_text()
+        self.assertNotRegex(lib_text, re.compile(r'^\s*import\s+(requests|jq|yaml|numpy)', re.MULTILINE))
+        # Only stdlib imports are expected.
+        self.assertIn("import json", lib_text)
+        self.assertIn("import datetime", lib_text)
+
+    # --- end-to-end runs --------------------------------------------------- #
+
+    def _run(self, args, billing_dir, extra_path=None, env_extra=None):
+        env = dict(os.environ)
+        env["CLIHOST_BILLING_DIR"] = str(billing_dir)
+        if extra_path:
+            env["PATH"] = f"{extra_path}{os.pathsep}{env['PATH']}"
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(
+            ["bash", str(CLIHOST_BILLING), *args],
+            capture_output=True, text=True, env=env,
+        )
+
+    def _write_samples(self, billing_dir, lines):
+        samples_dir = billing_dir / "samples"
+        samples_dir.mkdir(parents=True, exist_ok=True)
+        (samples_dir / "2026-07.jsonl").write_text("\n".join(lines) + "\n")
+
+    def test_help_exits_nonzero_only_when_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run(["help"], pathlib.Path(tmp))
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("Usage", out.stderr)
+            # No subcommand => usage + exit 2.
+            out2 = self._run([], pathlib.Path(tmp))
+            self.assertEqual(out2.returncode, 2)
+
+    def test_unknown_subcommand_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run(["bogus"], pathlib.Path(tmp))
+            self.assertNotEqual(out.returncode, 0)
+            self.assertIn("unknown subcommand", out.stderr)
+
+    def test_cron_line_prints_collector_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run(["cron-line"], pathlib.Path(tmp))
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("collect", out.stdout)
+            self.assertRegex(out.stdout, r"\*/\d+ \* \* \* \*")
+            self.assertIn("crontab -e", out.stdout)
+
+    def test_report_on_synthetic_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            billing_dir = pathlib.Path(tmp)
+            self._write_samples(billing_dir, [
+                '{"ts":"2026-07-09T12:00:00Z","app":"clihost-axisrow","container":"clihost-axisrow.web.1","running":true,"cpu_perc":"100.00%","mem_bytes":1073741824,"rootfs_bytes":1000,"image_bytes":4661408563}',
+                '{"ts":"2026-07-09T12:05:00Z","app":"clihost-axisrow","container":"clihost-axisrow.web.1","running":true,"cpu_perc":"100.00%","mem_bytes":1073741824,"rootfs_bytes":1000,"image_bytes":4661408563}',
+                '{"ts":"2026-07-09T12:00:00Z","app":"clihost-work1nw","container":"clihost-work1nw.web.1","running":true,"cpu_perc":"50.00%","mem_bytes":536870912,"rootfs_bytes":500,"image_bytes":4661408563}',
+                '{"ts":"2026-07-09T12:05:00Z","app":"clihost-work1nw","container":"clihost-work1nw.web.1","running":true,"cpu_perc":"50.00%","mem_bytes":536870912,"rootfs_bytes":500,"image_bytes":4661408563}',
+                'this is a torn line that must be skipped {',
+            ])
+            out = self._run(["report"], billing_dir)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("clihost-axisrow", out.stdout)
+            self.assertIn("clihost-work1nw", out.stdout)
+            self.assertIn("APP", out.stdout)
+            self.assertIn("COST", out.stdout)
+            # No rates.json => COST is an em dash.
+            self.assertIn("—", out.stdout)
+
+    def test_report_json_and_raw_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            billing_dir = pathlib.Path(tmp)
+            self._write_samples(billing_dir, [
+                '{"ts":"2026-07-09T12:00:00Z","app":"clihost-axisrow","container":"clihost-axisrow.web.1","running":true,"cpu_perc":"100.00%","mem_bytes":1073741824,"rootfs_bytes":1000,"image_bytes":4661408563}',
+                '{"ts":"2026-07-09T12:05:00Z","app":"clihost-axisrow","container":"clihost-axisrow.web.1","running":true,"cpu_perc":"100.00%","mem_bytes":1073741824,"rootfs_bytes":1000,"image_bytes":4661408563}',
+            ])
+            out = self._run(["report", "--json"], billing_dir)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            payload = json.loads(out.stdout)
+            self.assertIn("rows", payload)
+            self.assertEqual(payload["rows"][0]["app"], "clihost-axisrow")
+            self.assertIsNone(payload["rows"][0]["cost"])
+            # `raw` is `report --json`.
+            out_raw = self._run(["raw"], billing_dir)
+            self.assertEqual(out_raw.returncode, 0, out_raw.stderr)
+            self.assertEqual(json.loads(out_raw.stdout), payload)
+
+    def test_report_warns_when_collector_stale(self):
+        # Samples with an old timestamp (> 2x interval old) must trigger the
+        # "collector likely not running" warning on stderr.
+        with tempfile.TemporaryDirectory() as tmp:
+            billing_dir = pathlib.Path(tmp)
+            self._write_samples(billing_dir, [
+                '{"ts":"2020-01-01T00:00:00Z","app":"clihost-axisrow","container":"clihost-axisrow.web.1","running":true,"cpu_perc":"10.00%","mem_bytes":1073741824,"rootfs_bytes":1000,"image_bytes":4661408563}',
+                '{"ts":"2020-01-01T00:05:00Z","app":"clihost-axisrow","container":"clihost-axisrow.web.1","running":true,"cpu_perc":"10.00%","mem_bytes":1073741824,"rootfs_bytes":1000,"image_bytes":4661408563}',
+            ])
+            out = self._run(["report"], billing_dir)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("collector likely not running", out.stderr)
+
+    def test_report_no_samples_is_graceful(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._run(["report"], pathlib.Path(tmp))
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("no samples yet", out.stderr)
+
+    def _make_fake_docker(self, tmp_path):
+        # A fake `docker` that answers stats/ps/inspect for two clihost apps.
+        fake_docker = tmp_path / "docker"
+        fake_docker.write_text(r'''#!/bin/bash
+sub="$1"; shift
+case "$sub" in
+  stats)
+    echo '{"Name":"clihost-axisrow.web.1","CPUPerc":"9.28%","MemUsage":"512.4MiB / 2GiB"}'
+    ;;
+  ps)
+    # Two shapes: `ps -a -s --format ...` (the size query) and
+    # `ps -a --filter name=... --format {{.Names}}` (the inspect name list).
+    if [[ "$*" == *"{{.Names}}"* ]]; then
+      echo "clihost-axisrow.web.1"
+      echo "clihost-work1nw.web.1"
+    else
+      echo '{"Names":"clihost-axisrow.web.1","Image":"clihost","Size":"2.54GB (virtual 5.73GB)","State":"running"}'
+      echo '{"Names":"clihost-work1nw.web.1","Image":"clihost","Size":"0B (virtual 4.34GB)","State":"exited"}'
+    fi
+    ;;
+  inspect)
+    name="${!#}"
+    if [[ "$name" == *axisrow* ]]; then
+      echo '{"name":"/clihost-axisrow.web.1","restart_count":0,"status":"running","exit_code":0,"oom_killed":false}'
+    else
+      echo '{"name":"/clihost-work1nw.web.1","restart_count":2,"status":"exited","exit_code":137,"oom_killed":true}'
+    fi
+    ;;
+esac
+''')
+        fake_docker.chmod(0o755)
+        # A fake `flock` (absent on macOS) that just succeeds.
+        fake_flock = tmp_path / "flock"
+        fake_flock.write_text("#!/bin/bash\nexit 0\n")
+        fake_flock.chmod(0o755)
+        return fake_docker
+
+    def test_collect_builds_samples_from_docker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            billing_dir = tmp_path / "billing"
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            self._make_fake_docker(bin_dir)
+
+            out = self._run(["collect"], billing_dir, extra_path=str(bin_dir))
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("collected 2 sample(s)", out.stdout)
+
+            samples = list((billing_dir / "samples").glob("*.jsonl"))
+            self.assertEqual(len(samples), 1)
+            lines = [
+                json.loads(line)
+                for line in samples[0].read_text().splitlines() if line.strip()
+            ]
+            self.assertEqual(len(lines), 2)
+            by_app = {s["app"]: s for s in lines}
+            self.assertIn("clihost-axisrow", by_app)
+            self.assertIn("clihost-work1nw", by_app)
+            # Running app: cpu/mem parsed; disk = image (virtual - rootfs).
+            axi = by_app["clihost-axisrow"]
+            self.assertTrue(axi["running"])
+            self.assertGreater(axi["mem_bytes"], 0)
+            self.assertEqual(axi["rootfs_bytes"], int(round(2.54 * 1000 ** 3)))
+            self.assertEqual(
+                axi["image_bytes"],
+                int(round(5.73 * 1000 ** 3)) - int(round(2.54 * 1000 ** 3)),
+            )
+            # Stopped app: running false, no cpu billed, oom flag carried.
+            work = by_app["clihost-work1nw"]
+            self.assertFalse(work["running"])
+            self.assertEqual(work["cpu_perc"], 0.0)
+            self.assertTrue(work["oom_killed"])
+            self.assertEqual(work["restart_count"], 2)
+
+    def test_collect_then_report_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            billing_dir = tmp_path / "billing"
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            self._make_fake_docker(bin_dir)
+            # Two collects (the timestamps are the same wall-clock second in a
+            # fast test, so this mainly proves the pipeline runs; report still
+            # renders a table without error).
+            self._run(["collect"], billing_dir, extra_path=str(bin_dir))
+            out = self._run(["report"], billing_dir)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("clihost-axisrow", out.stdout)
 
 
 if __name__ == "__main__":

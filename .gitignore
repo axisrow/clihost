@@ -10,3 +10,6 @@ node_modules/
 
 # Orchestrator worker task briefs (scratch, not project artifacts)
 TASK_BRIEF_*.md
+
+# Host-side billing store (issue #37) — JSONL samples/state, host-only, never committed
+.clihost-billing/

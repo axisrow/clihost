@@ -298,6 +298,74 @@ Syncthing / real-time sync is explicitly deferred. The accepted design is
 rsync-first for this release; a long-running bidirectional file watcher is
 over-engineering until the manual contract proves insufficient.
 
+### Host-side billing (Dokku usage accounting, issue #37)
+
+`bin/clihost-billing.sh` + `bin/clihost_billing_lib.py` are a **host-only** pair
+(like `claude-auth-snapshot-host.sh`): they are **never** copied into the image
+(`Dockerfile` is not touched) — inside the container billing is meaningless and
+unsafe (no `docker.sock`). They live on the Dokku host (e.g. `/home/dokku/bin/`)
+and run as the `dokku` user, who is in the `docker` group and can therefore call
+`docker stats/ps -s/inspect` **without sudo** (`sudo` needs a password and is
+unavailable). This is the accounting foundation for issue #37 (PR1 + PR2:
+collect + report); the operational subcommands (`diagnose`/`restart`,
+`gc-mounts`, `idle-sleep`) and stage 2 (tariffs/invoices) are follow-up PRs.
+
+The bash file is a thin dispatcher (`set -euo pipefail`, `die`/`usage`/`main`
++`case`, one docker/I-O owner); all pure logic (parsers + aggregation +
+formatting) lives in the stdlib-only `clihost_billing_lib.py` so it is unit
+tested without root or Docker (`tests/unit/test_clihost_billing_agg.py`, plus
+static+end-to-end checks in `tests/unit/test_shell_scripts.py`). No `jq`/`sqlite3`
+(not guaranteed on the host); the dispatcher shells out to `python3` inline.
+
+**Subcommands:**
+
+| Subcommand | Purpose |
+|---|---|
+| `collect` | Sample every `clihost-*` container once (cron-driven). Idempotent, `flock`-serialized, appends JSONL. |
+| `cron-line` | Print a ready-to-paste `crontab` line — the operator installs it manually (`crontab -e` as `dokku`; we never auto-install into a crontab, no sudo). |
+| `report [--json]` | Aggregated usage table per app (avg CPU cores / avg mem / disk / container-hours / uptime% / COST). |
+| `raw` | Alias for `report --json` (machine-readable). |
+| `help` | Usage. |
+
+**Storage** — append-only JSONL under `${CLIHOST_BILLING_DIR:=/home/dokku/.clihost-billing}`
+(gitignored: `.clihost-billing/`):
+- `samples/YYYY-MM.jsonl` — one JSON sample object per container per collect (monthly rotation).
+- `state/collect.lock` — `flock` guard so overlapping cron runs don't interleave.
+- `state/last-collect.json` — last-collect metadata (feeds the "collector likely
+  not running" warning `report` prints when the newest sample is older than
+  `2 × interval`).
+- `rates.json` (stage 2) — not present yet; `report` calls `apply_rates(rows, None)`
+  so COST renders as an em dash (`—`) until rates exist.
+
+**Data sources** (docker only, no sudo, **no `du`** — the `dokku` user can't read
+the root storage mount):
+- CPU%/Mem: `docker stats --no-stream --format '{{json .}}'` (one call, running
+  containers only).
+- Disk: `docker ps -a -s` writable-layer `Size` field (`"2.54GB (virtual 5.73GB)"`);
+  `rootfs` = first number, `image` = `virtual − rootfs`.
+- Diagnostics carried per sample: `docker inspect` `RestartCount`/`Status`/
+  `ExitCode`/`OOMKilled` (used by the follow-up `diagnose` PR).
+
+**Container-hours** are **left-Riemann** integrated over the *actual* `dt`
+between consecutive samples *of the same container* (an app with several
+`.web.N` instances sums each container's contribution — grouping only by app
+would fabricate bogus intervals). Two guards: `dt <= 0` (clock skew / duplicate)
+is skipped, and `dt > 2.5 × CLIHOST_BILLING_INTERVAL` is treated as a **gap**
+(collector down / server asleep) and excluded from billed time. A stopped
+container writes a `running:false` sample: its seconds count toward the billed
+denominator (uptime%) but not toward billable *running* hours; disk is still
+tracked. Disk is a point-in-time size (latest per container summed), not integrated.
+
+**Environment:** `CLIHOST_BILLING_DIR` (storage root), `CLIHOST_BILLING_INTERVAL`
+(collector cadence in seconds, default 300 — also the gap-detection base),
+`CLIHOST_APP_PREFIX` (container/app prefix to account, default `clihost-`).
+
+**Verification:** `python -m pytest tests/unit/test_clihost_billing_agg.py
+tests/unit/test_shell_scripts.py`; on the server, copy both files to
+`/home/dokku/bin/`, run `clihost-billing.sh collect` a few times with a pause,
+then `clihost-billing.sh report` — the table should list `clihost-axisrow` /
+`clihost-work1nw`. `clihost-billing.sh cron-line` prints the collector line.
+
 ### ttyd proxy package (app/)
 
 `app/ttyd_proxy.py` is only a **thin process entry point** (imports `main` from `ttydproxy.app`; referenced by entrypoint.sh as `python3 /app/ttyd_proxy.py`); all logic lives in the `app/ttydproxy/` package:
