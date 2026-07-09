@@ -173,15 +173,13 @@ ensure_claude_settings() {
   chown "${HAPI_USER}:${HAPI_USER}" "${settings_file}"
 }
 
-run_as_hapi() {
-  local command="$1"
-  runuser -u "${HAPI_USER}" -- sh -c "cd \"${HAPI_USER_HOME}\" && env HOME=\"${HAPI_USER_HOME}\" PATH=\"${HAPI_RUN_PATH}\" HAPI_HOME=\"${HAPI_HOME}\" ${command}"
-}
-
-# argv-based variant of run_as_hapi: the program and its arguments are passed as
-# separate argv elements (NOT interpolated into an `sh -c` string), so values
-# containing shell metacharacters (quotes, $(), backticks, ;) can never be
-# executed as code.
+# Run a program as the hapi user, dropping root privileges. The program and its
+# arguments are passed as separate argv elements (NOT interpolated into an
+# `sh -c` string), so values containing shell metacharacters (quotes, $(),
+# backticks, ;) can never be executed as code. The former string-based
+# `run_as_hapi` (which interpolated its argument into `sh -c`) was removed in
+# favor of this argv form for droid/ao/hapi startup — a latent root-context
+# command-injection surface even though callers guarded their inputs (#101/#9).
 #
 # Secrets (tunnel token/auth) must NEVER appear in argv — not even briefly as an
 # `env NAME=VALUE` argument — because argv is world-readable via `ps` /
@@ -291,16 +289,21 @@ if [ "${DROID_DAEMON_ENABLED}" = "true" ]; then
     esac
 
     echo "Registering Droid computer '${DROID_COMPUTER_NAME}'..."
-    if ! run_as_hapi "droid computer register \"${DROID_COMPUTER_NAME}\" -y 2>&1"; then
+    if ! run_as_hapi_argv -- droid computer register "${DROID_COMPUTER_NAME}" -y 2>&1; then
       echo "ERROR: Droid computer registration failed; daemon not started" >&2
       exit 1
     fi
 
     DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"
-    touch "${DROID_DAEMON_LOG}"
+    # `: >` (truncate-or-create), not `touch`: the launch appends via `>>`, so
+    # truncate at startup to cap unbounded growth on the persistent volume.
+    : > "${DROID_DAEMON_LOG}"
     chown "${HAPI_USER}:${HAPI_USER}" "${DROID_DAEMON_LOG}"
     echo "Starting droid daemon --remote-access in background (logs: ${DROID_DAEMON_LOG})..."
-    run_as_hapi "stdbuf -oL droid daemon --remote-access 2>&1 | tee \"${DROID_DAEMON_LOG}\"" &
+    # argv form (no `sh -c` interpolation): the log is written via a redirect
+    # instead of `| tee` (argv cannot express a pipe), matching the tunnel
+    # helpers. The dashboard reads the log file, not container stdout (#101/#9).
+    run_as_hapi_argv -- stdbuf -oL droid daemon --remote-access >>"${DROID_DAEMON_LOG}" 2>&1 &
     DROID_DAEMON_PID=$!
     echo "Droid daemon started with PID: ${DROID_DAEMON_PID}"
   else
@@ -333,10 +336,14 @@ if [ "${AO_DAEMON_ENABLED}" = "true" ]; then
   esac
   if PATH="${HAPI_RUN_PATH}" command -v ao >/dev/null 2>&1; then
     AO_DAEMON_LOG="${HAPI_HOME}/ao-daemon.log"
-    touch "${AO_DAEMON_LOG}"
+    # `: >` (truncate-or-create), not `touch`: the launch appends via `>>`, so
+    # truncate at startup to cap unbounded growth on the persistent volume.
+    : > "${AO_DAEMON_LOG}"
     chown "${HAPI_USER}:${HAPI_USER}" "${AO_DAEMON_LOG}"
     echo "Starting ao daemon on 127.0.0.1:${AO_PORT} in background (logs: ${AO_DAEMON_LOG})..."
-    run_as_hapi "AO_PORT=\"${AO_PORT}\" stdbuf -oL ao daemon 2>&1 | tee \"${AO_DAEMON_LOG}\"" &
+    # argv form: AO_PORT is passed as an env assignment consumed by run_as_hapi_argv's
+    # `env` (not interpolated into `sh -c`), and the log via redirect not `| tee`.
+    run_as_hapi_argv -- env "AO_PORT=${AO_PORT}" stdbuf -oL ao daemon >>"${AO_DAEMON_LOG}" 2>&1 &
     AO_DAEMON_PID=$!
     echo "ao daemon started with PID: ${AO_DAEMON_PID}"
   else
@@ -494,31 +501,43 @@ rm -f "${HAPI_URL_FILE}" 2>/dev/null || true
 if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then
   # Start hapi server with relay in background (logs to file, force TCP relay)
   HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
-  # Pre-create the log so the URL-extraction loop's -f check passes immediately
-  touch "${HAPI_SERVER_LOG}"
+  # Truncate-or-create the log at startup (`: >`, not `touch`): the launch now
+  # appends via `>>` instead of the old `| tee` which truncated on open, so
+  # without this a persistent-volume server.log would keep stale relay URLs
+  # across restarts (a brief window where the /home/hapi/url fallback pairs a
+  # fresh token with an old URL) and grow unbounded. `: >` restores the old
+  # truncate semantics. Also makes the URL-extraction loop's -f check pass.
+  : > "${HAPI_SERVER_LOG}"
   chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_SERVER_LOG}"
   echo "Starting hapi server --relay in background (logs: ${HAPI_SERVER_LOG})..."
-  run_as_hapi "HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay 2>&1 | tee \"${HAPI_SERVER_LOG}\"" &
+  # argv form: HAPI_RELAY_FORCE_TCP via env, log via redirect not `| tee` (#101/#9).
+  run_as_hapi_argv -- env HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay >>"${HAPI_SERVER_LOG}" 2>&1 &
   HAPI_SERVER_PID=$!
   echo "Hapi server started with PID: ${HAPI_SERVER_PID}"
 
-  # Extract tunnel URL and token, build full connection URL
-  # (HAPI_URL_FILE was set + cleared above; recreated here only on a fresh URL.)
+  # Build the legacy connection URL file by delegating to the SAME builder the
+  # dashboard uses (ttydproxy.views.build_hapi_url_from_runtime), instead of a
+  # second bash reimplementation. The two copies had already drifted — bash took
+  # the FIRST relay URL (head -1) while views took the LAST, and bash left the
+  # token un-encoded while views quote()s it — so a token with &/+/% produced a
+  # broken /home/hapi/url that disagreed with the working on-demand dashboard
+  # link (#101/#12). One builder = no drift.
   HAPI_SETTINGS_FILE="${HAPI_HOME}/settings.json"
   (
     for i in $(seq 1 60); do
       if [ -f "${HAPI_SERVER_LOG}" ] && [ -f "${HAPI_SETTINGS_FILE}" ]; then
-        # Extract relay URL from log: https://xxx.relay.hapi.run
-        # Allow valid DNS-label chars (hyphen + mixed case): a subdomain like
-        # my-sub-01.relay.hapi.run must match or the URL is never built (B12).
-        RELAY_URL=$(grep -oE 'https://[A-Za-z0-9-]+\.relay\.hapi\.run' "${HAPI_SERVER_LOG}" 2>/dev/null | head -1 || true)
-        # Extract token from settings.json
-        TOKEN=$(grep -oE '"cliApiToken":\s*"[^"]+"' "${HAPI_SETTINGS_FILE}" 2>/dev/null | sed 's/.*"cliApiToken":\s*"\([^"]*\)".*/\1/' || true)
-        if [ -n "$RELAY_URL" ] && [ -n "$TOKEN" ]; then
-          # URL-encode the relay URL (replace : with %3A, / with %2F)
-          ENCODED_URL=$(echo "$RELAY_URL" | sed 's/:/%3A/g; s/\//%2F/g')
-          # Build full connection URL
-          FULL_URL="https://app.hapi.run/?hub=${ENCODED_URL}&token=${TOKEN}"
+        # PYTHONPATH=/app makes the ttydproxy package importable (same layout as
+        # `python3 /app/ttyd_proxy.py`). The helper returns the URL or nothing.
+        FULL_URL=$(PYTHONPATH=/app python3 -c '
+import sys
+from ttydproxy.views import build_hapi_url_from_runtime
+log = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+settings = open(sys.argv[2], encoding="utf-8", errors="replace").read()
+url = build_hapi_url_from_runtime(log, settings)
+if url:
+    print(url)
+' "${HAPI_SERVER_LOG}" "${HAPI_SETTINGS_FILE}" 2>/dev/null || true)
+        if [ -n "$FULL_URL" ]; then
           echo "$FULL_URL" > "${HAPI_URL_FILE}"
           chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_URL_FILE}"
           echo "Hapi connection URL: ${FULL_URL}"
@@ -537,16 +556,16 @@ if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then
   # Start hapi runner if enabled (reads config from volume)
   if [ "${HAPI_RUNNER_ENABLED}" = "true" ]; then
     echo "Starting hapi runner..."
-    if ! run_as_hapi "hapi runner start 2>&1"; then
+    if ! run_as_hapi_argv -- hapi runner start 2>&1; then
       echo '=== RUNNER START FAILED ===' >&2
     fi
 
     # Verify runner is running
     echo "Checking hapi runner status..."
-    if ! run_as_hapi "hapi runner status 2>&1"; then
+    if ! run_as_hapi_argv -- hapi runner status 2>&1; then
       echo '=== RUNNER NOT RUNNING ===' >&2
       echo 'Running hapi doctor for diagnostics:' >&2
-      run_as_hapi "hapi doctor 2>&1" || true
+      run_as_hapi_argv -- hapi doctor 2>&1 || true
     fi
     echo "Hapi runner startup complete"
   else

@@ -210,6 +210,78 @@ class TestAllocatePort(unittest.TestCase):
         self.assertIsNone(manager._allocate_port())
 
 
+class TestReaper(unittest.TestCase):
+    """Background reaper collects dead ttyd zombies without list/get traffic
+    (#101/#7)."""
+
+    @patch("ttydproxy.manager.subprocess.run")
+    @patch("ttydproxy.manager.subprocess.Popen")
+    def test_reap_removes_dead_without_list_or_get(self, mock_popen, _mock_run):
+        alive = MagicMock()
+        alive.pid = 100
+        alive.poll.return_value = None
+        dead = MagicMock()
+        dead.pid = 101
+        dead.poll.return_value = 1
+        mock_popen.side_effect = [alive, dead]
+
+        manager = TTYDManager(base_port=9000)
+        manager.create_terminal()  # id 1, alive
+        manager.create_terminal()  # id 2, dead
+
+        # Reap directly — do NOT call list_terminals()/get_terminal().
+        reaped = manager.reap_dead_terminals()
+        self.assertEqual(reaped, 1)
+        self.assertEqual(set(manager.terminals.keys()), {1})
+
+    @patch("ttydproxy.manager.subprocess.run")
+    @patch("ttydproxy.manager.subprocess.Popen")
+    def test_reap_keeps_alive_terminals(self, mock_popen, _mock_run):
+        alive = MagicMock()
+        alive.pid = 100
+        alive.poll.return_value = None
+        mock_popen.return_value = alive
+
+        manager = TTYDManager(base_port=9000)
+        manager.create_terminal()
+        self.assertEqual(manager.reap_dead_terminals(), 0)
+        self.assertEqual(set(manager.terminals.keys()), {1})
+
+    @patch("ttydproxy.manager.subprocess.run")
+    @patch("ttydproxy.manager.subprocess.Popen")
+    def test_background_reaper_thread_reaps(self, mock_popen, _mock_run):
+        import time
+        dead = MagicMock()
+        dead.pid = 101
+        dead.poll.return_value = 1
+        mock_popen.return_value = dead
+
+        manager = TTYDManager(base_port=9000)
+        manager.create_terminal()  # id 1, dead
+        self.assertEqual(set(manager.terminals.keys()), {1})
+
+        # A short interval so the thread ticks quickly in the test.
+        manager.start_reaper(interval=0.05)
+        try:
+            deadline = time.monotonic() + 5
+            while manager.terminals and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(manager.terminals, {}, "reaper thread did not reap the zombie")
+        finally:
+            manager.stop_reaper()
+        self.assertFalse(
+            manager._reaper_thread.is_alive(), "reaper thread did not stop"
+        )
+
+    def test_start_reaper_is_idempotent(self):
+        manager = TTYDManager(base_port=9000)
+        manager.start_reaper(interval=10)
+        first = manager._reaper_thread
+        manager.start_reaper(interval=10)  # must not spawn a second thread
+        self.assertIs(manager._reaper_thread, first)
+        manager.stop_reaper()
+
+
 if __name__ == "__main__":
     unittest.main()
 

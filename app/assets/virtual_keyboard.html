@@ -52,10 +52,10 @@
           win.term.paste(text);
           return true;
         }
-        var socket = win && (win._ttydSocket || win.socket || win.ws);
-        if (socket && socket.readyState === 1) {
-          socket.send('0' + text);
-          return true;
+        // Fall back to the iframe's shared sender (owns socket discovery + the
+        // '0' ttyd INPUT prefix) instead of an inline copy (#101/#14).
+        if (win && win.__sendToTTYD) {
+          return win.__sendToTTYD(text);
         }
       } catch (e) {}
       return false;
@@ -94,33 +94,31 @@
 
       try {
         var win = iframe.contentWindow;
-        var socket = win && (win._ttydSocket || win.socket || win.ws);
-        if (socket && socket.readyState === 1) {
-          var data = null;
-          var ESC = String.fromCharCode(27);
-          switch (key) {
-            case 'esc': data = ESC; break;
-            case 'ctrl-c': data = String.fromCharCode(3); break;
-            case 'ctrl-b': data = String.fromCharCode(2); break;
-            case 'ctrl-l': data = String.fromCharCode(12); break;
-            case 'up': data = ESC + '[A'; break;
-            case 'down': data = ESC + '[B'; break;
-            case 'right': data = ESC + '[C'; break;
-            case 'left': data = ESC + '[D'; break;
-            case '1': case '2': case '3': case '4': case '5':
-              data = key; break;
-            case 'slash': data = '/'; break;
-            case 'bang': data = '!'; break;
-            case 'backspace': data = String.fromCharCode(127); break;
-            case 'enter': data = '\r'; break;
-            // tmux prefix (Ctrl+B) + m — toggles tmux mouse mode (scroll on/off)
-            case 'scroll': data = String.fromCharCode(2) + 'm'; break;
-            case 'at': data = '@'; break;
-          }
-          if (data) {
-            socket.send('0' + data);
-            return;
-          }
+        var data = null;
+        var ESC = String.fromCharCode(27);
+        switch (key) {
+          case 'esc': data = ESC; break;
+          case 'ctrl-c': data = String.fromCharCode(3); break;
+          case 'ctrl-b': data = String.fromCharCode(2); break;
+          case 'ctrl-l': data = String.fromCharCode(12); break;
+          case 'up': data = ESC + '[A'; break;
+          case 'down': data = ESC + '[B'; break;
+          case 'right': data = ESC + '[C'; break;
+          case 'left': data = ESC + '[D'; break;
+          case '1': case '2': case '3': case '4': case '5':
+            data = key; break;
+          case 'slash': data = '/'; break;
+          case 'bang': data = '!'; break;
+          case 'backspace': data = String.fromCharCode(127); break;
+          case 'enter': data = '\r'; break;
+          // tmux prefix (Ctrl+B) + m — toggles tmux mouse mode (scroll on/off)
+          case 'scroll': data = String.fromCharCode(2) + 'm'; break;
+          case 'at': data = '@'; break;
+        }
+        // Send via the iframe's shared sender (owns socket discovery + the '0'
+        // ttyd INPUT prefix) instead of an inline socket copy (#101/#14).
+        if (data && win && win.__sendToTTYD) {
+          win.__sendToTTYD(data);
         }
       } catch (e) {}
     }

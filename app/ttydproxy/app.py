@@ -482,6 +482,13 @@ class TTYDProxyHandler(BaseHandler):
         if not terminal:
             self.send_json(404, {"error": f"Terminal ttyd{terminal_id} not found"})
             return
+        # NOTE (#101/#8, deferred): the lock is released inside get_terminal(),
+        # so this `port` is not revalidated at connect time. If terminal_id is
+        # deleted and its port reused (lowest-free, see _allocate_port) before
+        # the connect below, an in-flight request could reach a different
+        # terminal's ttyd. The window is narrow (usually ECONNREFUSED->502) and
+        # not a security boundary; a proper fix (a per-terminal lease/refcount
+        # holding the port until the request completes) is tracked separately.
         port = terminal["port"]
         parsed = urlparse(self.path)
         prefix = f"/ttyd{terminal_id}"
@@ -525,6 +532,10 @@ def main():
     else:
         print("WARNING: Failed to auto-create first terminal", file=sys.stderr, flush=True)
 
+    # Background reaper: a ttyd that dies while no one lists/gets it (or polls
+    # /health) would otherwise stay a defunct zombie holding its PID slot (#7).
+    ttyd_manager.start_reaper()
+
     try:
         httpd = ThreadingHTTPServer(server_address, TTYDProxyHandler)
         httpd.daemon_threads = True
@@ -534,6 +545,7 @@ def main():
 
     def signal_handler(signum, _frame):
         print(f"Received signal {signum}, shutting down gracefully...", flush=True)
+        ttyd_manager.stop_reaper()
         with ttyd_manager.lock:
             terminal_ids = list(ttyd_manager.terminals.keys())
         for terminal_id in terminal_ids:

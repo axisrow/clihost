@@ -50,6 +50,18 @@ function bootVkbd({ clipboardText = 'CLIP', readTextRejects = false,
   const iframeWin = iframe.contentWindow;
   iframeWin.term = term;
   iframeWin._ttydSocket = socket;
+  // In production, tab_fix_script.html (injected INTO the iframe) exports
+  // __sendToTTYD; the vkbd delegates to it instead of an inline socket copy
+  // (#101/#14). The fake iframe doesn't run that script, so provide the same
+  // exported helper here — it owns socket discovery + the '0' INPUT prefix.
+  iframeWin.__sendToTTYD = (data) => {
+    const s = iframeWin._ttydSocket || iframeWin.socket || iframeWin.ws;
+    if (s && s.readyState === 1) {
+      s.send('0' + data);
+      return true;
+    }
+    return false;
+  };
   // jsdom's textarea focus path needs the helper textarea to exist.
   const ta = iframeWin.document.createElement('textarea');
   ta.className = 'xterm-helper-textarea';

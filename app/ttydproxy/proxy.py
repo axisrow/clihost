@@ -17,7 +17,7 @@ TTYD_PROXY_HTML_CSP = (
     "style-src 'self' 'unsafe-inline'"
 )
 
-HOP_BY_HOP_HEADERS = {
+HOP_BY_HOP_HEADERS = frozenset({
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailer", "trailers", "transfer-encoding", "upgrade",
     "content-length", "authorization",
@@ -26,7 +26,10 @@ HOP_BY_HOP_HEADERS = {
     # auth) so there is no proven leak, but the proxy's auth tokens have no
     # business reaching an internal service — defense in depth (#101/#6).
     "cookie",
-}
+})
+# Response headers to drop for an HTML response (the proxy sets its own hardened
+# CSP). Precomputed once instead of `set(HOP_BY_HOP_HEADERS)` per response (#13).
+_SKIP_RESPONSE_HEADERS_HTML = HOP_BY_HOP_HEADERS | {"content-security-policy"}
 
 TUNNEL_RECV_SIZE = 8192
 TUNNEL_MAX_PENDING = 1048576  # 1 MiB per direction before backpressure kicks in
@@ -254,35 +257,39 @@ def proxy_ttyd_http(handler, upstream_path, port):
         resp = conn.getresponse()
         data = resp.read()
 
+        # Read the upstream headers once and reuse the list (#13): the same
+        # tuples drive the content-type sniff and the header-forwarding loop.
+        resp_headers = resp.getheaders()
+
         content_type = ""
-        for key, value in resp.getheaders():
+        for key, value in resp_headers:
             if key.lower() == "content-type":
                 content_type = value
                 break
         # Normalize the value so injection + CSP hardening fire regardless of
         # upstream header casing (e.g. 'Text/HTML') (B6).
         content_type = content_type.lower()
+        is_html = "text/html" in content_type
 
-        if "text/html" in content_type and data:
+        if is_html and data:
             data = inject_tab_fix_script(data)
 
         handler.send_response(resp.status, resp.reason)
 
-        if "text/html" in content_type:
+        if is_html:
             handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             handler.send_header("Pragma", "no-cache")
             handler.send_header("Expires", "0")
 
-        skip_headers = set(HOP_BY_HOP_HEADERS)
-        if "text/html" in content_type:
-            skip_headers.add("content-security-policy")
+        # Precomputed skip-sets (frozenset constants) — no per-response set() (#13).
+        skip_headers = _SKIP_RESPONSE_HEADERS_HTML if is_html else HOP_BY_HOP_HEADERS
 
-        for key, value in resp.getheaders():
+        for key, value in resp_headers:
             if key.lower() in skip_headers:
                 continue
             handler.send_header(key, value)
 
-        if "text/html" in content_type:
+        if is_html:
             handler.send_header("Content-Security-Policy", TTYD_PROXY_HTML_CSP)
 
         handler.send_header("Content-Length", str(len(data)))

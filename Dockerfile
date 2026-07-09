@@ -24,7 +24,7 @@ RUN NODE_VERSION="22.14.0" && \
     fi && \
     apt-get update && \
     apt-get install -y --no-install-recommends bubblewrap ca-certificates curl gh git openssh-server python3-pip python3-venv rsync tini tmux util-linux xz-utils && \
-    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" && \
+    { for i in 1 2 3 4 5; do curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" && break || sleep 10; done } && \
     tar -xJf "node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -C /usr/local --strip-components=1 --no-same-owner && \
     rm "node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" && \
     ln -sf /usr/local/bin/node /usr/local/bin/nodejs && \
@@ -56,8 +56,7 @@ RUN TTYD_VERSION="1.7.7" && \
     TTYD_ARCH="$(dpkg --print-architecture | sed -e 's/armhf/arm/' -e 's/amd64/x86_64/')" && \
     if [ "$TTYD_ARCH" = "arm64" ]; then TTYD_ARCH="aarch64"; fi && \
     echo "Installing ttyd for architecture: $TTYD_ARCH" && \
-    curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${TTYD_ARCH}" \
-    -o /usr/local/bin/ttyd && \
+    { for i in 1 2 3 4 5; do curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${TTYD_ARCH}" -o /usr/local/bin/ttyd && break || sleep 10; done } && \
     chmod +x /usr/local/bin/ttyd
 
 # Install SSH-tunnel providers (issue #79): cloudflared (default) + chisel.
@@ -76,8 +75,7 @@ RUN TUNNEL_ARCH="$(dpkg --print-architecture)" && \
       true) \
         CLOUDFLARED_VERSION="2026.6.1" && \
         echo "Installing cloudflared ${CLOUDFLARED_VERSION} for ${TUNNEL_ARCH}" && \
-        curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${TUNNEL_ARCH}" \
-          -o /usr/local/bin/cloudflared && \
+        { for i in 1 2 3 4 5; do curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${TUNNEL_ARCH}" -o /usr/local/bin/cloudflared && break || sleep 10; done } && \
         chmod +x /usr/local/bin/cloudflared ;; \
       *) echo "ERROR: INSTALL_CLOUDFLARED='${INSTALL_CLOUDFLARED}' is invalid; must be 'true' or 'false'" >&2; exit 1 ;; \
     esac && \
@@ -86,8 +84,7 @@ RUN TUNNEL_ARCH="$(dpkg --print-architecture)" && \
       true) \
         CHISEL_VERSION="1.11.5" && \
         echo "Installing chisel ${CHISEL_VERSION} for ${TUNNEL_ARCH}" && \
-        curl -fsSL "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${TUNNEL_ARCH}.gz" \
-          -o /tmp/chisel.gz && \
+        { for i in 1 2 3 4 5; do curl -fsSL "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${TUNNEL_ARCH}.gz" -o /tmp/chisel.gz && break || sleep 10; done } && \
         gunzip -c /tmp/chisel.gz > /usr/local/bin/chisel && \
         rm -f /tmp/chisel.gz && \
         chmod +x /usr/local/bin/chisel ;; \
@@ -177,7 +174,7 @@ ARG TARGETARCH
 RUN git init -q /src && \
     cd /src && \
     git remote add origin "${AO_REPO}" && \
-    git fetch --depth 1 origin "${AO_REF}" && \
+    { for i in 1 2 3 4 5; do git fetch --depth 1 origin "${AO_REF}" && break || sleep 10; done } && \
     git checkout -q FETCH_HEAD && \
     cd /src/backend && \
     GOARCH="${TARGETARCH:-$(dpkg --print-architecture)}" && \
@@ -245,9 +242,9 @@ RUN case "${INSTALL_HERMES}" in \
       false) \
         echo "Skipping Hermes Agent (INSTALL_HERMES=false)" ;; \
       true) \
-        git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
+        { for i in 1 2 3 4 5; do git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && break || { rm -rf /tmp/hermes-agent; sleep 10; }; done } && \
         cd /tmp/hermes-agent && \
-        pip install --break-system-packages '.[all,messaging]' && \
+        { for i in 1 2 3 4 5; do pip install --break-system-packages '.[all,messaging]' && break || sleep 10; done } && \
         which hermes && \
         rm -rf /tmp/hermes-agent ;; \
       *) \

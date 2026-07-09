@@ -142,12 +142,16 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertIn('chown "${HAPI_USER}:${HAPI_USER}" "${LOCAL_BIN_ENV}"', self.text)
 
     def test_hapi_server_log_precreated(self):
-        # The log file must exist before the URL-extraction loop starts so the
-        # [ -f "$HAPI_SERVER_LOG" ] guard passes on the first iteration.
-        touch_pos = self.text.find('touch "${HAPI_SERVER_LOG}"')
-        server_start_pos = self.text.find("hapi server --relay 2>&1")
-        self.assertGreater(touch_pos, -1, "HAPI_SERVER_LOG is not pre-created")
-        self.assertLess(touch_pos, server_start_pos)
+        # The log file must be truncated-or-created before the URL-extraction
+        # loop starts so the [ -f "$HAPI_SERVER_LOG" ] guard passes on the first
+        # iteration. `: >` (not `touch`) restores the old `| tee` truncate-at-
+        # startup semantics now that the launch appends via `>>` (#101/#9), so a
+        # persistent server.log can't retain stale relay URLs or grow unbounded.
+        precreate_pos = self.text.find(': > "${HAPI_SERVER_LOG}"')
+        server_start_pos = self.text.find("stdbuf -oL hapi server --relay")
+        self.assertGreater(precreate_pos, -1, "HAPI_SERVER_LOG is not truncated/pre-created")
+        self.assertGreater(server_start_pos, -1, "hapi server --relay start not found")
+        self.assertLess(precreate_pos, server_start_pos)
 
     def test_hapi_commands_are_skipped_when_cli_missing(self):
         guard_pos = self.text.find(
@@ -159,10 +163,10 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertGreater(guard_pos, -1, "hapi command guard is missing")
         self.assertGreater(warning_pos, guard_pos)
         for marker in (
-            'run_as_hapi "HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay',
-            'run_as_hapi "hapi runner start 2>&1"',
-            'run_as_hapi "hapi runner status 2>&1"',
-            'run_as_hapi "hapi doctor 2>&1"',
+            'run_as_hapi_argv -- env HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay',
+            'run_as_hapi_argv -- hapi runner start 2>&1',
+            'run_as_hapi_argv -- hapi runner status 2>&1',
+            'run_as_hapi_argv -- hapi doctor 2>&1',
         ):
             with self.subTest(marker=marker):
                 pos = self.text.find(marker)
@@ -178,11 +182,13 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertIn(': "${DROID_COMPUTER_NAME:=}"', self.text)
         self.assertIn('[ "${DROID_DAEMON_ENABLED}" = "true" ]', self.text)
         self.assertIn("DROID_DAEMON_ENABLED=true requires DROID_COMPUTER_NAME", self.text)
-        self.assertIn('droid computer register \\"${DROID_COMPUTER_NAME}\\" -y', self.text)
+        # argv form (#101/#9): DROID_COMPUTER_NAME is a bare argv element, never
+        # interpolated into an `sh -c` string.
+        self.assertIn('run_as_hapi_argv -- droid computer register "${DROID_COMPUTER_NAME}" -y', self.text)
         self.assertIn('DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"', self.text)
         self.assertIn('PATH="${HAPI_RUN_PATH}" command -v droid', self.text)
         self.assertIn(
-            'run_as_hapi "stdbuf -oL droid daemon --remote-access 2>&1 | tee \\"${DROID_DAEMON_LOG}\\"" &',
+            'run_as_hapi_argv -- stdbuf -oL droid daemon --remote-access >>"${DROID_DAEMON_LOG}" 2>&1 &',
             self.text,
         )
 
@@ -196,8 +202,9 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertIn('PATH="${HAPI_RUN_PATH}" command -v ao', self.text)
         self.assertIn("ao CLI not found; skipping ao daemon startup", self.text)
         self.assertIn('AO_DAEMON_LOG="${HAPI_HOME}/ao-daemon.log"', self.text)
+        # argv form (#101/#9): AO_PORT passed via `env NAME=VAL`, log via redirect.
         self.assertIn(
-            'run_as_hapi "AO_PORT=\\"${AO_PORT}\\" stdbuf -oL ao daemon 2>&1 | tee \\"${AO_DAEMON_LOG}\\"" &',
+            'run_as_hapi_argv -- env "AO_PORT=${AO_PORT}" stdbuf -oL ao daemon >>"${AO_DAEMON_LOG}" 2>&1 &',
             self.text,
         )
         self.assertIn(
@@ -465,6 +472,54 @@ class TestRunAsHapiArgvSecretHygiene(unittest.TestCase):
         # The injection must not have fired during _run (file unlinked in finally,
         # but assert it was never created in the first place via a fresh check is
         # racy; the unlink-in-finally + no exception is the guarantee here).
+
+    def test_droid_computer_name_reaches_argv_verbatim_not_executed(self):
+        # #101/#9: droid registration now uses `run_as_hapi_argv -- droid computer
+        # register "${DROID_COMPUTER_NAME}" -y`, so a hostile value cannot be shell
+        # -parsed. Prove it: a $(...) payload reaches argv as ONE literal element
+        # and never executes. (In production DROID_COMPUTER_NAME is charset-guarded
+        # too, but the argv form removes the injection surface entirely.)
+        helper = self._extract_helper()
+        payload = "x$(touch /tmp/clihost_droid_pwned)y"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            argv_log = tmp_path / "argv.log"
+            fake_runuser = tmp_path / "runuser"
+            fake_runuser.write_text(
+                "#!/bin/bash\n"
+                'for a in "$@"; do printf "%%s\\n" "$a" >> "%s"; done\n' % argv_log
+            )
+            fake_runuser.chmod(0o755)
+            script = (
+                "set -euo pipefail\n"
+                'HAPI_USER="hapi"\n'
+                'HAPI_USER_HOME="/home/hapi"\n'
+                'HAPI_RUN_PATH="/usr/local/bin:/usr/bin:/bin"\n'
+                'HAPI_HOME="/home/hapi/.hapi"\n'
+                f"{helper}\n"
+                'DROID_COMPUTER_NAME="${PAYLOAD}"\n'
+                'run_as_hapi_argv -- droid computer register "${DROID_COMPUTER_NAME}" -y\n'
+            )
+            env = dict(os.environ)
+            env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+            env["PAYLOAD"] = payload
+            try:
+                result = subprocess.run(
+                    ["bash", "-c", script], capture_output=True, text=True, env=env,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                argv = argv_log.read_text().splitlines()
+                # The whole payload appears as ONE argv element (not split, not run).
+                self.assertIn(payload, argv,
+                              "DROID_COMPUTER_NAME must reach argv as one literal element")
+                self.assertIn("register", argv)
+                # The command substitution must NOT have executed.
+                self.assertFalse(
+                    pathlib.Path("/tmp/clihost_droid_pwned").exists(),
+                    "command injection fired — argv form did not block it",
+                )
+            finally:
+                pathlib.Path("/tmp/clihost_droid_pwned").unlink(missing_ok=True)
 
 
 class TestEntrypointHomeOwnershipBehaviour(unittest.TestCase):
@@ -1869,6 +1924,51 @@ class TestTmuxWrapperSandboxRegressions(unittest.TestCase):
         self.assertIn("new-session -A -s", self.text)
 
 
+class TestDockerNetworkRetries(unittest.TestCase):
+    """#101/#15: every network fetch must use the CLAUDE.md retry loop
+    (`for i in 1 2 3 4 5; do ... && break || sleep 10; done`), not a single
+    attempt — a transient failure must not break the whole build."""
+
+    def setUp(self):
+        self.text = DOCKERFILE.read_text()
+
+    def _assert_wrapped(self, needle):
+        # The retry loop and the command must share a line (the loop body).
+        for line in self.text.splitlines():
+            if needle in line:
+                self.assertIn(
+                    "for i in 1 2 3 4 5", line,
+                    f"network step is not wrapped in a retry loop: {needle}",
+                )
+                # Backoff between attempts (a bare `sleep 10` or inside a
+                # cleanup group like `{ rm -rf ...; sleep 10; }`).
+                self.assertIn("sleep 10", line)
+                self.assertIn("&& break", line)
+                return
+        self.fail(f"network step not found in Dockerfile: {needle}")
+
+    def test_node_curl_retried(self):
+        self._assert_wrapped("nodejs.org/dist/")
+
+    def test_ttyd_curl_retried(self):
+        self._assert_wrapped("tsl0922/ttyd/releases/download")
+
+    def test_cloudflared_curl_retried(self):
+        self._assert_wrapped("cloudflare/cloudflared/releases/download")
+
+    def test_chisel_curl_retried(self):
+        self._assert_wrapped("jpillora/chisel/releases/download")
+
+    def test_ao_git_fetch_retried(self):
+        self._assert_wrapped("git fetch --depth 1 origin")
+
+    def test_hermes_git_clone_retried(self):
+        self._assert_wrapped("git clone --depth 1 https://github.com/NousResearch")
+
+    def test_hermes_pip_install_retried(self):
+        self._assert_wrapped("pip install --break-system-packages")
+
+
 class TestDockerPackageRegressions(unittest.TestCase):
     def test_bubblewrap_is_installed_for_ttyd_sandbox(self):
         dockerfile = DOCKERFILE.read_text()
@@ -2216,49 +2316,60 @@ class TestBuildShRegressions(unittest.TestCase):
         self.assertLess(cd_match.start(), build_match.start())
 
 
-class TestEntrypointRelayUrlRegex(unittest.TestCase):
-    """B12: the relay-URL subdomain class must accept valid DNS-label chars.
+class TestEntrypointRelayUrlDelegation(unittest.TestCase):
+    """#101/#12: entrypoint must build the legacy /home/hapi/url via the SAME
+    Python builder the dashboard uses, not a second bash reimplementation.
 
-    A subdomain like my-sub-01.relay.hapi.run (hyphens, digits) must match so
-    the connection URL is built; the original [a-z0-9]+ silently dropped it.
+    The bash copy had drifted from ttydproxy.views.build_hapi_url_from_runtime:
+    it took the FIRST relay URL (head -1) vs the LAST, and left the token
+    un-encoded vs quote()d — so a token with &/+/% produced a broken URL. The
+    relay-URL regex + last-wins + encoding correctness (formerly B12) is now
+    tested against the shared builder in test_load_hapi_url.py.
     """
 
     def setUp(self):
         self.text = ENTRYPOINT.read_text()
 
-    def _extract_grep_regex(self):
-        # Pull the actual grep -oE pattern out of the real script so the test
-        # cannot drift from the source.
-        match = re.search(
-            r"grep -oE '(https://[^']*relay\\.hapi\\.run)'", self.text
-        )
-        self.assertIsNotNone(match, "relay-URL grep pattern not found in entrypoint.sh")
-        return match.group(1)
+    def test_delegates_to_python_builder(self):
+        self.assertIn("build_hapi_url_from_runtime", self.text)
+        self.assertIn("PYTHONPATH=/app python3", self.text)
 
-    def _grep_relay_url(self, log):
-        """Run the real entrypoint grep pattern over `log`, return the match."""
-        result = subprocess.run(
-            ["grep", "-oE", self._extract_grep_regex()],
-            input=log, capture_output=True, text=True,
-        )
-        return result.stdout.strip()
+    def test_no_bash_reimplementation_remains(self):
+        # The old bash extraction/encoding must be gone (no drift possible).
+        self.assertNotIn("grep -oE 'https://", self.text)
+        self.assertNotIn("s/:/%3A/g", self.text)
+        self.assertNotIn("cliApiToken", self.text)
 
-    def test_regex_matches_hyphenated_subdomain(self):
-        self.assertEqual(
-            self._grep_relay_url("noise\nready at https://my-sub-01.relay.hapi.run now\n"),
-            "https://my-sub-01.relay.hapi.run",
-            "hyphenated relay subdomain was not matched (B12)",
-        )
-
-    def test_regex_matches_plain_lowercase_subdomain(self):
-        self.assertEqual(
-            self._grep_relay_url("x https://abc123.relay.hapi.run y\n"),
-            "https://abc123.relay.hapi.run",
-        )
-
-    def test_source_uses_dns_label_class(self):
-        self.assertIn("[A-Za-z0-9-]+\\.relay\\.hapi\\.run", self.text)
-        self.assertNotIn("[a-z0-9]+\\.relay\\.hapi\\.run", self.text)
+    def test_end_to_end_matches_shared_builder(self):
+        # Run the exact python -c the entrypoint uses and confirm it agrees with
+        # the dashboard builder: LAST relay URL wins, token is percent-encoded.
+        import tempfile
+        from ttydproxy.views import build_hapi_url_from_runtime
+        log = "old https://first.relay.hapi.run\nnew https://last-02.relay.hapi.run\n"
+        settings = '{"cliApiToken": "tok+a&b%c"}'
+        with tempfile.TemporaryDirectory() as d:
+            log_path = pathlib.Path(d) / "server.log"
+            settings_path = pathlib.Path(d) / "settings.json"
+            log_path.write_text(log)
+            settings_path.write_text(settings)
+            snippet = (
+                "import sys\n"
+                "from ttydproxy.views import build_hapi_url_from_runtime\n"
+                "log = open(sys.argv[1], encoding='utf-8', errors='replace').read()\n"
+                "settings = open(sys.argv[2], encoding='utf-8', errors='replace').read()\n"
+                "url = build_hapi_url_from_runtime(log, settings)\n"
+                "print(url) if url else None\n"
+            )
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(REPO_ROOT / "app")
+            result = subprocess.run(
+                ["python3", "-c", snippet, str(log_path), str(settings_path)],
+                capture_output=True, text=True, env=env,
+            )
+        expected = build_hapi_url_from_runtime(log, settings)
+        self.assertEqual(result.stdout.strip(), expected, result.stderr)
+        self.assertIn("last-02.relay.hapi.run", result.stdout)  # last wins
+        self.assertIn("tok%2Ba%26b%25c", result.stdout)         # token encoded
 
 
 class TestDockerEntrypointSignals(unittest.TestCase):

@@ -74,9 +74,15 @@
       }
     }, true);
 
-    // Mirror the iframe's file-detection so a non-image file drop is blocked
-    // from navigating the page, without duplicating the triage.
+    // Delegate file-detection to the iframe's exported helper (#101/#14) so the
+    // triage logic lives in one place (tab_fix_script.html). A local fallback
+    // covers the brief window before the iframe script has run; keeping it
+    // behaviourally identical is fine because it is the same tiny check.
     function containsFiles(source) {
+      try {
+        var win = iframe && iframe.contentWindow;
+        if (win && win.__containsFiles) return win.__containsFiles(source);
+      } catch (e) {}
       if (!source) return false;
       if (source.files && source.files.length) return true;
       var items = source.items;
