@@ -7,3 +7,6 @@ __pycache__/
 
 # Node (JS asset tests only — runtime app uses no npm packages)
 node_modules/
+
+# Orchestrator worker task briefs (scratch, not project artifacts)
+TASK_BRIEF_*.md
