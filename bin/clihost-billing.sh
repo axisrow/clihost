@@ -14,6 +14,8 @@ set -euo pipefail
 #   cron-line   print a ready-to-paste crontab line (operator installs it).
 #   report      render an aggregated usage table (per app).
 #   raw         emit aggregated rows as JSON (machine-readable).
+#   diagnose    inspect the current container state and print a verdict.
+#   restart     safely restart one clihost app (dry-run by default).
 #   help        usage.
 #
 # Storage is append-only JSONL under ${CLIHOST_BILLING_DIR:=/home/dokku/.clihost-billing}:
@@ -48,6 +50,10 @@ Usage:
   clihost-billing.sh cron-line          print a crontab line to install the collector
   clihost-billing.sh report [--json]    aggregated usage table (per app)
   clihost-billing.sh raw                aggregated rows as JSON (alias for report --json)
+  clihost-billing.sh diagnose [--app] APP
+                                            inspect APP.web.1 (read-only)
+  clihost-billing.sh restart APP [--apply] [--yes]
+                                            restart APP (dry-run by default)
   clihost-billing.sh help               this message
 
 Environment:
@@ -65,6 +71,22 @@ require_python() {
 
 require_docker() {
   command -v docker >/dev/null 2>&1 || die "docker CLI not found"
+}
+
+validate_app_name() {
+  local app="$1"
+  [[ "${app}" =~ ^clihost-[a-z0-9_-]+$ ]] \
+    || die "invalid app name '${app}'; expected ^clihost-[a-z0-9_-]+$"
+}
+
+require_app_container() {
+  local app="$1"
+  local container="${app}.web.1"
+
+  validate_app_name "${app}"
+  require_docker
+  docker ps --format '{{.Names}}' | grep -Fqx -- "${container}" \
+    || die "container is not running or not found in docker ps: ${container}"
 }
 
 ensure_dirs() {
@@ -340,6 +362,100 @@ else:
 PY
 }
 
+# diagnose: read Docker state only; never restart or otherwise mutate it.
+cmd_diagnose() {
+  local app=""
+  case "$#:${1:-}" in
+    1:*) app="$1" ;;
+    2:--app) app="$2" ;;
+    *) die "diagnose requires [--app] APP" ;;
+  esac
+
+  validate_app_name "${app}"
+  require_docker
+  command -v python3 >/dev/null 2>&1 || die "python3 not found"
+
+  local container="${app}.web.1"
+  local restart_count status exit_code oom_killed state_error started_at finished_at
+  restart_count="$(docker inspect --format '{{.RestartCount}}' -- "${container}")"
+  status="$(docker inspect --format '{{.State.Status}}' -- "${container}")"
+  exit_code="$(docker inspect --format '{{.State.ExitCode}}' -- "${container}")"
+  oom_killed="$(docker inspect --format '{{.State.OOMKilled}}' -- "${container}")"
+  state_error="$(docker inspect --format '{{.State.Error}}' -- "${container}")"
+  started_at="$(docker inspect --format '{{.State.StartedAt}}' -- "${container}")"
+  finished_at="$(docker inspect --format '{{.State.FinishedAt}}' -- "${container}")"
+
+  CLIHOST_DIAG_CONTAINER="${container}" \
+  CLIHOST_DIAG_RESTART_COUNT="${restart_count}" \
+  CLIHOST_DIAG_STATUS="${status}" \
+  CLIHOST_DIAG_EXIT_CODE="${exit_code}" \
+  CLIHOST_DIAG_OOM_KILLED="${oom_killed}" \
+  CLIHOST_DIAG_ERROR="${state_error}" \
+  CLIHOST_DIAG_STARTED_AT="${started_at}" \
+  CLIHOST_DIAG_FINISHED_AT="${finished_at}" \
+  python3 <<'PY'
+import os
+
+restart_count = int(os.environ["CLIHOST_DIAG_RESTART_COUNT"])
+status = os.environ["CLIHOST_DIAG_STATUS"]
+oom_killed = os.environ["CLIHOST_DIAG_OOM_KILLED"].lower() == "true"
+
+print("Container: " + os.environ["CLIHOST_DIAG_CONTAINER"])
+print("RestartCount: " + str(restart_count))
+print("State.Status: " + status)
+print("State.ExitCode: " + os.environ["CLIHOST_DIAG_EXIT_CODE"])
+print("State.OOMKilled: " + str(oom_killed).lower())
+print("State.Error: " + os.environ["CLIHOST_DIAG_ERROR"])
+print("State.StartedAt: " + os.environ["CLIHOST_DIAG_STARTED_AT"])
+print("State.FinishedAt: " + os.environ["CLIHOST_DIAG_FINISHED_AT"])
+
+if oom_killed:
+    print("Verdict: OOM: поднять mem limit (dokku resource:limit --memory N)")
+elif restart_count > 0 and status == "exited":
+    print("Verdict: crash-loop: dokku logs APP --tail")
+elif status == "running" and restart_count == 0:
+    print("Verdict: healthy")
+else:
+    print("Verdict: needs investigation")
+PY
+}
+
+cmd_restart() {
+  local app=""
+  local apply="false"
+  local yes="false"
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply) apply="true" ;;
+      --yes) yes="true" ;;
+      --) shift; break ;;
+      -*) die "unknown option: $1" ;;
+      *)
+        [ -z "${app}" ] || die "restart accepts exactly one APP"
+        app="$1"
+        ;;
+    esac
+    shift
+  done
+  [ "$#" -eq 0 ] || die "restart accepts exactly one APP"
+  [ -n "${app}" ] || die "restart requires APP"
+
+  require_app_container "${app}"
+  if [ "${apply}" != "true" ]; then
+    echo "would run: dokku ps:restart ${app}"
+    return 0
+  fi
+  if [ ! -t 0 ] && [ "${yes}" != "true" ]; then
+    die "restart --apply in non-TTY mode requires --yes"
+  fi
+
+  if command -v dokku >/dev/null 2>&1 && dokku ps:restart "${app}"; then
+    return 0
+  fi
+  docker restart -- "${app}.web.1"
+}
+
 main() {
   local command="${1:-}"
   case "${command}" in
@@ -359,6 +475,14 @@ main() {
       shift
       [ "$#" -eq 0 ] || die "raw accepts no arguments"
       cmd_report --json
+      ;;
+    diagnose)
+      shift
+      cmd_diagnose "$@"
+      ;;
+    restart)
+      shift
+      cmd_restart "$@"
       ;;
     -h|--help|help)
       usage

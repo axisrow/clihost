@@ -2673,6 +2673,126 @@ esac
         fake_flock.chmod(0o755)
         return fake_docker
 
+    def _make_billing_control_fakes(self, tmp_path):
+        log = tmp_path / "commands.log"
+        log.write_text("")
+        fake_docker = tmp_path / "docker"
+        fake_docker.write_text(r'''#!/bin/bash
+printf 'docker' >> "${CLIHOST_TEST_LOG}"
+printf ' %q' "$@" >> "${CLIHOST_TEST_LOG}"
+printf '\n' >> "${CLIHOST_TEST_LOG}"
+
+case "${1:-}" in
+  ps)
+    echo "clihost-good.web.1"
+    ;;
+  inspect)
+    case "$3" in
+      '{{.RestartCount}}') echo "0" ;;
+      '{{.State.Status}}') echo "running" ;;
+      '{{.State.ExitCode}}') echo "0" ;;
+      '{{.State.OOMKilled}}') echo "false" ;;
+      '{{.State.Error}}') echo "" ;;
+      '{{.State.StartedAt}}') echo "2026-07-23T10:00:00Z" ;;
+      '{{.State.FinishedAt}}') echo "0001-01-01T00:00:00Z" ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  restart)
+    echo "clihost-good.web.1"
+    ;;
+esac
+''')
+        fake_docker.chmod(0o755)
+        fake_dokku = tmp_path / "dokku"
+        fake_dokku.write_text(r'''#!/bin/bash
+printf 'dokku' >> "${CLIHOST_TEST_LOG}"
+printf ' %q' "$@" >> "${CLIHOST_TEST_LOG}"
+printf '\n' >> "${CLIHOST_TEST_LOG}"
+''')
+        fake_dokku.chmod(0o755)
+        return log
+
+    def test_diagnose_is_read_only_and_prints_healthy_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            log = self._make_billing_control_fakes(tmp_path)
+            out = self._run(
+                ["diagnose", "--app", "clihost-good"],
+                tmp_path / "billing",
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_TEST_LOG": str(log)},
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("RestartCount: 0", out.stdout)
+            self.assertIn("State.Status: running", out.stdout)
+            self.assertIn("Verdict: healthy", out.stdout)
+            commands = log.read_text()
+            self.assertIn("docker inspect", commands)
+            self.assertNotIn("restart", commands)
+            self.assertNotIn("dokku", commands)
+
+    def test_restart_defaults_to_dry_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            log = self._make_billing_control_fakes(tmp_path)
+            out = self._run(
+                ["restart", "clihost-good"], tmp_path / "billing",
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_TEST_LOG": str(log)},
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(
+                out.stdout.strip(), "would run: dokku ps:restart clihost-good"
+            )
+            self.assertNotIn("restart", log.read_text())
+
+    def test_restart_fails_closed_for_foreign_or_invalid_app(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            log = self._make_billing_control_fakes(tmp_path)
+            env = {"CLIHOST_TEST_LOG": str(log)}
+            for app in ("clihost-missing", "foreign-app"):
+                with self.subTest(app=app):
+                    out = self._run(
+                        ["restart", app], tmp_path / "billing",
+                        extra_path=str(tmp_path), env_extra=env,
+                    )
+                    self.assertNotEqual(out.returncode, 0)
+            self.assertNotIn("restart", log.read_text())
+
+    def test_restart_rejects_option_injection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            log = self._make_billing_control_fakes(tmp_path)
+            out = self._run(
+                ["restart", "--", "--help"], tmp_path / "billing",
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_TEST_LOG": str(log)},
+            )
+            self.assertNotEqual(out.returncode, 0)
+            self.assertNotIn("restart", log.read_text())
+
+    def test_restart_apply_requires_yes_in_non_tty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            log = self._make_billing_control_fakes(tmp_path)
+            env = {"CLIHOST_TEST_LOG": str(log)}
+            refused = self._run(
+                ["restart", "clihost-good", "--apply"], tmp_path / "billing",
+                extra_path=str(tmp_path), env_extra=env,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("non-TTY mode requires --yes", refused.stderr)
+            self.assertNotIn("dokku", log.read_text())
+
+            applied = self._run(
+                ["restart", "clihost-good", "--apply", "--yes"],
+                tmp_path / "billing", extra_path=str(tmp_path), env_extra=env,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            self.assertIn("dokku ps:restart clihost-good", log.read_text())
+
     def test_collect_builds_samples_from_docker(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
