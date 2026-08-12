@@ -459,8 +459,13 @@ cmd_restart() {
     die "restart --apply in non-TTY mode requires --yes"
   fi
 
-  if command -v dokku >/dev/null 2>&1 && dokku ps:restart "${app}"; then
-    return 0
+  if command -v dokku >/dev/null 2>&1; then
+    if dokku ps:restart "${app}"; then
+      return 0
+    fi
+    echo "dokku ps:restart ${app} failed; falling back to docker restart ${app}.web.1" >&2
+  else
+    echo "dokku not found; falling back to docker restart ${app}.web.1" >&2
   fi
   docker restart -- "${app}.web.1"
 }

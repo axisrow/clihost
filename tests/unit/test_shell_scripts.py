@@ -183,7 +183,8 @@ class TestEntrypointRegressions(unittest.TestCase):
         # ttydproxy.config parser would) rather than just checking the text is
         # present.
         match = re.search(
-            r"^if ! PYTHONPATH=/app python3 -c 'import ttydproxy\.config'.*?\nfi\n",
+            r"^clihost_preflight_err=.*?\n"
+            r"\[ \"\$\{clihost_preflight_status\}\" -eq 0 \] \|\| exit \"\$\{clihost_preflight_status\}\"\n",
             self.text,
             re.MULTILINE | re.DOTALL,
         )
@@ -209,6 +210,51 @@ class TestEntrypointRegressions(unittest.TestCase):
         )
         self.assertEqual(good.returncode, 0, good.stderr)
         self.assertIn("SURVIVED", good.stdout)
+
+    def test_python_config_preflight_refuses_preplanted_symlink(self):
+        # Issue found in round-3 review: a fixed, predictable stderr path in
+        # world-writable /tmp let an unprivileged user pre-plant a symlink
+        # before this root-run redirection opened it; a plain `2>path`
+        # follows an existing symlink and truncates its target. The fixed
+        # block must use an unpredictable name and refuse to write through
+        # any pre-existing path (symlink or regular file).
+        match = re.search(
+            r"^clihost_preflight_err=.*?\n"
+            r"\[ \"\$\{clihost_preflight_status\}\" -eq 0 \] \|\| exit \"\$\{clihost_preflight_status\}\"\n",
+            self.text,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, "python config preflight block not found")
+        preflight_block = match.group(0).replace(
+            "PYTHONPATH=/app", f"PYTHONPATH={REPO_ROOT / 'app'}"
+        )
+        self.assertIn("set -C", preflight_block)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = os.path.join(tmpdir, "protected-target")
+            with open(target, "w") as f:
+                f.write("PROTECTED CONTENT")
+
+            # Force the unpredictable filename to a known value so the test can
+            # pre-plant a symlink there deterministically.
+            fixed_name_block = preflight_block.replace(
+                'mktemp -u /tmp/clihost-config-preflight.XXXXXXXX.err',
+                f'echo {tmpdir}/clihost-config-preflight.err',
+            )
+            planted = os.path.join(tmpdir, "clihost-config-preflight.err")
+            os.symlink(target, planted)
+
+            subprocess.run(
+                ["bash", "-c", fixed_name_block],
+                capture_output=True, text=True,
+                env={**os.environ, "MAX_TERMINALS": "garbage"},
+            )
+
+            with open(target) as f:
+                self.assertEqual(
+                    f.read(), "PROTECTED CONTENT",
+                    "preflight redirection truncated a pre-planted symlink's target",
+                )
 
     def test_proxy_liveness_check_is_actually_fail_closed(self):
         # Execute the real PID-capture + kill -0 supervision block extracted

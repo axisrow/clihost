@@ -58,13 +58,27 @@ env_secret PASSWORD_SECRET
 # side-effect-free preflight check in this shell — not after state has already
 # been torn down and daemons started, which would otherwise repeat those
 # destructive actions on every crash-loop restart before failing closed.
-if ! PYTHONPATH=/app python3 -c 'import ttydproxy.config' 2>/tmp/clihost-config-preflight.err; then
-  echo "ERROR: invalid TTYD proxy configuration (see below); aborting before any runner state is touched" >&2
-  cat /tmp/clihost-config-preflight.err >&2
-  rm -f /tmp/clihost-config-preflight.err
-  exit 1
-fi
-rm -f /tmp/clihost-config-preflight.err
+# mktemp -u only *names* a unique path; opening it with the shell's O_CREAT|
+# O_EXCL redirection guard (noclobber) is what actually matters here — a fixed,
+# predictable /tmp path let an unprivileged user pre-plant a symlink before this
+# root-run redirection ever opens it, and a plain `2>path` follows an existing
+# symlink and truncates its target before python3 even runs. `mktemp` gives an
+# unpredictable name so nothing can be pre-planted, and `set -C` (noclobber)
+# makes the shell refuse to open the target at all if anything (symlink or
+# regular file) already exists there — belt and suspenders.
+clihost_preflight_err="$(mktemp -u /tmp/clihost-config-preflight.XXXXXXXX.err)"
+(
+  set -C
+  if ! PYTHONPATH=/app python3 -c 'import ttydproxy.config' 2>"${clihost_preflight_err}"; then
+    echo "ERROR: invalid TTYD proxy configuration (see below); aborting before any runner state is touched" >&2
+    cat -- "${clihost_preflight_err}" >&2
+    rm -f -- "${clihost_preflight_err}"
+    exit 1
+  fi
+)
+clihost_preflight_status=$?
+rm -f -- "${clihost_preflight_err}"
+[ "${clihost_preflight_status}" -eq 0 ] || exit "${clihost_preflight_status}"
 
 # Generate a random secret only when neither PASSWORD_SECRET nor its
 # authoritative *_FILE source supplied one.

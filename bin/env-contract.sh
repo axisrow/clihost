@@ -86,5 +86,16 @@ env_secret() {
     # Keep the resolved secret in this shell only. Service children must receive
     # secrets through their dedicated file/env channels, not by broad inheritance.
     export -n "${name}" "${file_name}" 2>/dev/null || true
+  elif [ -n "${!name-}" ]; then
+    # No *_FILE override: a directly-supplied value still goes through the same
+    # trim + empty-after-trim check as the file path, so a whitespace-only
+    # PASSWORD_SECRET fails closed instead of silently becoming the effective
+    # secret.
+    value="$(_env_trim "${!name}")"
+    if [ -z "${value}" ]; then
+      echo "ERROR: ${name} is set but empty (whitespace only)" >&2
+      return 1
+    fi
+    printf -v "${name}" '%s' "${value}"
   fi
 }
