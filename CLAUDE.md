@@ -474,7 +474,7 @@ Update `.env.example` when adding/changing variables.
 
 ## Coding Conventions
 
-> A shorter `AGENTS.md` exists at the repo root for non-Claude agents. It overlaps with this file but is less detailed and partially stale (e.g. it still lists a `volume/hapi/` dir and a `3006` port mapping). When the two disagree, **CLAUDE.md is authoritative**; keep `AGENTS.md` roughly in sync when you change conventions here.
+> A shorter `AGENTS.md` exists at the repo root for non-Claude agents. It overlaps with this file but is less detailed. When the two disagree, **CLAUDE.md is authoritative**; keep `AGENTS.md` in sync when you change conventions here.
 
 - Shell scripts use Bash with `set -euo pipefail`
 - Environment variables are UPPERCASE with defaults via `${VAR:=default}`
