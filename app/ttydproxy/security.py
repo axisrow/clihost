@@ -14,52 +14,60 @@ import pwd
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{1,32}$")
 
 
-def env_bool(value, default=False):
-    """Parse common boolean env var values."""
-    if value is None:
+def env_bool(value, default=False, name=None):
+    """Parse a boolean, rejecting invalid named environment variables.
+
+    Unnamed callers also use this helper for optional query parameters, where
+    retaining the caller-provided default is the established contract.
+    """
+    if value is None or str(value).strip() == "":
         return default
     value = str(value).strip().lower()
     if value in ("1", "true", "yes", "on"):
         return True
     if value in ("0", "false", "no", "off"):
         return False
-    return default
-
-
-def env_int(value, default, name=None, minimum=None):
-    """Parse an integer env var value, falling back to default on garbage.
-
-    When `minimum` is given, the result is never returned below it: a parsed
-    value below the minimum (or a fallback `default` below it) is clamped UP to
-    the minimum (warning + minimum). This guards time-to-live settings against a
-    non-positive value that would otherwise issue already-expired tokens and
-    lock out logins (B1) — clamping fails CLOSED (the access window shrinks to
-    the minimum) rather than expanding to a possibly-large default.
-    """
-    def _floor(n):
-        # The minimum binds every return path, so even a sub-minimum default
-        # (no real caller passes one today) can't silently undercut the floor.
-        return n if minimum is None or n >= minimum else minimum
-
-    if value is None or str(value).strip() == "":
-        return _floor(default)
+    if name is None:
+        return default
     label = name or "env var"
-    try:
-        result = int(str(value).strip())
-    except ValueError:
-        print(
-            f"Invalid integer for {label}: {value!r}, using default {default}",
-            file=sys.stderr,
-            flush=True,
-        )
-        return _floor(default)
+    raise ValueError(
+        f"Invalid boolean for {label}: {value!r}; "
+        "expected 1/true/yes/on or 0/false/no/off"
+    )
+
+
+def env_int(
+    value,
+    default,
+    name=None,
+    minimum=None,
+    maximum=None,
+    clamp_minimum=True,
+):
+    """Parse an integer env value, rejecting explicit invalid/out-of-range values."""
+    if value is None or str(value).strip() == "":
+        result = default
+    else:
+        label = name or "env var"
+        text = str(value).strip()
+        if not re.fullmatch(r"[+-]?[0-9]+", text):
+            raise ValueError(f"Invalid integer for {label}: {value!r}")
+        try:
+            result = int(text)
+        except ValueError as exc:
+            raise ValueError(f"Invalid integer for {label}: {value!r}") from exc
+    label = name or "env var"
     if minimum is not None and result < minimum:
-        print(
-            f"{label}: {result} below minimum {minimum}, clamping to {minimum}",
-            file=sys.stderr,
-            flush=True,
-        )
-        return minimum
+        if clamp_minimum:
+            print(
+                f"{label}: {result} below minimum {minimum}, clamping to {minimum}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return minimum
+        raise ValueError(f"{label}: {result} below minimum {minimum}")
+    if maximum is not None and result > maximum:
+        raise ValueError(f"{label}: {result} above maximum {maximum}")
     return result
 
 
@@ -255,4 +263,3 @@ def verify_pam_password(username, password):
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
-

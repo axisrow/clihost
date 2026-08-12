@@ -24,8 +24,12 @@ class TestEnvBoolDefault(unittest.TestCase):
         self.assertTrue(env_bool(None, default=True))
         self.assertFalse(env_bool(""))
         self.assertTrue(env_bool("", default=True))
-        self.assertFalse(env_bool("invalid"))
-        self.assertTrue(env_bool("maybe", default=True))
+
+    def test_invalid_explicit_value_raises(self):
+        for value in ("invalid", "maybe", "2"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "expected 1/true/yes/on"):
+                    env_bool(value, default=True, name="FEATURE_ENABLED")
 
 
 class TestEnvBoolWhitespace(unittest.TestCase):
@@ -38,4 +42,3 @@ class TestEnvBoolWhitespace(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

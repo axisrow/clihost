@@ -442,7 +442,16 @@ cmd_restart() {
     case "$1" in
       --apply) apply="true" ;;
       --yes) yes="true" ;;
-      --) shift; break ;;
+      --)
+        shift
+        [ -z "${app}" ] || die "restart accepts exactly one APP"
+        [ "$#" -le 1 ] || die "restart accepts exactly one APP"
+        if [ "$#" -eq 1 ]; then
+          app="$1"
+          shift
+        fi
+        break
+        ;;
       -*) die "unknown option: $1" ;;
       *)
         [ -z "${app}" ] || die "restart accepts exactly one APP"
@@ -463,8 +472,13 @@ cmd_restart() {
     die "restart --apply in non-TTY mode requires --yes"
   fi
 
-  if command -v dokku >/dev/null 2>&1 && dokku ps:restart "${app}"; then
-    return 0
+  if command -v dokku >/dev/null 2>&1; then
+    if dokku ps:restart "${app}"; then
+      return 0
+    fi
+    echo "dokku ps:restart ${app} failed; falling back to docker restart ${app}.web.1" >&2
+  else
+    echo "dokku not found; falling back to docker restart ${app}.web.1" >&2
   fi
   docker restart -- "${app}.web.1"
 }
