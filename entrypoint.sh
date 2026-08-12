@@ -50,6 +50,22 @@ env_positive_int CHISEL_REMOTE_PORT 2222 1 65535
 # proxy's Docker-secret contract. An unreadable or empty file fails startup.
 env_secret PASSWORD_SECRET
 
+# Fail closed on a malformed Python-owned env var (e.g. MAX_TERMINALS,
+# SECURE_COOKIES) BEFORE any destructive/idempotent-breaking startup step runs
+# (cleanup_runner_state deletes persisted hapi state; Hermes/Droid/AO daemons
+# get registered and started). Importing ttydproxy.config here runs the same
+# strict parsing the backgrounded proxy process would hit later, but as a
+# side-effect-free preflight check in this shell — not after state has already
+# been torn down and daemons started, which would otherwise repeat those
+# destructive actions on every crash-loop restart before failing closed.
+if ! PYTHONPATH=/app python3 -c 'import ttydproxy.config' 2>/tmp/clihost-config-preflight.err; then
+  echo "ERROR: invalid TTYD proxy configuration (see below); aborting before any runner state is touched" >&2
+  cat /tmp/clihost-config-preflight.err >&2
+  rm -f /tmp/clihost-config-preflight.err
+  exit 1
+fi
+rm -f /tmp/clihost-config-preflight.err
+
 # Generate a random secret only when neither PASSWORD_SECRET nor its
 # authoritative *_FILE source supplied one.
 if [ -z "${PASSWORD_SECRET:-}" ]; then

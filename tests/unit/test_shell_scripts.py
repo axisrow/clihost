@@ -152,6 +152,64 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertLess(liveness_pos, sshd_pos)
         self.assertIn("TTYD HTTP proxy exited immediately after startup", self.text)
 
+    def test_python_config_validated_before_destructive_actions(self):
+        # A malformed Python-owned var (MAX_TERMINALS, SECURE_COOKIES, etc.)
+        # must fail closed BEFORE cleanup_runner_state deletes persisted hapi
+        # state and before Hermes/Droid/AO daemons are touched — not only when
+        # the backgrounded proxy process itself imports ttydproxy.config later.
+        # Otherwise one config typo repeats destructive side effects on every
+        # crash-loop restart before the container ever fails closed (Codex,
+        # round 2).
+        preflight_pos = self.text.find("import ttydproxy.config")
+        cleanup_call_pos = self.text.find("cleanup_runner_state\n")
+        proxy_launch_pos = self.text.find(
+            'runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &'
+        )
+        self.assertGreater(
+            preflight_pos, -1,
+            "entrypoint.sh must import ttydproxy.config as a preflight check",
+        )
+        self.assertGreater(cleanup_call_pos, -1, "cleanup_runner_state call not found")
+        self.assertLess(
+            preflight_pos, cleanup_call_pos,
+            "Python config must be validated before cleanup_runner_state runs",
+        )
+        self.assertLess(preflight_pos, proxy_launch_pos)
+
+    def test_python_config_preflight_is_actually_fail_closed(self):
+        # Execute the real preflight block extracted from entrypoint.sh against
+        # a malformed and a valid Python-owned env var, proving the mechanism
+        # itself rejects bad config (and does so exactly like the strict
+        # ttydproxy.config parser would) rather than just checking the text is
+        # present.
+        match = re.search(
+            r"^if ! PYTHONPATH=/app python3 -c 'import ttydproxy\.config'.*?\nfi\n",
+            self.text,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, "python config preflight block not found")
+        preflight_block = match.group(0).replace(
+            "PYTHONPATH=/app", f"PYTHONPATH={REPO_ROOT / 'app'}"
+        )
+
+        bad = subprocess.run(
+            ["bash", "-c", f'{preflight_block}\necho SURVIVED'],
+            capture_output=True, text=True,
+            env={**os.environ, "MAX_TERMINALS": "garbage"},
+        )
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("invalid TTYD proxy configuration", bad.stderr)
+        self.assertIn("MAX_TERMINALS", bad.stderr)
+        self.assertNotIn("SURVIVED", bad.stdout)
+
+        good_env = {k: v for k, v in os.environ.items() if k != "MAX_TERMINALS"}
+        good = subprocess.run(
+            ["bash", "-c", f'{preflight_block}\necho SURVIVED'],
+            capture_output=True, text=True, env=good_env,
+        )
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertIn("SURVIVED", good.stdout)
+
     def test_proxy_liveness_check_is_actually_fail_closed(self):
         # Execute the real PID-capture + kill -0 supervision block extracted
         # from entrypoint.sh against a process that exits immediately (like
