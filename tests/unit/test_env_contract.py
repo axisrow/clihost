@@ -85,6 +85,18 @@ class TestIntegerContractParity(unittest.TestCase):
                         clamp_minimum=False,
                     )
 
+    def test_zero_padded_bounds_compare_numerically(self):
+        # A zero-padded minimum/maximum must not be compared lexicographically
+        # against the (leading-zero-stripped) value: "9" is >= "05" numerically
+        # even though "9" > "05" as bare strings would already pass, but "9"
+        # vs a padded maximum like "007" must correctly be rejected as above it.
+        shell = bash_parse("env_positive_int", "PORT", "9", 8080, "05", 65535)
+        self.assertEqual(shell.returncode, 0, shell.stderr)
+        self.assertEqual(int(shell.stdout), 9)
+
+        shell = bash_parse("env_positive_int", "PORT", "9", 8080, 1, "007")
+        self.assertNotEqual(shell.returncode, 0)
+
 
 class TestSecretContract(unittest.TestCase):
     def test_file_is_authoritative(self):

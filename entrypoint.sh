@@ -483,6 +483,19 @@ CLEANUP_ROOT="${CLEANUP_ROOT}" \
 HAPI_HOME="${HAPI_HOME}" \
 TTYD_SANDBOX="${TTYD_SANDBOX}" \
 runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &
+PROXY_PID=$!
+
+# Fail closed if the proxy dies immediately after launch. The strict env
+# contract (#113) makes ttydproxy.config raise on a malformed value for a
+# Python-owned var (e.g. MAX_TERMINALS, SECURE_COOKIES) that the shell-side
+# env-contract.sh does not itself validate. Without this check the container
+# would keep running (sshd stays up via the unconditional `exec` below) with
+# its only HTTP service dead and no supervision to catch it.
+sleep 1
+if ! kill -0 "${PROXY_PID}" 2>/dev/null; then
+  echo "ERROR: TTYD HTTP proxy exited immediately after startup; check the error above (e.g. an invalid env value)" >&2
+  exit 1
+fi
 
 # Drop any stale dashboard URL up front. On a persistent /home/hapi volume a URL
 # from a previous hapi-enabled image would otherwise make the dashboard render an

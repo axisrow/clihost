@@ -429,7 +429,16 @@ cmd_restart() {
     case "$1" in
       --apply) apply="true" ;;
       --yes) yes="true" ;;
-      --) shift; break ;;
+      --)
+        shift
+        [ -z "${app}" ] || die "restart accepts exactly one APP"
+        [ "$#" -le 1 ] || die "restart accepts exactly one APP"
+        if [ "$#" -eq 1 ]; then
+          app="$1"
+          shift
+        fi
+        break
+        ;;
       -*) die "unknown option: $1" ;;
       *)
         [ -z "${app}" ] || die "restart accepts exactly one APP"

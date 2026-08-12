@@ -43,15 +43,25 @@ env_positive_int() {
 
   digits="${value#"${value%%[!0]*}"}"
   [ -n "${digits}" ] || digits=0
-  if [ "${#digits}" -lt "${#minimum}" ] \
-     || { [ "${#digits}" -eq "${#minimum}" ] && [[ "${digits}" < "${minimum}" ]]; }; then
+
+  # Strip leading zeros from the bounds too so the length+lexicographic
+  # comparison below reflects numeric magnitude, not raw digit-string form
+  # (a zero-padded bound like "05" must compare as 5, not sort above "9").
+  local min_digits="${minimum#"${minimum%%[!0]*}"}"
+  [ -n "${min_digits}" ] || min_digits=0
+  if [ "${#digits}" -lt "${#min_digits}" ] \
+     || { [ "${#digits}" -eq "${#min_digits}" ] && [[ "${digits}" < "${min_digits}" ]]; }; then
     echo "ERROR: ${name}=${value} is below minimum ${minimum}" >&2
     return 1
   fi
-  if [ -n "${maximum}" ] && { [ "${#digits}" -gt "${#maximum}" ] \
-     || { [ "${#digits}" -eq "${#maximum}" ] && [[ "${digits}" > "${maximum}" ]]; }; }; then
-    echo "ERROR: ${name}=${value} is above maximum ${maximum}" >&2
-    return 1
+  if [ -n "${maximum}" ]; then
+    local max_digits="${maximum#"${maximum%%[!0]*}"}"
+    [ -n "${max_digits}" ] || max_digits=0
+    if [ "${#digits}" -gt "${#max_digits}" ] \
+       || { [ "${#digits}" -eq "${#max_digits}" ] && [[ "${digits}" > "${max_digits}" ]]; }; then
+      echo "ERROR: ${name}=${value} is above maximum ${maximum}" >&2
+      return 1
+    fi
   fi
 
   printf -v "${name}" '%s' "${digits}"

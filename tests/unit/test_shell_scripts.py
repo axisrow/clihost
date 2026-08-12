@@ -115,6 +115,71 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertGreater(validation_pos, -1, "PORT is not validated")
         self.assertLess(validation_pos, proxy_pos)
 
+    def test_proxy_startup_is_verified_before_continuing(self):
+        # The strict env-parsing contract (#113) makes ttydproxy.config raise
+        # ValueError at import time for a malformed Python-owned var (e.g.
+        # MAX_TERMINALS, SECURE_COOKIES) that the shell-side contract does not
+        # validate. Backgrounding the proxy with a bare `&` and never checking
+        # it before `exec sshd` would leave the container "healthy" (sshd up)
+        # with its only HTTP service dead. The entrypoint must capture the
+        # proxy's PID and fail closed if it does not survive a short grace
+        # window.
+        proxy_launch_pos = self.text.find(
+            'runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &'
+        )
+        pid_capture_pos = self.text.find("PROXY_PID=$!")
+        sshd_pos = self.text.find("exec /usr/sbin/sshd -D -e")
+        self.assertGreater(proxy_launch_pos, -1, "proxy launch line not found")
+        self.assertGreater(
+            pid_capture_pos, -1,
+            "entrypoint.sh must capture the proxy PID ($!) to verify startup",
+        )
+        self.assertGreater(pid_capture_pos, proxy_launch_pos)
+        self.assertGreater(sshd_pos, -1)
+        self.assertLess(
+            pid_capture_pos, sshd_pos,
+            "PID capture must happen before exec sshd",
+        )
+        # A liveness check (kill -0) must run between the PID capture and the
+        # final exec, and abort (die/exit) on failure rather than continue
+        # with a dead proxy.
+        liveness_pos = self.text.find('kill -0 "${PROXY_PID}"')
+        self.assertGreater(
+            liveness_pos, -1,
+            "entrypoint.sh must verify the proxy process is still alive",
+        )
+        self.assertGreater(liveness_pos, pid_capture_pos)
+        self.assertLess(liveness_pos, sshd_pos)
+        self.assertIn("TTYD HTTP proxy exited immediately after startup", self.text)
+
+    def test_proxy_liveness_check_is_actually_fail_closed(self):
+        # Execute the real PID-capture + kill -0 supervision block extracted
+        # from entrypoint.sh against a process that exits immediately (like
+        # ttyd_proxy.py would on a strict env ValueError) and one that stays
+        # alive, to prove the mechanism itself works, not just its presence.
+        match = re.search(
+            r'^sleep 1\nif ! kill -0 "\$\{PROXY_PID\}".*?\nfi\n',
+            self.text,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, "proxy liveness check block not found")
+        liveness_block = match.group(0).replace("sleep 1", "sleep 0.1")
+
+        dying = subprocess.run(
+            ["bash", "-c", f'(exit 1) & PROXY_PID=$!\n{liveness_block}\necho SURVIVED'],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(dying.returncode, 0)
+        self.assertIn("exited immediately after startup", dying.stderr)
+        self.assertNotIn("SURVIVED", dying.stdout)
+
+        surviving = subprocess.run(
+            ["bash", "-c", f'sleep 5 & PROXY_PID=$!\n{liveness_block}\necho SURVIVED\nkill "$PROXY_PID"'],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(surviving.returncode, 0, surviving.stderr)
+        self.assertIn("SURVIVED", surviving.stdout)
+
     def test_upload_dir_prepared_before_proxy(self):
         # The unprivileged proxy creates upload files itself; a bind-mounted
         # /home/hapi may not be writable by the hapi UID, so the entrypoint
@@ -2769,6 +2834,38 @@ printf '\n' >> "${CLIHOST_TEST_LOG}"
                 env_extra={"CLIHOST_TEST_LOG": str(log)},
             )
             self.assertNotEqual(out.returncode, 0)
+            self.assertNotIn("restart", log.read_text())
+
+    def test_restart_accepts_app_after_option_terminator(self):
+        # `--` must stop option parsing without discarding the APP argument
+        # that follows it (a legitimate app name is not an option).
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            log = self._make_billing_control_fakes(tmp_path)
+            out = self._run(
+                ["restart", "--", "clihost-good"], tmp_path / "billing",
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_TEST_LOG": str(log)},
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn(
+                "would run: dokku ps:restart clihost-good", out.stdout
+            )
+
+    def test_restart_rejects_multiple_apps_after_option_terminator(self):
+        # A single `--` must still enforce "exactly one APP"; it is not a
+        # license to accept every remaining positional argument.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            log = self._make_billing_control_fakes(tmp_path)
+            out = self._run(
+                ["restart", "--", "clihost-good", "clihost-other"],
+                tmp_path / "billing",
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_TEST_LOG": str(log)},
+            )
+            self.assertNotEqual(out.returncode, 0)
+            self.assertIn("exactly one APP", out.stderr)
             self.assertNotIn("restart", log.read_text())
 
     def test_restart_apply_requires_yes_in_non_tty(self):
