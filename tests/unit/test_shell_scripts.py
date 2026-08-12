@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -2579,6 +2580,7 @@ class TestClihostBillingScript(unittest.TestCase):
             self.assertIn("collect", out.stdout)
             self.assertRegex(out.stdout, r"\*/\d+ \* \* \* \*")
             self.assertIn("crontab -e", out.stdout)
+            self.assertIn("gc-mounts --apply --yes", out.stdout)
 
     def test_report_on_synthetic_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2792,6 +2794,139 @@ printf '\n' >> "${CLIHOST_TEST_LOG}"
             )
             self.assertEqual(applied.returncode, 0, applied.stderr)
             self.assertIn("dokku ps:restart clihost-good", log.read_text())
+
+    def _make_gc_fakes(self, tmp_path, *, apps="", mounts=""):
+        fake_dokku = tmp_path / "dokku"
+        fake_dokku.write_text(
+            "#!/bin/bash\n"
+            "if [ \"$1 $2\" = \"--quiet apps:list\" ]; then\n"
+            f"  printf '%s' {shlex.quote(apps)}\n"
+            "else\n"
+            "  exit 2\n"
+            "fi\n"
+        )
+        fake_dokku.chmod(0o755)
+        fake_docker = tmp_path / "docker"
+        fake_docker.write_text(
+            "#!/bin/bash\n"
+            "if [ \"$1\" = \"ps\" ]; then\n"
+            "  echo container-id\n"
+            "elif [ \"$1\" = \"inspect\" ]; then\n"
+            f"  printf '%s' {shlex.quote(mounts)}\n"
+            "else\n"
+            "  exit 2\n"
+            "fi\n"
+        )
+        fake_docker.chmod(0o755)
+
+    def test_gc_mounts_tracks_new_orphans_before_the_retention_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            storage = tmp_path / "storage"
+            orphan = storage / "clihost-orphan"
+            orphan.mkdir(parents=True)
+            (orphan / "credentials").write_text("keep")
+            self._make_gc_fakes(tmp_path)
+
+            out = self._run(
+                ["gc-mounts", "--apply", "--yes"], tmp_path / "billing",
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_STORAGE_ROOT": str(storage)},
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("tracking clihost-orphan", out.stdout)
+            self.assertTrue(orphan.is_dir())
+
+    def test_gc_mounts_deletes_only_eligible_unreferenced_orphans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            storage = tmp_path / "storage"
+            billing = tmp_path / "billing"
+            orphan = storage / "clihost-orphan"
+            live = storage / "clihost-live"
+            mounted = storage / "clihost-mounted"
+            for path in (orphan, live, mounted):
+                path.mkdir(parents=True)
+                (path / "credentials").write_text("keep")
+            self._make_gc_fakes(
+                tmp_path,
+                apps="clihost-live\n",
+                mounts=str(mounted) + "\n",
+            )
+            state_dir = billing / "state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "orphan-mounts.json").write_text(json.dumps({
+                "version": 1,
+                "orphans": {
+                    str(orphan): 0,
+                    str(live): 0,
+                    str(mounted): 0,
+                },
+            }))
+
+            out = self._run(
+                ["gc-mounts", "--apply", "--yes"], billing,
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_STORAGE_ROOT": str(storage)},
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("deleted clihost-orphan", out.stdout)
+            self.assertFalse(orphan.exists())
+            self.assertTrue(live.is_dir())
+            self.assertTrue(mounted.is_dir())
+
+    def test_gc_mounts_is_dry_run_and_requires_yes_for_non_tty_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            storage = tmp_path / "storage"
+            billing = tmp_path / "billing"
+            orphan = storage / "clihost-orphan"
+            orphan.mkdir(parents=True)
+            self._make_gc_fakes(tmp_path)
+            state_dir = billing / "state"
+            state_dir.mkdir(parents=True)
+            state = {"version": 1, "orphans": {str(orphan): 0}}
+            (state_dir / "orphan-mounts.json").write_text(json.dumps(state))
+
+            dry_run = self._run(
+                ["gc-mounts"], billing, extra_path=str(tmp_path),
+                env_extra={"CLIHOST_STORAGE_ROOT": str(storage)},
+            )
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            self.assertIn("would delete clihost-orphan", dry_run.stdout)
+            self.assertTrue(orphan.is_dir())
+
+            refused = self._run(
+                ["gc-mounts", "--apply"], billing, extra_path=str(tmp_path),
+                env_extra={"CLIHOST_STORAGE_ROOT": str(storage)},
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("non-TTY mode requires --yes", refused.stderr)
+            self.assertTrue(orphan.is_dir())
+
+    def test_gc_mounts_fails_closed_when_dokku_inventory_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            storage = tmp_path / "storage"
+            billing = tmp_path / "billing"
+            orphan = storage / "clihost-orphan"
+            orphan.mkdir(parents=True)
+            self._make_gc_fakes(tmp_path)
+            (tmp_path / "dokku").write_text("#!/bin/bash\nexit 3\n")
+            (tmp_path / "dokku").chmod(0o755)
+            state_dir = billing / "state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "orphan-mounts.json").write_text(json.dumps({
+                "version": 1, "orphans": {str(orphan): 0},
+            }))
+
+            out = self._run(
+                ["gc-mounts", "--apply", "--yes"], billing,
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_STORAGE_ROOT": str(storage)},
+            )
+            self.assertNotEqual(out.returncode, 0)
+            self.assertTrue(orphan.is_dir())
 
     def test_collect_builds_samples_from_docker(self):
         with tempfile.TemporaryDirectory() as tmp:
