@@ -29,6 +29,7 @@ README = REPO_ROOT / "README.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 CLAUDE_SETTINGS_TEMPLATE = REPO_ROOT / "config/claude-settings.json"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
+SERVICE_LIFECYCLE = REPO_ROOT / "docs" / "service-lifecycle.md"
 
 # Component keys whose INSTALL_<KEY> build args gate the modular image (issue #57).
 NPM_COMPONENT_KEYS = (
@@ -107,9 +108,15 @@ class TestEntrypointRegressions(unittest.TestCase):
     def test_proxy_started_as_ttyd_user(self):
         # The proxy must drop root (issue #52): launched via runuser, with the
         # secret file owned by TTYD_USER so the unprivileged proxy can read it.
+        # It uses its own fail-closed PROXY_PID check (issue #113), not the
+        # shared start_background_service helper (see
+        # test_background_services_share_startup_liveness_check).
         self.assertIn(
-            'runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &', self.text
+            'runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &',
+            self.text,
         )
+        self.assertIn("PROXY_PID=$!", self.text)
+        self.assertIn('configure_ttyd_proxy', self.text)
         self.assertIn('install -m 400 -o "${TTYD_USER}"', self.text)
 
     def test_port_validated_numeric_before_range_check(self):
@@ -133,6 +140,10 @@ class TestEntrypointRegressions(unittest.TestCase):
             'runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &'
         )
         pid_capture_pos = self.text.find("PROXY_PID=$!")
+        # entrypoint.sh execs the Docker CMD (sshd by default) or an operator
+        # override (issue #117) rather than a hardcoded sshd invocation. Use
+        # rfind: the final exec is what must come last, and other text earlier
+        # in the file could otherwise contain a matching substring.
         exec_pos = self.text.rfind('exec "$@"')
         self.assertGreater(proxy_launch_pos, -1, "proxy launch line not found")
         self.assertGreater(
@@ -339,7 +350,7 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertGreater(guard_pos, -1, "hapi command guard is missing")
         self.assertGreater(warning_pos, guard_pos)
         for marker in (
-            'run_as_hapi_argv -- env HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay',
+            'HAPI_SERVER_PID run_as_hapi_argv -- env HAPI_RELAY_FORCE_TCP=true',
             'run_as_hapi_argv -- hapi runner start 2>&1',
             'run_as_hapi_argv -- hapi runner status 2>&1',
             'run_as_hapi_argv -- hapi doctor 2>&1',
@@ -364,9 +375,10 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertIn('DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"', self.text)
         self.assertIn('PATH="${HAPI_RUN_PATH}" command -v droid', self.text)
         self.assertIn(
-            'run_as_hapi_argv -- stdbuf -oL droid daemon --remote-access >>"${DROID_DAEMON_LOG}" 2>&1 &',
+            'start_background_service "Droid daemon" "${DROID_DAEMON_LOG}" DROID_DAEMON_PID',
             self.text,
         )
+        self.assertIn('run_as_hapi_argv -- stdbuf -oL droid daemon --remote-access', self.text)
 
     def test_ao_daemon_started_as_hapi_with_log(self):
         # agent-orchestrator daemon (issue #72, closes #61): off by default, gated
@@ -380,9 +392,10 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertIn('AO_DAEMON_LOG="${HAPI_HOME}/ao-daemon.log"', self.text)
         # argv form (#101/#9): AO_PORT passed via `env NAME=VAL`, log via redirect.
         self.assertIn(
-            'run_as_hapi_argv -- env "AO_PORT=${AO_PORT}" stdbuf -oL ao daemon >>"${AO_DAEMON_LOG}" 2>&1 &',
+            '"${AO_DAEMON_LOG}" AO_DAEMON_PID',
             self.text,
         )
+        self.assertIn('run_as_hapi_argv -- env "AO_PORT=${AO_PORT}" stdbuf -oL ao daemon', self.text)
         self.assertIn(
             "ao daemon disabled (set AO_DAEMON_ENABLED=true", self.text
         )
@@ -390,11 +403,16 @@ class TestEntrypointRegressions(unittest.TestCase):
     def test_ao_port_validated_numeric_in_daemon_gate(self):
         # AO_PORT is interpolated into the `ao daemon` launch string, so a
         # non-numeric value must fail loudly (mirrors PORT / CHISEL_REMOTE_PORT).
+        # Validation itself is centralized in env-contract.sh (#113) and runs
+        # before any destructive startup step; configure_ao_daemon (issue #112)
+        # only wires up the daemon's log path after that check has passed.
         gate_pos = self.text.find('if [ "${AO_DAEMON_ENABLED}" = "true" ]; then')
         self.assertGreater(gate_pos, -1, "AO_DAEMON_ENABLED gate is missing")
         check_pos = self.text.find("env_positive_int AO_PORT 3001 1 65535")
         self.assertGreater(check_pos, -1, "AO_PORT numeric check missing")
         self.assertLess(check_pos, gate_pos)
+        configure_pos = self.text.find("configure_ao_daemon\n", gate_pos)
+        self.assertGreater(configure_pos, gate_pos, "AO daemon configuration missing in gate")
 
     def test_ssh_tunnel_env_defaults(self):
         # Pluggable SSH tunnel (issue #79): env defaults must be set so the gate
@@ -501,12 +519,70 @@ class TestEntrypointRegressions(unittest.TestCase):
         # Logging through a plain redirect (not `| tee`) keeps $! on the tunnel
         # process so an immediate exit (bad token/server) isn't masked by a live
         # tee. The tunnel launch must not pipe to tee.
-        # Locate the tunnel block and assert its launches use >>"${SSH_TUNNEL_LOG}".
-        self.assertIn('>>"${SSH_TUNNEL_LOG}" 2>&1 &', self.text)
+        # The shared launcher owns the redirect; tunnel calls supply the log path.
+        self.assertIn('start_background_service "cloudflared tunnel" "${SSH_TUNNEL_LOG}"', self.text)
+        self.assertIn('start_background_service "chisel client" "${SSH_TUNNEL_LOG}"', self.text)
         block_start = self.text.find("Start external SSH tunnel (issue #79)")
         block_end = self.text.find("SSH tunnel disabled", block_start)
         tunnel_block = self.text[block_start:block_end]
         self.assertNotIn('tee "${SSH_TUNNEL_LOG}"', tunnel_block)
+
+    def test_background_services_share_startup_liveness_check(self):
+        # TTYD_PROXY_PID is deliberately NOT in this list: the proxy is the
+        # container's only HTTP service, so it goes through the stricter
+        # fail-closed PROXY_PID check (test_proxy_startup_is_verified_before_
+        # continuing) instead of start_background_service's warn-and-continue
+        # behavior (issue #113's exec-failure detection predates and is
+        # stricter than #112's shared helper).
+        self.assertIn("start_background_service() {", self.text)
+        self.assertIn('background_service_is_alive "${child_pid}"', self.text)
+        for pid_variable in (
+            "DROID_DAEMON_PID",
+            "AO_DAEMON_PID",
+            "SSH_TUNNEL_PID",
+            "HAPI_SERVER_PID",
+        ):
+            with self.subTest(pid_variable=pid_variable):
+                self.assertIn(pid_variable, self.text)
+
+    def test_lifecycle_contract_documents_no_supervision(self):
+        contract = SERVICE_LIFECYCLE.read_text()
+        for service in (
+            "`sshd`",
+            "`ttyd_proxy.py`",
+            "`droid daemon --remote-access`",
+            "`ao daemon`",
+            "SSH tunnel",
+            "`hapi server --relay`",
+            "`hapi runner`",
+        ):
+            with self.subTest(service=service):
+                self.assertIn(service, contract)
+        self.assertIn("Not monitored or restarted", contract)
+
+    def test_immediate_background_exit_warns_but_does_not_fail_bootstrap(self):
+        match = re.search(
+            r"(background_service_is_alive\(\) \{.*?\n\})\n\n"
+            r"(start_background_service\(\) \{.*?\n\})\n\n",
+            self.text,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match, "background service helpers not found")
+        script = (
+            "set -euo pipefail\n"
+            f"{match.group(1)}\n{match.group(2)}\n"
+            "start_background_service test-service \"\" TEST_PID sh -c 'exit 7'\n"
+            "printf 'continued:%s\\n' \"${TEST_PID}\"\n"
+            "start_background_service live-service \"\" LIVE_PID sleep 5\n"
+            "background_service_is_alive \"${LIVE_PID}\"\n"
+            "kill \"${LIVE_PID}\"\n"
+            "wait \"${LIVE_PID}\" 2>/dev/null || true\n"
+        )
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("continued:", result.stdout)
+        self.assertIn("live-service started with PID:", result.stdout)
+        self.assertIn("exited during startup; continuing without it", result.stderr)
 
     def test_ssh_tunnel_missing_required_env_warns_not_fatal(self):
         # An enabled tunnel with a missing required var must warn + skip, not die

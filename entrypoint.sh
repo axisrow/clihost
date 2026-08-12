@@ -273,6 +273,103 @@ cleanup_runner_state() {
   done
 }
 
+# Background services are deliberately not supervised.  This launcher only
+# proves that the child survived its initial exec window; after startup, sshd is
+# the sole container-lifetime process (see docs/service-lifecycle.md).
+background_service_is_alive() {
+  kill -0 "$1" 2>/dev/null
+}
+
+start_background_service() {
+  local service_name="$1"
+  local log_file="$2"
+  local pid_variable="$3"
+  shift 3
+
+  echo "Starting ${service_name} in background${log_file:+ (logs: ${log_file})}..."
+  if [ -n "${log_file}" ]; then
+    "$@" >>"${log_file}" 2>&1 &
+  else
+    "$@" &
+  fi
+  local child_pid=$!
+  printf -v "${pid_variable}" '%s' "${child_pid}"
+
+  # Give exec failures (missing runtime dependencies, bad argv, etc.) a chance
+  # to become visible without turning this into an ongoing supervisor loop.
+  sleep 0.1
+  if background_service_is_alive "${child_pid}"; then
+    echo "${service_name} started with PID: ${child_pid}"
+  else
+    wait "${child_pid}" 2>/dev/null || true
+    echo "WARNING: ${service_name} exited during startup; continuing without it" >&2
+  fi
+}
+
+check_service_readiness() {
+  local service_name="$1"
+  shift
+  if "$@"; then
+    echo "${service_name} readiness check passed"
+    return 0
+  fi
+  echo "WARNING: ${service_name} readiness check failed; continuing without confirmed readiness" >&2
+  return 1
+}
+
+configure_droid_daemon() {
+  if [ -z "${DROID_COMPUTER_NAME}" ]; then
+    echo "ERROR: DROID_DAEMON_ENABLED=true requires DROID_COMPUTER_NAME for non-interactive registration" >&2
+    return 1
+  fi
+  case "${DROID_COMPUTER_NAME}" in
+    *[!A-Za-z0-9_.-]*)
+      echo "ERROR: DROID_COMPUTER_NAME may only contain letters, numbers, dot, underscore, and dash" >&2
+      return 1
+      ;;
+  esac
+
+  echo "Registering Droid computer '${DROID_COMPUTER_NAME}'..."
+  if ! run_as_hapi_argv -- droid computer register "${DROID_COMPUTER_NAME}" -y 2>&1; then
+    echo "ERROR: Droid computer registration failed; daemon not started" >&2
+    return 1
+  fi
+
+  DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"
+  : > "${DROID_DAEMON_LOG}"
+  chown "${HAPI_USER}:${HAPI_USER}" "${DROID_DAEMON_LOG}"
+}
+
+configure_ao_daemon() {
+  # AO_PORT is already validated numeric (1-65535) by env_positive_int up top,
+  # before any destructive/idempotent-breaking startup step ran.
+  AO_DAEMON_LOG="${HAPI_HOME}/ao-daemon.log"
+}
+
+configure_ssh_tunnel() {
+  # CHISEL_REMOTE_PORT is already validated numeric (1-65535) by env_positive_int
+  # up top, before any destructive/idempotent-breaking startup step ran.
+  SSH_TUNNEL_LOG="${HAPI_HOME}/ssh-tunnel.log"
+  touch "${SSH_TUNNEL_LOG}"
+  chown "${HAPI_USER}:${HAPI_USER}" "${SSH_TUNNEL_LOG}"
+}
+
+configure_ttyd_proxy() {
+  # PORT is already validated numeric (1024-65535) by env_positive_int up top,
+  # before any destructive/idempotent-breaking startup step ran.
+  ensure_dir_owned "${UPLOAD_DIR}"
+  PROXY_SECRET_FILE="/run/ttyd-proxy.secret"
+  install -m 400 -o "${TTYD_USER}" /dev/null "${PROXY_SECRET_FILE}"
+  printf '%s' "${PASSWORD_SECRET}" > "${PROXY_SECRET_FILE}"
+  unset PASSWORD_SECRET
+}
+
+configure_hapi_server() {
+  HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
+  : > "${HAPI_SERVER_LOG}"
+  chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_SERVER_LOG}"
+}
+
 ensure_home_owned
 ensure_dir_owned "${HAPI_USER_HOME}/.config/gh"
 ensure_dir_owned "${HAPI_USER_HOME}/.claude"
@@ -329,35 +426,9 @@ ensure_dir_owned "${HAPI_HOME}"
 # Start Droid daemon with remote access in background
 if [ "${DROID_DAEMON_ENABLED}" = "true" ]; then
   if PATH="${HAPI_RUN_PATH}" command -v droid >/dev/null 2>&1; then
-    if [ -z "${DROID_COMPUTER_NAME}" ]; then
-      echo "ERROR: DROID_DAEMON_ENABLED=true requires DROID_COMPUTER_NAME for non-interactive registration" >&2
-      exit 1
-    fi
-    case "${DROID_COMPUTER_NAME}" in
-      *[!A-Za-z0-9_.-]*)
-        echo "ERROR: DROID_COMPUTER_NAME may only contain letters, numbers, dot, underscore, and dash" >&2
-        exit 1
-        ;;
-    esac
-
-    echo "Registering Droid computer '${DROID_COMPUTER_NAME}'..."
-    if ! run_as_hapi_argv -- droid computer register "${DROID_COMPUTER_NAME}" -y 2>&1; then
-      echo "ERROR: Droid computer registration failed; daemon not started" >&2
-      exit 1
-    fi
-
-    DROID_DAEMON_LOG="${HAPI_HOME}/droid-daemon.log"
-    # `: >` (truncate-or-create), not `touch`: the launch appends via `>>`, so
-    # truncate at startup to cap unbounded growth on the persistent volume.
-    : > "${DROID_DAEMON_LOG}"
-    chown "${HAPI_USER}:${HAPI_USER}" "${DROID_DAEMON_LOG}"
-    echo "Starting droid daemon --remote-access in background (logs: ${DROID_DAEMON_LOG})..."
-    # argv form (no `sh -c` interpolation): the log is written via a redirect
-    # instead of `| tee` (argv cannot express a pipe), matching the tunnel
-    # helpers. The dashboard reads the log file, not container stdout (#101/#9).
-    run_as_hapi_argv -- stdbuf -oL droid daemon --remote-access >>"${DROID_DAEMON_LOG}" 2>&1 &
-    DROID_DAEMON_PID=$!
-    echo "Droid daemon started with PID: ${DROID_DAEMON_PID}"
+    configure_droid_daemon
+    start_background_service "Droid daemon" "${DROID_DAEMON_LOG}" DROID_DAEMON_PID \
+      run_as_hapi_argv -- stdbuf -oL droid daemon --remote-access
   else
     echo "droid CLI not found; skipping droid daemon startup" >&2
   fi
@@ -378,18 +449,13 @@ fi
 # default, this no-auth/no-TLS daemon could be exposed on a published port — re-check
 # that the hardcoded-loopback invariant still holds before bumping the pinned ao ref.
 if [ "${AO_DAEMON_ENABLED}" = "true" ]; then
+  configure_ao_daemon
   if PATH="${HAPI_RUN_PATH}" command -v ao >/dev/null 2>&1; then
-    AO_DAEMON_LOG="${HAPI_HOME}/ao-daemon.log"
-    # `: >` (truncate-or-create), not `touch`: the launch appends via `>>`, so
-    # truncate at startup to cap unbounded growth on the persistent volume.
     : > "${AO_DAEMON_LOG}"
     chown "${HAPI_USER}:${HAPI_USER}" "${AO_DAEMON_LOG}"
-    echo "Starting ao daemon on 127.0.0.1:${AO_PORT} in background (logs: ${AO_DAEMON_LOG})..."
-    # argv form: AO_PORT is passed as an env assignment consumed by run_as_hapi_argv's
-    # `env` (not interpolated into `sh -c`), and the log via redirect not `| tee`.
-    run_as_hapi_argv -- env "AO_PORT=${AO_PORT}" stdbuf -oL ao daemon >>"${AO_DAEMON_LOG}" 2>&1 &
-    AO_DAEMON_PID=$!
-    echo "ao daemon started with PID: ${AO_DAEMON_PID}"
+    start_background_service "ao daemon on 127.0.0.1:${AO_PORT}" \
+      "${AO_DAEMON_LOG}" AO_DAEMON_PID \
+      run_as_hapi_argv -- env "AO_PORT=${AO_PORT}" stdbuf -oL ao daemon
   else
     echo "ao CLI not found; skipping ao daemon startup" >&2
   fi
@@ -407,16 +473,13 @@ SSH_URL_FILE="${HAPI_USER_HOME}/ssh-url"
 # from a previous run / provider); recreated below only when a tunnel starts.
 rm -f "${SSH_URL_FILE}" 2>/dev/null || true
 if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
-  SSH_TUNNEL_LOG="${HAPI_HOME}/ssh-tunnel.log"
-  touch "${SSH_TUNNEL_LOG}"
-  chown "${HAPI_USER}:${HAPI_USER}" "${SSH_TUNNEL_LOG}"
+  configure_ssh_tunnel
   case "${SSH_TUNNEL_PROVIDER}" in
     cloudflared)
       if PATH="${HAPI_RUN_PATH}" command -v cloudflared >/dev/null 2>&1; then
         if [ -z "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
           echo "WARNING: SSH_TUNNEL_PROVIDER=cloudflared requires CLOUDFLARE_TUNNEL_TOKEN; skipping tunnel startup" >&2
         else
-          echo "Starting cloudflared tunnel in background (logs: ${SSH_TUNNEL_LOG})..."
           # Secret hygiene: cloudflared reads the token natively from TUNNEL_TOKEN.
           # We EXPORT it into this launcher's env and pass only its NAME to
           # run_as_hapi_argv; runuser (no --login) inherits it across the privilege
@@ -426,11 +489,9 @@ if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
           # Logging via a plain redirect (not `| tee`) keeps $! pointing at the
           # tunnel process itself, so an immediate exit isn't masked by a live tee.
           TUNNEL_TOKEN="${CLOUDFLARE_TUNNEL_TOKEN}" \
-          run_as_hapi_argv TUNNEL_TOKEN -- \
-            stdbuf -oL cloudflared tunnel --no-autoupdate run \
-            >>"${SSH_TUNNEL_LOG}" 2>&1 &
-          SSH_TUNNEL_PID=$!
-          echo "cloudflared tunnel started with PID: ${SSH_TUNNEL_PID}"
+          start_background_service "cloudflared tunnel" "${SSH_TUNNEL_LOG}" \
+            SSH_TUNNEL_PID run_as_hapi_argv TUNNEL_TOKEN -- \
+            stdbuf -oL cloudflared tunnel --no-autoupdate run
           # Public hostname is configured in the Cloudflare dashboard, not logged,
           # so the dashboard connection string comes from env.
           if [ -n "${CLOUDFLARE_TUNNEL_HOSTNAME}" ]; then
@@ -451,7 +512,6 @@ if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
         if [ -z "${CHISEL_SERVER}" ]; then
           echo "WARNING: SSH_TUNNEL_PROVIDER=chisel requires CHISEL_SERVER; skipping tunnel startup" >&2
         else
-          echo "Starting chisel client in background (logs: ${SSH_TUNNEL_LOG})..."
           # AUTH (user:pass) is read natively by chisel from the env. We EXPORT it
           # and pass only its NAME to run_as_hapi_argv; runuser (no --login)
           # inherits it, so the value never lands in argv. argv-based launch
@@ -460,12 +520,10 @@ if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
           # CHISEL_REMOTE_PORT is validated numeric above so the R:<port>:... spec
           # can't be corrupted.
           AUTH="${CHISEL_AUTH}" \
-          run_as_hapi_argv AUTH -- \
+          start_background_service "chisel client" "${SSH_TUNNEL_LOG}" \
+            SSH_TUNNEL_PID run_as_hapi_argv AUTH -- \
             stdbuf -oL chisel client --max-retry-count -1 \
-            "${CHISEL_SERVER}" "R:${CHISEL_REMOTE_PORT}:localhost:22" \
-            >>"${SSH_TUNNEL_LOG}" 2>&1 &
-          SSH_TUNNEL_PID=$!
-          echo "chisel client started with PID: ${SSH_TUNNEL_PID}"
+            "${CHISEL_SERVER}" "R:${CHISEL_REMOTE_PORT}:localhost:22"
           # Public endpoint is deterministic: the chisel server's host + the
           # reverse-forwarded port (CHISEL_REMOTE_PORT).
           CHISEL_HOST="$(printf '%s' "${CHISEL_SERVER}" | sed -E 's#^[A-Za-z]+://##; s#[:/].*$##')"
@@ -489,13 +547,7 @@ fi
 # Start TTYD HTTP proxy (manages TTYD processes dynamically; drops root and
 # runs as TTYD_USER). The secret goes through a TTYD_USER-only file (Docker
 # *_FILE convention) so it never appears in the proxy's /proc/<pid>/environ.
-# The proxy runs as TTYD_USER and creates upload files itself; pre-create and
-# chown UPLOAD_DIR so a bind-mounted /home/hapi (often not writable by the hapi
-# UID) doesn't make pasted-image uploads fail with 500.
-ensure_dir_owned "${UPLOAD_DIR}"
-PROXY_SECRET_FILE="/run/ttyd-proxy.secret"
-install -m 400 -o "${TTYD_USER}" /dev/null "${PROXY_SECRET_FILE}"
-printf '%s' "${PASSWORD_SECRET}" > "${PROXY_SECRET_FILE}"
+configure_ttyd_proxy
 # Drop PASSWORD_SECRET from this shell's environment before launching the proxy.
 # runuser (without --login) inherits the caller's whole environment, so an
 # operator-supplied `-e PASSWORD_SECRET=...` would otherwise land in the proxy's
@@ -503,8 +555,6 @@ printf '%s' "${PASSWORD_SECRET}" > "${PROXY_SECRET_FILE}"
 # shells) and enough to forge session/CSRF tokens. The file above (mode 400,
 # owner TTYD_USER) is the only channel; CLAUDE.md guarantees the secret "never
 # appears in the proxy's environment". PASSWORD_SECRET is unused past this point.
-unset PASSWORD_SECRET
-echo "Starting TTYD HTTP proxy on port ${PORT} as ${TTYD_USER}"
 PORT="${PORT}" \
 TTYD_USER="${TTYD_USER}" \
 TTYD_PASSWORD="${TTYD_PASSWORD}" \
@@ -515,12 +565,14 @@ TTYD_SANDBOX="${TTYD_SANDBOX}" \
 runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &
 PROXY_PID=$!
 
-# Fail closed if the proxy dies immediately after launch. The strict env
-# contract (#113) makes ttydproxy.config raise on a malformed value for a
-# Python-owned var (e.g. MAX_TERMINALS, SECURE_COOKIES) that the shell-side
-# env-contract.sh does not itself validate. Without this check the container
-# would keep running (sshd stays up via the unconditional `exec` below) with
-# its only HTTP service dead and no supervision to catch it.
+# Fail closed if the proxy dies immediately after launch — deliberately NOT
+# routed through start_background_service (which warns and continues): the
+# strict env contract (#113) makes ttydproxy.config raise on a malformed value
+# for a Python-owned var (e.g. MAX_TERMINALS, SECURE_COOKIES) that the
+# shell-side env-contract.sh does not itself validate. Without a fail-closed
+# check here the container would keep running (sshd stays up via the
+# unconditional `exec` below) with its only HTTP service dead and no
+# supervision to catch it.
 sleep 1
 if ! kill -0 "${PROXY_PID}" 2>/dev/null; then
   echo "ERROR: TTYD HTTP proxy exited immediately after startup; check the error above (e.g. an invalid env value)" >&2
@@ -536,20 +588,16 @@ rm -f "${HAPI_URL_FILE}" 2>/dev/null || true
 
 if PATH="${HAPI_RUN_PATH}" command -v hapi >/dev/null 2>&1; then
   # Start hapi server with relay in background (logs to file, force TCP relay)
-  HAPI_SERVER_LOG="${HAPI_HOME}/server.log"
   # Truncate-or-create the log at startup (`: >`, not `touch`): the launch now
   # appends via `>>` instead of the old `| tee` which truncated on open, so
   # without this a persistent-volume server.log would keep stale relay URLs
   # across restarts (a brief window where the /home/hapi/url fallback pairs a
   # fresh token with an old URL) and grow unbounded. `: >` restores the old
   # truncate semantics. Also makes the URL-extraction loop's -f check pass.
-  : > "${HAPI_SERVER_LOG}"
-  chown "${HAPI_USER}:${HAPI_USER}" "${HAPI_SERVER_LOG}"
-  echo "Starting hapi server --relay in background (logs: ${HAPI_SERVER_LOG})..."
-  # argv form: HAPI_RELAY_FORCE_TCP via env, log via redirect not `| tee` (#101/#9).
-  run_as_hapi_argv -- env HAPI_RELAY_FORCE_TCP=true stdbuf -oL hapi server --relay >>"${HAPI_SERVER_LOG}" 2>&1 &
-  HAPI_SERVER_PID=$!
-  echo "Hapi server started with PID: ${HAPI_SERVER_PID}"
+  configure_hapi_server
+  start_background_service "Hapi server --relay" "${HAPI_SERVER_LOG}" \
+    HAPI_SERVER_PID run_as_hapi_argv -- env HAPI_RELAY_FORCE_TCP=true \
+    stdbuf -oL hapi server --relay
 
   # Build the legacy connection URL file by delegating to the SAME builder the
   # dashboard uses (ttydproxy.views.build_hapi_url_from_runtime), instead of a
@@ -598,7 +646,8 @@ if url:
 
     # Verify runner is running
     echo "Checking hapi runner status..."
-    if ! run_as_hapi_argv -- hapi runner status 2>&1; then
+    if ! check_service_readiness "Hapi runner" \
+      run_as_hapi_argv -- hapi runner status 2>&1; then
       echo '=== RUNNER NOT RUNNING ===' >&2
       echo 'Running hapi doctor for diagnostics:' >&2
       run_as_hapi_argv -- hapi doctor 2>&1 || true
