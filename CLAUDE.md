@@ -307,7 +307,7 @@ unsafe (no `docker.sock`). They live on the Dokku host (e.g. `/home/dokku/bin/`)
 and run as the `dokku` user, who is in the `docker` group and can therefore call
 `docker stats/ps -s/inspect` **without sudo** (`sudo` needs a password and is
 unavailable). This is the accounting and operational foundation for issue #37;
-`idle-sleep` and stage 2 (tariffs/invoices) remain follow-up work.
+stage 2 (tariffs/invoices) remains follow-up work.
 
 The bash file is a thin dispatcher (`set -euo pipefail`, `die`/`usage`/`main`
 +`case`, one docker/I-O owner); all pure logic (parsers + aggregation +
@@ -327,6 +327,7 @@ static+end-to-end checks in `tests/unit/test_shell_scripts.py`). No `jq`/`sqlite
 | `diagnose [--app] APP` | Read-only container health evidence and a compact verdict. |
 | `restart APP [--apply] [--yes]` | Safe app restart; dry-run by default and non-TTY apply requires `--yes`. |
 | `gc-mounts [--apply] [--yes]` | Track legacy `clihost-*` storage directories and delete only after 30 days continuously orphaned; dry-run by default. |
+| `idle-sleep [--apply] [--yes]` | Stop explicitly allowlisted apps after continuous CPU and network inactivity; dry-run by default. |
 | `help` | Usage. |
 
 **Storage** — append-only JSONL under `${CLIHOST_BILLING_DIR:=/home/dokku/.clihost-billing}`
@@ -338,6 +339,8 @@ static+end-to-end checks in `tests/unit/test_shell_scripts.py`). No `jq`/`sqlite
   `2 × interval`).
 - `state/orphan-mounts.json` — first-seen times for directories continuously
   absent from both the Dokku app inventory and every Docker container mount.
+- `state/idle-sleep.json` — per-app network counter, last observation, and start
+  of the current continuous idle window.
 - `rates.json` (stage 2) — not present yet; `report` calls `apply_rates(rows, None)`
   so COST renders as an em dash (`—`) until rates exist.
 
@@ -364,8 +367,12 @@ tracked. Disk is a point-in-time size (latest per container summed), not integra
 (collector cadence in seconds, default 300 — also the gap-detection base),
 `CLIHOST_APP_PREFIX` (container/app prefix to account, default `clihost-`),
 `CLIHOST_STORAGE_ROOT` (legacy app-named Dokku storage directory root, default
-`/var/lib/dokku/data/storage`), and `CLIHOST_GC_RETENTION_DAYS` (continuous
-orphan retention, default 30).
+`/var/lib/dokku/data/storage`), `CLIHOST_GC_RETENTION_DAYS` (continuous
+orphan retention, default 30), `CLIHOST_IDLE_APPS` (comma-separated idle-sleep
+allowlist, default empty/disabled), `CLIHOST_IDLE_MINUTES` (continuous idle
+window, default 60), `CLIHOST_IDLE_CPU_PCT` (max aggregate CPU percentage
+considered idle, default 1), and `CLIHOST_IDLE_NET_BYTES` (max network bytes
+per observation considered idle, default 65536).
 
 `gc-mounts` is deliberately fail-closed. It considers only direct directories
 whose names match `clihost-[a-z0-9_-]+`; existing Dokku apps and paths mounted
@@ -385,6 +392,28 @@ one scan interval is invisible. Worst case, a deletion's true continuous-orphan
 age can be short of `CLIHOST_GC_RETENTION_DAYS` by up to one scan interval
 (~24h with the shipped daily cron) — closing that gap fully would need
 event-based hooks into Dokku app create/destroy rather than periodic sampling.
+
+**Idle sleep is opt-in and fail-closed.** `CLIHOST_IDLE_APPS` is an empty
+comma-separated allowlist by default, so the command does nothing until an
+operator names apps explicitly. `CLIHOST_IDLE_MINUTES` defaults to 60 and
+`CLIHOST_IDLE_CPU_PCT` defaults to 1 aggregate CPU percent.
+`CLIHOST_IDLE_NET_BYTES` defaults to 65536 bytes per observation, allowing
+small tunnel/runner keepalives without keeping an otherwise idle app awake.
+Every invocation reads live `docker stats`: CPU above the threshold, cumulative
+`NetIO` growth above that byte threshold, a container counter reset, or an observation gap greater than `2.5 ×
+CLIHOST_BILLING_INTERVAL` resets the idle window. Missing/malformed stats or
+state abort instead of being interpreted as idle. The first observation only
+starts tracking. An eligible app is printed in dry-run mode; stopping requires
+`--apply` and, outside a TTY, `--yes`, and uses `dokku ps:stop APP`.
+
+This implements **automatic sleeping**, not automatic request-triggered waking.
+Dokku's default nginx proxy has no built-in scale-from-zero request hook, and
+once the web container is stopped it cannot receive the request that would wake
+it. Wake manually with `dokku ps:start APP`. True wake-on-HTTP requires a
+separate always-on, wake-aware proxy/control-plane integration and is outside
+this repository's container/host-helper scope. `cron-line` prints a commented
+opt-in template; replace the example allowlist and uncomment it to schedule the
+sleep evaluator.
 
 **Verification:** `python -m pytest tests/unit/test_clihost_billing_agg.py
 tests/unit/test_shell_scripts.py`; on the server, copy both files to
