@@ -581,6 +581,6 @@ else
   fi
 fi
 
-# sshd is now the main process (via CMD in Dockerfile)
-# Container stays alive as long as sshd runs
-exec /usr/sbin/sshd -D -e
+# Run the Docker CMD (sshd by default) or an operator-supplied override as the
+# main process.
+exec "$@"
