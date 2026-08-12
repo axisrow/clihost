@@ -1085,6 +1085,65 @@ class TestClihostSyncScript(unittest.TestCase):
         self.assertIn("700", out["result"].stderr)
         self.assertEqual(out["rsync_args"], [])
 
+    def test_local_and_remote_ssh_validation_verdicts_are_equivalent(self):
+        def valid(home):
+            self._make_ssh_material(home)
+
+        def open_private_key(home):
+            self._make_ssh_material(home, key_mode=0o644)
+
+        def disguised_public_key(home):
+            ssh_dir = self._make_ssh_material(home)
+            (ssh_dir / "id_ed25519.pub").write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                "private-test-fixture\n"
+                "-----END OPENSSH PRIVATE KEY-----\n"
+            )
+
+        cases = (
+            ("valid", valid, True, ""),
+            ("open private key", open_private_key, False, "permissions"),
+            ("disguised public key", disguised_public_key, False, "private key"),
+        )
+        for name, make_material, accepted, error_fragment in cases:
+            with self.subTest(name=name):
+                local = self._run_sync(["ssh"], make_local=make_material)
+                remote = self._run_sync(
+                    ["ssh", "push"], make_remote=make_material,
+                )
+
+                self.assertEqual(local["result"].returncode == 0, accepted)
+                self.assertEqual(remote["result"].returncode == 0, accepted)
+                self.assertEqual(
+                    local["result"].returncode == 0,
+                    remote["result"].returncode == 0,
+                    (local["result"].stderr, remote["result"].stderr),
+                )
+                if error_fragment:
+                    self.assertIn(error_fragment, local["result"].stderr)
+                    self.assertIn(error_fragment, remote["result"].stderr)
+
+    def test_ssh_validators_are_defined_once_in_shared_prelude(self):
+        text = CLIHOST_SYNC.read_text()
+        validators = (
+            "path_mode",
+            "reject_control_chars",
+            "reject_group_or_other_permissions",
+            "is_private_key_file",
+            "validate_default_public_ssh_material",
+            "validate_private_key_permissions",
+            "private_key_include_rule",
+        )
+
+        self.assertIn("emit_ssh_validation_prelude() {", text)
+        for validator in validators:
+            with self.subTest(validator=validator):
+                self.assertEqual(
+                    text.count(f"{validator}() {{"),
+                    1,
+                    f"{validator} must be defined once in the shared prelude",
+                )
+
     def test_ssh_option_like_target_is_rejected_before_ssh_or_rsync(self):
         out = self._run_sync(
             ["ssh", "--target", "-oProxyCommand=touch /tmp/pwned"],

@@ -10,125 +10,11 @@ die() {
   exit 1
 }
 
-# Emit the shared remote prelude, then a per-action body (read from this
-# function's stdin), as one script on stdout ready to pipe into `ssh ... bash
-# -s`. The remote heredocs are quoted (<<'PRELUDE' / <<'REMOTE'), so this text
-# is NOT expanded locally — it runs on the container.
-#
-# Defining the symlink guards ONCE here is the #101/#10 fix: `guard_remote_path`
-# and `guard_remote_tree_no_symlinks` were byte-identical triplicates (one local
-# pair plus one copy in each of the two remote heredocs), so hardening one copy
-# silently bypassed the others — exactly the class of bug caught 3× before
-# (#88/#90/#95). Now the two remote payloads share this single definition.
-#
-# Contract for callers: pass "${REMOTE_HOME}" as $1 of `bash -s` (positionally
-# identical in both payloads) so `remote_home` resolves; the prelude reads only
-# $1 and does not assume a fixed $# (payloads pass extra positional args). After
-# the prelude, `die`, `remote_home`, and both guards are in scope for the body.
-emit_remote_prelude() {
-  cat <<'PRELUDE'
-set -euo pipefail
-
-die() {
-  echo "ERROR: $*" >&2
-  exit 1
-}
-
-remote_home="$1"
-
-guard_remote_path() {
-  local path="$1"
-  local rel
-  local current
-  local part
-  local old_ifs
-  local -a parts
-
-  case "${path}" in
-    "${remote_home}" | "${remote_home}"/*) ;;
-    *) die "refusing to touch remote path outside /home/hapi: ${path}" ;;
-  esac
-
-  rel="${path#${remote_home}/}"
-  current="${remote_home}"
-  old_ifs="${IFS}"
-  IFS="/"
-  read -r -a parts <<< "${rel}"
-  IFS="${old_ifs}"
-  for part in "${parts[@]}"; do
-    [ -n "${part}" ] || continue
-    current="${current}/${part}"
-    if [ -L "${current}" ]; then
-      die "${current} is a symlink; refusing to sync through it"
-    fi
-  done
-}
-
-guard_remote_tree_no_symlinks() {
-  local path="$1"
-  local found
-
-  [ -d "${path}" ] || return 0
-  found="$(find "${path}" -type l -print 2>/dev/null)" \
-    || die "cannot inspect ${path} for symlinks"
-  if [ -n "${found}" ]; then
-    die "$(printf "%s\n" "${found}" | sed -n '1p') is a symlink; refusing to sync through it"
-  fi
-}
-PRELUDE
-  cat
-}
-
-usage() {
-  cat >&2 <<'EOF'
-Usage:
-  clihost-sync.sh pull [--target user@host] [--ssh-port port] [--identity-file path] [--apply] [--allow-delete]
-  clihost-sync.sh push [--target user@host] [--ssh-port port] [--identity-file path] [--apply] [--allow-delete]
-  clihost-sync.sh ssh [pull|push] [--target user@host] [--ssh-port port] [--identity-file path] [--include-private-keys] [--apply] [--allow-delete]
-
-Direction:
-  pull  copies the safe host config subset into the clihost container.
-  push  copies the same safe subset from the clihost container back to the host.
-  ssh   copies ~/.ssh separately; default direction is pull (host to container).
-
-Safety:
-  Dry-run is the default. Use --apply for a real rsync run.
-  --delete is never used unless --allow-delete is passed explicitly.
-  The remote home must be mounted exactly at /home/hapi.
-  ssh sync includes only known_hosts, *.pub, and config by default.
-  Private keys require --include-private-keys and secure source permissions.
-
-Target:
-  Set --target or CLIHOST_SSH_TARGET to the SSH destination, for example:
-    CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 clihost-sync.sh pull
-    CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 clihost-sync.sh ssh
-EOF
-}
-
-quote_join() {
-  local out=""
-  local quoted
-  local arg
-  for arg in "$@"; do
-    printf -v quoted "%q" "${arg}"
-    if [ -n "${out}" ]; then
-      out="${out} ${quoted}"
-    else
-      out="${quoted}"
-    fi
-  done
-  printf "%s\n" "${out}"
-}
-
-reject_option_like() {
-  local label="$1"
-  local value="$2"
-
-  case "${value}" in
-    -*) die "${label} must not start with '-' (got: ${value})" ;;
-  esac
-}
-
+# Emit pure SSH-material validators that are sourced locally below and embedded
+# unchanged in remote payloads by emit_remote_prelude. Keep filesystem mutation
+# and command orchestration outside this prelude.
+emit_ssh_validation_prelude() {
+  cat <<'VALIDATION_PRELUDE'
 reject_control_chars() {
   local label="$1"
   local value="$2"
@@ -213,6 +99,131 @@ private_key_include_rule() {
     --include=/*) printf '%s\n' "${rule}" ;;
     -*) die "generated rsync include rule must not start with '-' (got: ${rule})" ;;
     *) die "invalid generated rsync include rule: ${rule}" ;;
+  esac
+}
+VALIDATION_PRELUDE
+}
+
+# shellcheck source=/dev/null
+source /dev/stdin <<< "$(emit_ssh_validation_prelude)"
+
+# Emit the shared remote prelude, then a per-action body (read from this
+# function's stdin), as one script on stdout ready to pipe into `ssh ... bash
+# -s`. The remote heredocs are quoted (<<'PRELUDE' / <<'REMOTE'), so this text
+# is NOT expanded locally — it runs on the container.
+#
+# Defining the symlink guards ONCE here is the #101/#10 fix: `guard_remote_path`
+# and `guard_remote_tree_no_symlinks` were byte-identical triplicates (one local
+# pair plus one copy in each of the two remote heredocs), so hardening one copy
+# silently bypassed the others — exactly the class of bug caught 3× before
+# (#88/#90/#95). Now the two remote payloads share this single definition.
+#
+# Contract for callers: pass "${REMOTE_HOME}" as $1 of `bash -s` (positionally
+# identical in both payloads) so `remote_home` resolves; the prelude reads only
+# $1 and does not assume a fixed $# (payloads pass extra positional args). After
+# the prelude, `die`, `remote_home`, and both guards are in scope for the body.
+emit_remote_prelude() {
+  cat <<'PRELUDE'
+set -euo pipefail
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+remote_home="$1"
+
+guard_remote_path() {
+  local path="$1"
+  local rel
+  local current
+  local part
+  local old_ifs
+  local -a parts
+
+  case "${path}" in
+    "${remote_home}" | "${remote_home}"/*) ;;
+    *) die "refusing to touch remote path outside /home/hapi: ${path}" ;;
+  esac
+
+  rel="${path#${remote_home}/}"
+  current="${remote_home}"
+  old_ifs="${IFS}"
+  IFS="/"
+  read -r -a parts <<< "${rel}"
+  IFS="${old_ifs}"
+  for part in "${parts[@]}"; do
+    [ -n "${part}" ] || continue
+    current="${current}/${part}"
+    if [ -L "${current}" ]; then
+      die "${current} is a symlink; refusing to sync through it"
+    fi
+  done
+}
+
+guard_remote_tree_no_symlinks() {
+  local path="$1"
+  local found
+
+  [ -d "${path}" ] || return 0
+  found="$(find "${path}" -type l -print 2>/dev/null)" \
+    || die "cannot inspect ${path} for symlinks"
+  if [ -n "${found}" ]; then
+    die "$(printf "%s\n" "${found}" | sed -n '1p') is a symlink; refusing to sync through it"
+  fi
+}
+PRELUDE
+  emit_ssh_validation_prelude
+  cat
+}
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  clihost-sync.sh pull [--target user@host] [--ssh-port port] [--identity-file path] [--apply] [--allow-delete]
+  clihost-sync.sh push [--target user@host] [--ssh-port port] [--identity-file path] [--apply] [--allow-delete]
+  clihost-sync.sh ssh [pull|push] [--target user@host] [--ssh-port port] [--identity-file path] [--include-private-keys] [--apply] [--allow-delete]
+
+Direction:
+  pull  copies the safe host config subset into the clihost container.
+  push  copies the same safe subset from the clihost container back to the host.
+  ssh   copies ~/.ssh separately; default direction is pull (host to container).
+
+Safety:
+  Dry-run is the default. Use --apply for a real rsync run.
+  --delete is never used unless --allow-delete is passed explicitly.
+  The remote home must be mounted exactly at /home/hapi.
+  ssh sync includes only known_hosts, *.pub, and config by default.
+  Private keys require --include-private-keys and secure source permissions.
+
+Target:
+  Set --target or CLIHOST_SSH_TARGET to the SSH destination, for example:
+    CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 clihost-sync.sh pull
+    CLIHOST_SSH_TARGET=hapi@127.0.0.1 CLIHOST_SSH_PORT=2222 clihost-sync.sh ssh
+EOF
+}
+
+quote_join() {
+  local out=""
+  local quoted
+  local arg
+  for arg in "$@"; do
+    printf -v quoted "%q" "${arg}"
+    if [ -n "${out}" ]; then
+      out="${out} ${quoted}"
+    else
+      out="${quoted}"
+    fi
+  done
+  printf "%s\n" "${out}"
+}
+
+reject_option_like() {
+  local label="$1"
+  local value="$2"
+
+  case "${value}" in
+    -*) die "${label} must not start with '-' (got: ${value})" ;;
   esac
 }
 
@@ -411,91 +422,6 @@ direction="$4"
 include_private_keys="$5"
 ssh_dir="${remote_home}/.ssh"
 
-path_mode() {
-  local path="$1"
-
-  if stat -c '%a' "${path}" >/dev/null 2>&1; then
-    stat -c '%a' "${path}"
-  else
-    stat -f '%Lp' "${path}"
-  fi
-}
-
-reject_control_chars() {
-  local label="$1"
-  local value="$2"
-
-  case "${value}" in
-    *$'\n'*|*$'\r'*) die "${label} must not contain control characters" ;;
-  esac
-  if LC_ALL=C printf '%s' "${value}" | grep -q '[[:cntrl:]]'; then
-    die "${label} must not contain control characters"
-  fi
-}
-
-reject_group_or_other_permissions() {
-  local path="$1"
-  local expected="$2"
-  local label="$3"
-  local mode
-  local mode_value
-
-  mode="$(path_mode "${path}")" || die "cannot inspect permissions for ${path}"
-  mode_value=$((8#${mode}))
-  if (( mode_value & 077 )); then
-    die "${label} permissions must be ${expected} or stricter; got ${mode} at ${path}"
-  fi
-}
-
-is_private_key_file() {
-  local path="$1"
-
-  [ -f "${path}" ] || return 1
-  LC_ALL=C tr -d '\r' < "${path}" 2>/dev/null \
-    | grep -Eq -- '^-+BEGIN [A-Z0-9 ]*PRIVATE KEY-+$'
-}
-
-validate_default_public_ssh_material() {
-  local path
-
-  for path in "${ssh_dir}/known_hosts" "${ssh_dir}/config" "${ssh_dir}"/*.pub; do
-    [ -e "${path}" ] || continue
-    [ -f "${path}" ] || continue
-    if is_private_key_file "${path}"; then
-      die "default SSH public material contains private key block: ${path}"
-    fi
-  done
-}
-
-validate_private_key_permissions() {
-  local path
-
-  [ -d "${ssh_dir}" ] || return 0
-  while IFS= read -r -d '' path; do
-    if is_private_key_file "${path}"; then
-      reject_group_or_other_permissions "${path}" "600" "private key"
-    fi
-  done < <(find "${ssh_dir}" -type f -print0 2>/dev/null)
-}
-
-private_key_include_rule() {
-  local rel="$1"
-  local rule
-
-  reject_control_chars "SSH private key filename" "${rel}"
-  case "${rel}" in
-    *'*'*|*'?'*|*'['*|*']'*)
-      die "SSH private key filename must not contain rsync filter metacharacters: ${rel}"
-      ;;
-  esac
-  rule="--include=/${rel}"
-  case "${rule}" in
-    --include=/*) printf '%s\n' "${rule}" ;;
-    -*) die "generated rsync include rule must not start with '-' (got: ${rule})" ;;
-    *) die "invalid generated rsync include rule: ${rule}" ;;
-  esac
-}
-
 print_private_key_includes() {
   local path
   local rel
@@ -516,9 +442,9 @@ case "${action}" in
       [ -d "${ssh_dir}" ] || die "source SSH directory not found: ${ssh_dir}"
       reject_group_or_other_permissions "${ssh_dir}" "700" ".ssh directory"
       guard_remote_tree_no_symlinks "${ssh_dir}"
-      validate_private_key_permissions
+      validate_private_key_permissions "${ssh_dir}"
       if [ "${include_private_keys}" != "true" ]; then
-        validate_default_public_ssh_material
+        validate_default_public_ssh_material "${ssh_dir}"
       fi
     else
       if [ -e "${ssh_dir}" ]; then
