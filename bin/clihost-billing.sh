@@ -473,6 +473,16 @@ cmd_restart() {
 # that have been continuously orphaned for the full retention window. An app is
 # not orphaned if it still exists in Dokku OR any Docker container references
 # its directory. Discovery failures abort before deletion; apply is opt-in.
+#
+# Eligibility is sampled once per invocation (daily, per the generated
+# cron-line), not observed continuously: a directory that is reused and
+# re-orphaned entirely within the gap between two consecutive scans is
+# invisible to this check, since only a scan that observes the directory
+# active resets its tracked first-seen time. Worst case this shifts a
+# deletion's *true* continuous-orphan age by up to one scan interval
+# (~24h with the shipped daily cron) short of CLIHOST_GC_RETENTION_DAYS —
+# closing that gap fully would require event-based hooks into Dokku
+# app create/destroy rather than periodic sampling, which is out of scope.
 cmd_gc_mounts() {
   local apply="false"
   local yes="false"

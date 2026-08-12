@@ -378,6 +378,14 @@ observation and prints what would be deleted without deleting it.
 `cron-line` includes a daily `gc-mounts --apply --yes` entry; installing that
 line is the explicit operator opt-in to automatic cleanup.
 
+Eligibility is sampled once per scan (daily, per the generated cron-line), not
+observed continuously: only a scan that catches a directory active resets its
+tracked first-seen time, so a reuse-and-reorphan cycle squeezed entirely inside
+one scan interval is invisible. Worst case, a deletion's true continuous-orphan
+age can be short of `CLIHOST_GC_RETENTION_DAYS` by up to one scan interval
+(~24h with the shipped daily cron) — closing that gap fully would need
+event-based hooks into Dokku app create/destroy rather than periodic sampling.
+
 **Verification:** `python -m pytest tests/unit/test_clihost_billing_agg.py
 tests/unit/test_shell_scripts.py`; on the server, copy both files to
 `/home/dokku/bin/`, run `clihost-billing.sh collect` a few times with a pause,
