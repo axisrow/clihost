@@ -125,10 +125,9 @@ class TestTerminalPageCsrfRefresh(unittest.TestCase):
     tabs can keep uploading images after the original token expires."""
 
     @patch("ttydproxy.app.render_terminal_page", return_value="<html></html>")
-    @patch("ttydproxy.app.ttyd_manager")
-    def test_terminal_page_sets_csrf_cookie(self, mock_manager, _mock_render):
-        mock_manager.get_terminal.return_value = {"id": 1, "port": 7681}
+    def test_terminal_page_sets_csrf_cookie(self, _mock_render):
         handler = RecordingHandler()
+        handler.manager.get_terminal.return_value = {"id": 1, "port": 7681}
         handler.path = "/ttyd1"
         captured = {}
 

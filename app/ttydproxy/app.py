@@ -6,6 +6,7 @@ import pwd
 import sys
 import signal
 import time
+from dataclasses import dataclass
 from http.server import ThreadingHTTPServer
 from shutil import which
 from urllib.parse import parse_qs, urlparse
@@ -51,14 +52,6 @@ from ttydproxy.security import (
 from ttydproxy.views import load_dashboard_hapi_url, load_ssh_url, render_login_page, render_menu_page, render_terminal_page, resolve_vkbd_enabled
 
 
-_SERVER_START_TIME = time.time()
-ttyd_manager = TTYDManager(
-    base_port=TTYD_BASE_PORT,
-    max_terminals=MAX_TERMINALS,
-    ttyd_user=TTYD_USER,
-)
-login_rate_limiter = RateLimiter(max_attempts=5, window_seconds=60)
-account_rate_limiter = RateLimiter(max_attempts=5, window_seconds=300)
 MAX_CLEANUP_DELETE_IDS = 50
 MAX_CLEANUP_TARGET_ID_LENGTH = 128
 # A favicon that failed to load (None) is dropped from the routes so one
@@ -68,7 +61,48 @@ FAVICON_ROUTES = {
     for icon in assets.FAVICONS
     if icon.body is not None
 }
-_HAPI_AVAILABLE = which("hapi") is not None
+
+
+@dataclass(frozen=True)
+class AppSettings:
+    """Runtime values consumed by the HTTP application."""
+
+    port: int = PORT
+    ttyd_user: str = TTYD_USER
+    ttyd_password: str = TTYD_PASSWORD
+    password_secret: str = PASSWORD_SECRET
+    ttyd_base_port: int = TTYD_BASE_PORT
+    cleanup_root: str = CLEANUP_ROOT
+    hapi_home: str = HAPI_HOME
+    max_terminals: int = MAX_TERMINALS
+    session_timeout: int = SESSION_TIMEOUT
+    virtual_keyboard: bool = VIRTUAL_KEYBOARD
+    csrf_token_ttl: int = CSRF_TOKEN_TTL
+    secure_cookies: bool = SECURE_COOKIES
+    hapi_url_file: str = HAPI_URL_FILE
+    ssh_url_file: str = SSH_URL_FILE
+    max_upload_size: int = MAX_UPLOAD_SIZE
+    upload_dir: str = UPLOAD_DIR
+    ttyd_route_pattern: object = TTYD_ROUTE_PATTERN
+    max_terminal_id_digits: int = MAX_TERMINAL_ID_DIGITS
+    request_timeout: int = REQUEST_TIMEOUT
+    hapi_available: bool = False
+
+
+@dataclass(frozen=True)
+class AppLimiters:
+    """Rate limiters used by the login boundary."""
+
+    login: RateLimiter
+    account: RateLimiter
+
+
+@dataclass(frozen=True)
+class AppContext:
+    settings: AppSettings
+    manager: TTYDManager
+    limiters: AppLimiters
+    server_start_time: float
 
 
 def _get_memory_rss_mb():
@@ -87,49 +121,68 @@ def _get_memory_rss_mb():
 class TTYDProxyHandler(BaseHandler):
     """HTTP request handler for ttyd proxy routes."""
 
+    context = None
+    GET_ROUTES = {
+        "/": "handle_menu",
+        "/login": "handle_login_page",
+        "/health": "handle_health",
+        "/cleanup": "handle_cleanup_list",
+        "/terminals": "handle_terminals_list",
+    }
+    POST_ROUTES = {
+        "/login": "handle_login",
+        "/cleanup/delete": "handle_cleanup_delete",
+        "/terminals": "handle_terminals_create",
+        "/upload": "handle_upload",
+    }
+
     # Socket read timeout applied per connection by BaseHTTPRequestHandler
     # (setup() calls self.connection.settimeout(self.timeout)). Caps slow-client
     # (slowloris) threads that would otherwise block header parsing and body
     # reads forever on a ThreadingHTTPServer worker (#101/#2).
     timeout = REQUEST_TIMEOUT
 
+    @property
+    def settings(self):
+        if self.context is None:
+            raise RuntimeError("TTYDProxyHandler must be configured with create_app()")
+        return self.context.settings
+
+    @property
+    def manager(self):
+        if self.context is None:
+            raise RuntimeError("TTYDProxyHandler must be configured with create_app()")
+        return self.context.manager
+
+    def _dispatch(self, path, routes):
+        """Dispatch an exact route and report whether it matched."""
+        method_name = routes.get(path)
+        if method_name is None:
+            return False
+        getattr(self, method_name)()
+        return True
+
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/":
-            self.handle_menu()
-        elif parsed.path in FAVICON_ROUTES:
+        if self._dispatch(parsed.path, self.GET_ROUTES):
+            return
+        if parsed.path in FAVICON_ROUTES:
             self.handle_favicon(parsed.path)
-        elif parsed.path == "/login":
-            self.handle_login_page()
-        elif parsed.path == "/health":
-            self.handle_health()
-        elif parsed.path == "/cleanup":
-            self.handle_cleanup_list()
-        elif parsed.path == "/terminals":
-            self.handle_terminals_list()
+            return
+        match = self.settings.ttyd_route_pattern.match(parsed.path)
+        if not match:
+            self.send_json(404, {"error": "Not found"})
+            return
+        terminal_id = int(match.group(1))
+        sub_path = match.group(2)
+        if sub_path:
+            self.handle_ttyd_proxy(terminal_id)
         else:
-            match = TTYD_ROUTE_PATTERN.match(parsed.path)
-            if not match:
-                self.send_json(404, {"error": "Not found"})
-                return
-            terminal_id = int(match.group(1))
-            sub_path = match.group(2)
-            if sub_path:
-                self.handle_ttyd_proxy(terminal_id)
-            else:
-                self.handle_ttyd(terminal_id)
+            self.handle_ttyd(terminal_id)
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/login":
-            self.handle_login()
-        elif parsed.path == "/cleanup/delete":
-            self.handle_cleanup_delete()
-        elif parsed.path == "/terminals":
-            self.handle_terminals_create()
-        elif parsed.path == "/upload":
-            self.handle_upload()
-        else:
+        if not self._dispatch(parsed.path, self.POST_ROUTES):
             self.send_json(404, {"error": "Not found"})
 
     def do_DELETE(self):
@@ -142,17 +195,17 @@ class TTYDProxyHandler(BaseHandler):
             len(parts) == 3
             and parts[1] == "terminals"
             and parts[2].isdigit()
-            and len(parts[2]) <= MAX_TERMINAL_ID_DIGITS
+            and len(parts[2]) <= self.settings.max_terminal_id_digits
         ):
             self.handle_terminals_delete(int(parts[2]))
             return
         self.send_json(404, {"error": "Not found"})
 
     def _secure_flag(self):
-        return " Secure;" if SECURE_COOKIES else ""
+        return " Secure;" if self.settings.secure_cookies else ""
 
     def _auth_cookie_headers(self):
-        csrf_token = build_csrf_token(PASSWORD_SECRET)
+        csrf_token = build_csrf_token(self.settings.password_secret)
         return {
             "Set-Cookie": f"csrf_token={csrf_token}; Path=/; SameSite=Lax;{self._secure_flag()}",
         }, csrf_token
@@ -163,7 +216,7 @@ class TTYDProxyHandler(BaseHandler):
 
     def _session_username(self):
         token = self._cookie("ttyd_session")
-        return parse_session_token(token, PASSWORD_SECRET)
+        return parse_session_token(token, self.settings.password_secret)
 
     def _check_auth(self, redirect=False):
         username = self._session_username()
@@ -210,7 +263,7 @@ class TTYDProxyHandler(BaseHandler):
             self.send_json(status, {"error": missing_error})
             return False
         if not hmac.compare_digest(provided_token, csrf_cookie) or not parse_csrf_token(
-            provided_token, PASSWORD_SECRET, CSRF_TOKEN_TTL
+            provided_token, self.settings.password_secret, self.settings.csrf_token_ttl
         ):
             self.send_json(status, {"error": invalid_error})
             return False
@@ -294,10 +347,10 @@ class TTYDProxyHandler(BaseHandler):
         self.send_binary(200, body, content_type)
 
     def handle_health(self):
-        terminals = ttyd_manager.list_terminals()
+        terminals = self.manager.list_terminals()
         response = {
             "status": "ok",
-            "uptime": int(time.time() - _SERVER_START_TIME),
+            "uptime": int(time.time() - self.context.server_start_time),
             "ttyd": "running" if terminals else "no terminals",
             "terminal_count": len(terminals),
             "terminals": [{"id": terminal["id"], "alive": True} for terminal in terminals],
@@ -311,22 +364,22 @@ class TTYDProxyHandler(BaseHandler):
         username = self._check_auth()
         if not username:
             return
-        self.send_json(200, {"terminals": ttyd_manager.list_terminals()})
+        self.send_json(200, {"terminals": self.manager.list_terminals()})
 
     def handle_cleanup_list(self):
         username = self._check_auth()
         if not username:
             return
-        targets = list_cleanup_targets(CLEANUP_ROOT, HAPI_HOME)
+        targets = list_cleanup_targets(self.settings.cleanup_root, self.settings.hapi_home)
         self.send_json(200, {"targets": targets, "summary": summarize_cleanup_targets(targets)})
 
     def handle_terminals_create(self):
         username = self._check_auth()
         if not username or not self._check_csrf():
             return
-        result = ttyd_manager.create_terminal(wait=True)
+        result = self.manager.create_terminal(wait=True)
         if result == "limit":
-            self.send_json(429, {"error": f"Terminal limit reached (max {MAX_TERMINALS})"})
+            self.send_json(429, {"error": f"Terminal limit reached (max {self.settings.max_terminals})"})
             return
         if not result:
             self.send_json(500, {"error": "Failed to create terminal"})
@@ -337,7 +390,7 @@ class TTYDProxyHandler(BaseHandler):
         username = self._check_auth()
         if not username or not self._check_csrf():
             return
-        if ttyd_manager.delete_terminal(terminal_id):
+        if self.manager.delete_terminal(terminal_id):
             self.send_json(200, {"deleted": terminal_id})
         else:
             self.send_json(404, {"error": f"Terminal {terminal_id} not found"})
@@ -346,14 +399,14 @@ class TTYDProxyHandler(BaseHandler):
         username = self._check_auth()
         if not username or not self._check_csrf():
             return
-        data = self._read_binary_request_body(MAX_UPLOAD_SIZE)
+        data = self._read_binary_request_body(self.settings.max_upload_size)
         if data is None:
             return
         if not data:
             self.send_json(400, {"error": "Empty upload"})
             return
         try:
-            path = save_upload(data, UPLOAD_DIR, TTYD_USER)
+            path = save_upload(data, self.settings.upload_dir, self.settings.ttyd_user)
         except ValueError as exc:
             # save_upload is the single validator and owns the message.
             self.send_json(415, {"error": str(exc)})
@@ -386,11 +439,16 @@ class TTYDProxyHandler(BaseHandler):
             self.send_json(400, {"error": f"ids must be at most {MAX_CLEANUP_TARGET_ID_LENGTH} characters long"})
             return
 
-        self.send_json(200, delete_cleanup_targets(target_ids, CLEANUP_ROOT, HAPI_HOME))
+        self.send_json(
+            200,
+            delete_cleanup_targets(
+                target_ids, self.settings.cleanup_root, self.settings.hapi_home
+            ),
+        )
 
     def handle_login(self):
         client_ip = self.client_address[0]
-        if not login_rate_limiter.is_allowed(client_ip):
+        if not self.context.limiters.login.is_allowed(client_ip):
             self.send_json(429, {"error": "Too many login attempts. Please try again later."})
             return
 
@@ -411,13 +469,13 @@ class TTYDProxyHandler(BaseHandler):
         if not username:
             self.send_json(400, {"error": "Username required"})
             return
-        if not account_rate_limiter.is_allowed(f"{client_ip}:{username}"):
+        if not self.context.limiters.account.is_allowed(f"{client_ip}:{username}"):
             self.send_json(429, {"error": "Too many login attempts. Please try again later."})
             return
         if not is_valid_username(username):
             self.send_json(400, {"error": "Invalid username format"})
             return
-        if TTYD_PASSWORD and password != TTYD_PASSWORD:
+        if self.settings.ttyd_password and password != self.settings.ttyd_password:
             time.sleep(0.5)
             self.send_json(401, {"error": "Invalid password"})
             return
@@ -425,7 +483,7 @@ class TTYDProxyHandler(BaseHandler):
             time.sleep(0.5)
             self.send_json(401, {"error": "Invalid credentials"})
             return
-        if not TTYD_PASSWORD:
+        if not self.settings.ttyd_password:
             if not password:
                 self.send_json(400, {"error": "Password required"})
                 return
@@ -434,12 +492,14 @@ class TTYDProxyHandler(BaseHandler):
                 self.send_json(401, {"error": "Invalid credentials"})
                 return
 
-        session_token = build_session_token(username, PASSWORD_SECRET, SESSION_TIMEOUT)
+        session_token = build_session_token(
+            username, self.settings.password_secret, self.settings.session_timeout
+        )
         self.send_response(302)
         self.send_header("Location", "/")
         self.send_header(
             "Set-Cookie",
-            f"ttyd_session={session_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TIMEOUT};{self._secure_flag()}",
+            f"ttyd_session={session_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={self.settings.session_timeout};{self._secure_flag()}",
         )
         self.end_headers()
 
@@ -449,22 +509,22 @@ class TTYDProxyHandler(BaseHandler):
             return
         extra_headers, _csrf_token = self._auth_cookie_headers()
         hapi_url = load_dashboard_hapi_url(
-            HAPI_HOME,
-            HAPI_URL_FILE,
-            hapi_available=_HAPI_AVAILABLE,
+            self.settings.hapi_home,
+            self.settings.hapi_url_file,
+            hapi_available=self.settings.hapi_available,
         )
-        ssh_conn = load_ssh_url(SSH_URL_FILE)
+        ssh_conn = load_ssh_url(self.settings.ssh_url_file)
         self.send_html(200, render_menu_page(username, hapi_url, ssh_conn), extra_headers=extra_headers)
 
     def handle_ttyd(self, terminal_id):
         username = self._check_auth(redirect=True)
         if not username:
             return
-        terminal = ttyd_manager.get_terminal(terminal_id)
+        terminal = self.manager.get_terminal(terminal_id)
         if not terminal:
             self.send_json(404, {"error": f"Terminal ttyd{terminal_id} not found"})
             return
-        vkbd_enabled = resolve_vkbd_enabled(self.path, VIRTUAL_KEYBOARD)
+        vkbd_enabled = resolve_vkbd_enabled(self.path, self.settings.virtual_keyboard)
         # Refresh the CSRF cookie: image uploads from a long-lived terminal
         # tab must not outlive the token minted on the last dashboard visit.
         extra_headers, _csrf_token = self._auth_cookie_headers()
@@ -478,7 +538,7 @@ class TTYDProxyHandler(BaseHandler):
         username = self._check_auth()
         if not username:
             return
-        with ttyd_manager.lease_terminal(terminal_id) as terminal:
+        with self.manager.lease_terminal(terminal_id) as terminal:
             if not terminal:
                 self.send_json(404, {"error": f"Terminal ttyd{terminal_id} not found"})
                 return
@@ -496,7 +556,19 @@ class TTYDProxyHandler(BaseHandler):
                 proxy_ttyd_http(self, upstream_path, port)
 
 
-def _warn_on_user_mismatch():
+def create_app(settings, manager, limiters):
+    """Create a request-handler class bound to explicit application dependencies."""
+    context = AppContext(settings, manager, limiters, time.time())
+
+    class ConfiguredTTYDProxyHandler(TTYDProxyHandler):
+        pass
+
+    ConfiguredTTYDProxyHandler.context = context
+    ConfiguredTTYDProxyHandler.timeout = settings.request_timeout
+    return ConfiguredTTYDProxyHandler
+
+
+def _warn_on_user_mismatch(ttyd_user=TTYD_USER):
     """Warn when running unprivileged as a user other than TTYD_USER."""
     if os.geteuid() == 0:
         return
@@ -504,22 +576,36 @@ def _warn_on_user_mismatch():
         current_user = pwd.getpwuid(os.geteuid()).pw_name
     except KeyError:
         current_user = f"uid {os.geteuid()}"
-    if current_user != TTYD_USER:
+    if current_user != ttyd_user:
         print(
             f"WARNING: proxy running as {current_user}, not root; cannot switch to "
-            f"TTYD_USER={TTYD_USER} — terminals will run as {current_user}",
+            f"TTYD_USER={ttyd_user} — terminals will run as {current_user}",
             file=sys.stderr,
             flush=True,
         )
 
 
-def main():
+def main(settings=None, manager=None, limiters=None):
     """Start the ttyd proxy server."""
-    _warn_on_user_mismatch()
-    server_address = ("0.0.0.0", PORT)
+    if settings is None:
+        settings = AppSettings(hapi_available=which("hapi") is not None)
+    if manager is None:
+        manager = TTYDManager(
+            base_port=settings.ttyd_base_port,
+            max_terminals=settings.max_terminals,
+            ttyd_user=settings.ttyd_user,
+        )
+    if limiters is None:
+        limiters = AppLimiters(
+            login=RateLimiter(max_attempts=5, window_seconds=60),
+            account=RateLimiter(max_attempts=5, window_seconds=300),
+        )
+
+    _warn_on_user_mismatch(settings.ttyd_user)
+    server_address = ("0.0.0.0", settings.port)
     print(f"Starting TTYD HTTP proxy on {server_address}...", flush=True)
 
-    info = ttyd_manager.create_terminal(wait=True)
+    info = manager.create_terminal(wait=True)
     if info:
         print(f"Auto-created terminal ttyd{info['id']} on port {info['port']}", flush=True)
     else:
@@ -527,22 +613,28 @@ def main():
 
     # Background reaper: a ttyd that dies while no one lists/gets it (or polls
     # /health) would otherwise stay a defunct zombie holding its PID slot (#7).
-    ttyd_manager.start_reaper()
+    manager.start_reaper()
 
     try:
-        httpd = ThreadingHTTPServer(server_address, TTYDProxyHandler)
+        httpd = ThreadingHTTPServer(
+            server_address, create_app(settings, manager, limiters)
+        )
         httpd.daemon_threads = True
     except OSError as exc:
-        print(f"ERROR: Cannot bind to port {PORT}: {exc}", file=sys.stderr, flush=True)
+        print(
+            f"ERROR: Cannot bind to port {settings.port}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
         sys.exit(1)
 
     def signal_handler(signum, _frame):
         print(f"Received signal {signum}, shutting down gracefully...", flush=True)
-        ttyd_manager.stop_reaper()
-        with ttyd_manager.lock:
-            terminal_ids = list(ttyd_manager.terminals.keys())
+        manager.stop_reaper()
+        with manager.lock:
+            terminal_ids = list(manager.terminals.keys())
         for terminal_id in terminal_ids:
-            ttyd_manager.delete_terminal(terminal_id)
+            manager.delete_terminal(terminal_id)
         # Never call httpd.shutdown() here: the handler runs in the main
         # thread, which is inside serve_forever(); shutdown() waits for
         # serve_forever() to exit and deadlocks. SystemExit unwinds
@@ -552,7 +644,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    print(f"TTYD HTTP proxy listening on port {PORT}", flush=True)
+    print(f"TTYD HTTP proxy listening on port {settings.port}", flush=True)
     try:
         httpd.serve_forever()
     except Exception as exc:

@@ -1,5 +1,8 @@
 """Shared test stubs for TTYDProxyHandler-based API tests."""
-from ttydproxy.app import TTYDProxyHandler
+import time
+from unittest.mock import MagicMock
+
+from ttydproxy.app import AppContext, AppLimiters, AppSettings, TTYDProxyHandler
 
 
 class RecordingHandler(TTYDProxyHandler):
@@ -8,6 +11,12 @@ class RecordingHandler(TTYDProxyHandler):
 
     def __init__(self):
         self.response = None
+        self.context = AppContext(
+            settings=AppSettings(),
+            manager=MagicMock(),
+            limiters=AppLimiters(login=MagicMock(), account=MagicMock()),
+            server_start_time=time.time(),
+        )
 
     def send_json(self, status, data, extra_headers=None):
         del extra_headers
