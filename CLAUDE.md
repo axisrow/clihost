@@ -114,7 +114,7 @@ SSH Client → sshd (22) → shell
 hapi Client → HTTP API (HAPI_PORT) → hapi runner
 ```
 
-**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → copy the default Claude Code settings from `/etc/skel/.claude/settings.json` to `/home/hapi/.claude/settings.json` only if missing → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → optionally start ao daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → drop any stale dashboard URL → if `hapi` is installed, start `hapi server --relay`, write a best-effort legacy connection URL file, and optionally start hapi runner (otherwise warn and skip) → `exec sshd`.
+**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → copy the default Claude Code settings from `/etc/skel/.claude/settings.json` to `/home/hapi/.claude/settings.json` only if missing → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → optionally start ao daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → drop any stale dashboard URL → if `hapi` is installed, start `hapi server --relay`, write a best-effort legacy connection URL file, and optionally start hapi runner (otherwise warn and skip) → `exec "$@"` (the Docker CMD defaults to sshd; `docker run IMAGE <command>` overrides it).
 
 **Volume mount:** `/home/hapi` — persistent runner state, logs, configs. The mount overwrites permissions, hence the permission fixes in entrypoint.sh. **Mount at exactly `/home/hapi`, never the parent `/home`** (issue #69): a Docker volume is seeded from the image only while empty, so a persistent `/home` that survives one deploy stops being re-seeded — the entrypoint then recreates `/home/hapi/.claude` empty on top of it and the saved Claude Code login (`CLAUDE_CONFIG_DIR=/home/hapi/.claude`, set in the Dockerfile) is lost on every redeploy ("auth keeps resetting"). Mounting `/home/hapi` keeps the home dir itself as the persisted unit. Verified in Docker: a non-empty `/home` volume drops the creds on container recreate, a non-empty `/home/hapi` volume keeps them. **Migration caveat:** an existing `/home` volume holds its data under a `hapi/` subdir, so naively retargeting the *same* volume to `/home/hapi` buries it at `/home/hapi/hapi/` (invisible to the app) — move the volume's `hapi/` contents to its root first, or copy them into a fresh `/home/hapi` volume. The entrypoint warning spells this out at startup.
 
@@ -500,7 +500,7 @@ Update `.env.example` when adding/changing variables.
 
 ## Coding Conventions
 
-> A shorter `AGENTS.md` exists at the repo root for non-Claude agents. It overlaps with this file but is less detailed and partially stale (e.g. it still lists a `volume/hapi/` dir and a `3006` port mapping). When the two disagree, **CLAUDE.md is authoritative**; keep `AGENTS.md` roughly in sync when you change conventions here.
+> A shorter `AGENTS.md` exists at the repo root for non-Claude agents. It overlaps with this file but is less detailed. When the two disagree, **CLAUDE.md is authoritative**; keep `AGENTS.md` in sync when you change conventions here.
 
 - Shell scripts use Bash with `set -euo pipefail`
 - Environment variables are UPPERCASE with defaults via `${VAR:=default}`

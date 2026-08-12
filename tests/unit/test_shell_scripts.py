@@ -132,10 +132,10 @@ class TestEntrypointRegressions(unittest.TestCase):
         # user dotfiles, and do it before ttyd or ssh can start a shell.
         local_env_pos = self.text.find('LOCAL_BIN_ENV="${LOCAL_BIN_DIR}/env"')
         proxy_pos = self.text.find('runuser -u "${TTYD_USER}" -- python3')
-        sshd_pos = self.text.find("exec /usr/sbin/sshd -D -e")
+        command_pos = self.text.find('exec "$@"')
         self.assertGreater(local_env_pos, -1, "LOCAL_BIN_ENV bootstrap is missing")
         self.assertLess(local_env_pos, proxy_pos)
-        self.assertLess(local_env_pos, sshd_pos)
+        self.assertLess(local_env_pos, command_pos)
         self.assertIn('mkdir -p "${LOCAL_BIN_DIR}"', self.text)
         self.assertIn('[ ! -e "${LOCAL_BIN_ENV}" ]', self.text)
         self.assertIn("cat > \"${LOCAL_BIN_ENV}\" <<'EOF'", self.text)
@@ -2438,10 +2438,11 @@ class TestEntrypointRelayUrlDelegation(unittest.TestCase):
 class TestDockerEntrypointSignals(unittest.TestCase):
     """B13: tini must forward signals to the whole process group (-g).
 
-    entrypoint.sh `exec`s sshd after backgrounding the ttyd proxy / hapi server
-    / droid daemon, which are reparented to tini (PID 1). Without -g, tini only
-    SIGTERMs its direct child (sshd); the reparented children are SIGKILLed
-    after the grace period. -g makes `docker stop` reach them gracefully.
+    entrypoint.sh `exec`s the configured Docker command after backgrounding the
+    ttyd proxy / hapi server / droid daemon, which are reparented to tini
+    (PID 1). Without -g, tini only SIGTERMs its direct child; the reparented
+    children are SIGKILLed after the grace period. -g makes `docker stop` reach
+    them gracefully.
 
     A full repro needs tini as PID 1 inside a container (out of unit scope), so
     this pins the fix statically.
@@ -2454,6 +2455,13 @@ class TestDockerEntrypointSignals(unittest.TestCase):
             dockerfile,
             "tini must run with -g so SIGTERM reaches reparented children (B13)",
         )
+
+    def test_entrypoint_executes_docker_command(self):
+        dockerfile = DOCKERFILE.read_text()
+        entrypoint = ENTRYPOINT.read_text()
+        self.assertIn('CMD ["/usr/sbin/sshd", "-D", "-e"]', dockerfile)
+        self.assertIn('exec "$@"', entrypoint)
+        self.assertNotIn("exec /usr/sbin/sshd -D -e", entrypoint)
 
 
 class TestBuildShGetVersion(unittest.TestCase):
