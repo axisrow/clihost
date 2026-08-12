@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -20,6 +21,7 @@ CLAUDE_AUTH_SNAPSHOT = REPO_ROOT / "bin/claude-auth-snapshot.sh"
 CLAUDE_AUTH_SNAPSHOT_HOST = REPO_ROOT / "bin/claude-auth-snapshot-host.sh"
 CLIHOST_SYNC = REPO_ROOT / "bin/clihost-sync.sh"
 CLIHOST_BILLING = REPO_ROOT / "bin/clihost-billing.sh"
+ENV_CONTRACT = REPO_ROOT / "bin/env-contract.sh"
 CLIHOST_BILLING_LIB = REPO_ROOT / "bin/clihost_billing_lib.py"
 README = REPO_ROOT / "README.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
@@ -53,6 +55,7 @@ class TestShellSyntax(unittest.TestCase):
             CLAUDE_AUTH_SNAPSHOT_HOST,
             CLIHOST_SYNC,
             CLIHOST_BILLING,
+            ENV_CONTRACT,
         ):
             with self.subTest(script=script.name):
                 result = subprocess.run(
@@ -108,13 +111,179 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertIn('install -m 400 -o "${TTYD_USER}"', self.text)
 
     def test_port_validated_numeric_before_range_check(self):
-        # A non-numeric PORT must fail loudly: `[ "$PORT" -lt 1024 ]` returns
-        # exit 2 (error, not "false"), so the range guard silently passes and
-        # the proxy starts on the default 8080. A numeric pre-check prevents it.
-        case_pos = self.text.find("*[!0-9]*")
-        range_pos = self.text.find('[ "${PORT}" -lt 1024 ]')
-        self.assertGreater(case_pos, -1, "PORT is not validated as numeric")
-        self.assertLess(case_pos, range_pos)
+        validation_pos = self.text.find("env_positive_int PORT 8080 1024 65535")
+        proxy_pos = self.text.find('runuser -u "${TTYD_USER}" -- python3')
+        self.assertGreater(validation_pos, -1, "PORT is not validated")
+        self.assertLess(validation_pos, proxy_pos)
+
+    def test_proxy_startup_is_verified_before_continuing(self):
+        # The strict env-parsing contract (#113) makes ttydproxy.config raise
+        # ValueError at import time for a malformed Python-owned var (e.g.
+        # MAX_TERMINALS, SECURE_COOKIES) that the shell-side contract does not
+        # validate. Backgrounding the proxy with a bare `&` and never checking
+        # it before `exec sshd` would leave the container "healthy" (sshd up)
+        # with its only HTTP service dead. The entrypoint must capture the
+        # proxy's PID and fail closed if it does not survive a short grace
+        # window.
+        proxy_launch_pos = self.text.find(
+            'runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &'
+        )
+        pid_capture_pos = self.text.find("PROXY_PID=$!")
+        sshd_pos = self.text.find("exec /usr/sbin/sshd -D -e")
+        self.assertGreater(proxy_launch_pos, -1, "proxy launch line not found")
+        self.assertGreater(
+            pid_capture_pos, -1,
+            "entrypoint.sh must capture the proxy PID ($!) to verify startup",
+        )
+        self.assertGreater(pid_capture_pos, proxy_launch_pos)
+        self.assertGreater(sshd_pos, -1)
+        self.assertLess(
+            pid_capture_pos, sshd_pos,
+            "PID capture must happen before exec sshd",
+        )
+        # A liveness check (kill -0) must run between the PID capture and the
+        # final exec, and abort (die/exit) on failure rather than continue
+        # with a dead proxy.
+        liveness_pos = self.text.find('kill -0 "${PROXY_PID}"')
+        self.assertGreater(
+            liveness_pos, -1,
+            "entrypoint.sh must verify the proxy process is still alive",
+        )
+        self.assertGreater(liveness_pos, pid_capture_pos)
+        self.assertLess(liveness_pos, sshd_pos)
+        self.assertIn("TTYD HTTP proxy exited immediately after startup", self.text)
+
+    def test_python_config_validated_before_destructive_actions(self):
+        # A malformed Python-owned var (MAX_TERMINALS, SECURE_COOKIES, etc.)
+        # must fail closed BEFORE cleanup_runner_state deletes persisted hapi
+        # state and before Hermes/Droid/AO daemons are touched — not only when
+        # the backgrounded proxy process itself imports ttydproxy.config later.
+        # Otherwise one config typo repeats destructive side effects on every
+        # crash-loop restart before the container ever fails closed (Codex,
+        # round 2).
+        preflight_pos = self.text.find("import ttydproxy.config")
+        cleanup_call_pos = self.text.find("cleanup_runner_state\n")
+        proxy_launch_pos = self.text.find(
+            'runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &'
+        )
+        self.assertGreater(
+            preflight_pos, -1,
+            "entrypoint.sh must import ttydproxy.config as a preflight check",
+        )
+        self.assertGreater(cleanup_call_pos, -1, "cleanup_runner_state call not found")
+        self.assertLess(
+            preflight_pos, cleanup_call_pos,
+            "Python config must be validated before cleanup_runner_state runs",
+        )
+        self.assertLess(preflight_pos, proxy_launch_pos)
+
+    def test_python_config_preflight_is_actually_fail_closed(self):
+        # Execute the real preflight block extracted from entrypoint.sh against
+        # a malformed and a valid Python-owned env var, proving the mechanism
+        # itself rejects bad config (and does so exactly like the strict
+        # ttydproxy.config parser would) rather than just checking the text is
+        # present.
+        match = re.search(
+            r"^clihost_preflight_err=.*?\n"
+            r"\[ \"\$\{clihost_preflight_status\}\" -eq 0 \] \|\| exit \"\$\{clihost_preflight_status\}\"\n",
+            self.text,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, "python config preflight block not found")
+        preflight_block = match.group(0).replace(
+            "PYTHONPATH=/app", f"PYTHONPATH={REPO_ROOT / 'app'}"
+        )
+
+        bad = subprocess.run(
+            ["bash", "-c", f'{preflight_block}\necho SURVIVED'],
+            capture_output=True, text=True,
+            env={**os.environ, "MAX_TERMINALS": "garbage"},
+        )
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("invalid TTYD proxy configuration", bad.stderr)
+        self.assertIn("MAX_TERMINALS", bad.stderr)
+        self.assertNotIn("SURVIVED", bad.stdout)
+
+        good_env = {k: v for k, v in os.environ.items() if k != "MAX_TERMINALS"}
+        good = subprocess.run(
+            ["bash", "-c", f'{preflight_block}\necho SURVIVED'],
+            capture_output=True, text=True, env=good_env,
+        )
+        self.assertEqual(good.returncode, 0, good.stderr)
+        self.assertIn("SURVIVED", good.stdout)
+
+    def test_python_config_preflight_refuses_preplanted_symlink(self):
+        # Issue found in round-3 review: a fixed, predictable stderr path in
+        # world-writable /tmp let an unprivileged user pre-plant a symlink
+        # before this root-run redirection opened it; a plain `2>path`
+        # follows an existing symlink and truncates its target. The fixed
+        # block must use an unpredictable name and refuse to write through
+        # any pre-existing path (symlink or regular file).
+        match = re.search(
+            r"^clihost_preflight_err=.*?\n"
+            r"\[ \"\$\{clihost_preflight_status\}\" -eq 0 \] \|\| exit \"\$\{clihost_preflight_status\}\"\n",
+            self.text,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, "python config preflight block not found")
+        preflight_block = match.group(0).replace(
+            "PYTHONPATH=/app", f"PYTHONPATH={REPO_ROOT / 'app'}"
+        )
+        self.assertIn("set -C", preflight_block)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = os.path.join(tmpdir, "protected-target")
+            with open(target, "w") as f:
+                f.write("PROTECTED CONTENT")
+
+            # Force the unpredictable filename to a known value so the test can
+            # pre-plant a symlink there deterministically.
+            fixed_name_block = preflight_block.replace(
+                'mktemp -u /tmp/clihost-config-preflight.XXXXXXXX.err',
+                f'echo {tmpdir}/clihost-config-preflight.err',
+            )
+            planted = os.path.join(tmpdir, "clihost-config-preflight.err")
+            os.symlink(target, planted)
+
+            subprocess.run(
+                ["bash", "-c", fixed_name_block],
+                capture_output=True, text=True,
+                env={**os.environ, "MAX_TERMINALS": "garbage"},
+            )
+
+            with open(target) as f:
+                self.assertEqual(
+                    f.read(), "PROTECTED CONTENT",
+                    "preflight redirection truncated a pre-planted symlink's target",
+                )
+
+    def test_proxy_liveness_check_is_actually_fail_closed(self):
+        # Execute the real PID-capture + kill -0 supervision block extracted
+        # from entrypoint.sh against a process that exits immediately (like
+        # ttyd_proxy.py would on a strict env ValueError) and one that stays
+        # alive, to prove the mechanism itself works, not just its presence.
+        match = re.search(
+            r'^sleep 1\nif ! kill -0 "\$\{PROXY_PID\}".*?\nfi\n',
+            self.text,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match, "proxy liveness check block not found")
+        liveness_block = match.group(0).replace("sleep 1", "sleep 0.1")
+
+        dying = subprocess.run(
+            ["bash", "-c", f'(exit 1) & PROXY_PID=$!\n{liveness_block}\necho SURVIVED'],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(dying.returncode, 0)
+        self.assertIn("exited immediately after startup", dying.stderr)
+        self.assertNotIn("SURVIVED", dying.stdout)
+
+        surviving = subprocess.run(
+            ["bash", "-c", f'sleep 5 & PROXY_PID=$!\n{liveness_block}\necho SURVIVED\nkill "$PROXY_PID"'],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(surviving.returncode, 0, surviving.stderr)
+        self.assertIn("SURVIVED", surviving.stdout)
 
     def test_upload_dir_prepared_before_proxy(self):
         # The unprivileged proxy creates upload files itself; a bind-mounted
@@ -131,10 +300,10 @@ class TestEntrypointRegressions(unittest.TestCase):
         # user dotfiles, and do it before ttyd or ssh can start a shell.
         local_env_pos = self.text.find('LOCAL_BIN_ENV="${LOCAL_BIN_DIR}/env"')
         proxy_pos = self.text.find('runuser -u "${TTYD_USER}" -- python3')
-        sshd_pos = self.text.find("exec /usr/sbin/sshd -D -e")
+        command_pos = self.text.find('exec "$@"')
         self.assertGreater(local_env_pos, -1, "LOCAL_BIN_ENV bootstrap is missing")
         self.assertLess(local_env_pos, proxy_pos)
-        self.assertLess(local_env_pos, sshd_pos)
+        self.assertLess(local_env_pos, command_pos)
         self.assertIn('mkdir -p "${LOCAL_BIN_DIR}"', self.text)
         self.assertIn('[ ! -e "${LOCAL_BIN_ENV}" ]', self.text)
         self.assertIn("cat > \"${LOCAL_BIN_ENV}\" <<'EOF'", self.text)
@@ -217,14 +386,11 @@ class TestEntrypointRegressions(unittest.TestCase):
     def test_ao_port_validated_numeric_in_daemon_gate(self):
         # AO_PORT is interpolated into the `ao daemon` launch string, so a
         # non-numeric value must fail loudly (mirrors PORT / CHISEL_REMOTE_PORT).
-        # The guard lives inside the AO_DAEMON_ENABLED gate so the default path
-        # (flag off) never validates a value it doesn't use.
         gate_pos = self.text.find('if [ "${AO_DAEMON_ENABLED}" = "true" ]; then')
         self.assertGreater(gate_pos, -1, "AO_DAEMON_ENABLED gate is missing")
-        check_pos = self.text.find(
-            "AO_PORT='${AO_PORT}' must be a positive integer", gate_pos
-        )
-        self.assertGreater(check_pos, gate_pos, "AO_PORT numeric check missing in gate")
+        check_pos = self.text.find("env_positive_int AO_PORT 3001 1 65535")
+        self.assertGreater(check_pos, -1, "AO_PORT numeric check missing")
+        self.assertLess(check_pos, gate_pos)
 
     def test_ssh_tunnel_env_defaults(self):
         # Pluggable SSH tunnel (issue #79): env defaults must be set so the gate
@@ -320,10 +486,12 @@ class TestEntrypointRegressions(unittest.TestCase):
         # CHISEL_REMOTE_PORT is interpolated into the R:<port>:... spec, so a
         # non-numeric value must fail loudly (like the PORT check), not silently
         # produce a broken forward.
-        self.assertIn(
-            "CHISEL_REMOTE_PORT='${CHISEL_REMOTE_PORT}' must be a positive integer",
-            self.text,
+        validation_pos = self.text.find(
+            "env_positive_int CHISEL_REMOTE_PORT 2222 1 65535"
         )
+        tunnel_pos = self.text.find('if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then')
+        self.assertGreater(validation_pos, -1)
+        self.assertLess(validation_pos, tunnel_pos)
 
     def test_ssh_tunnel_logs_via_redirect_not_tee(self):
         # Logging through a plain redirect (not `| tee`) keeps $! on the tunnel
@@ -1083,6 +1251,65 @@ class TestClihostSyncScript(unittest.TestCase):
         self.assertIn(".ssh", out["result"].stderr)
         self.assertIn("700", out["result"].stderr)
         self.assertEqual(out["rsync_args"], [])
+
+    def test_local_and_remote_ssh_validation_verdicts_are_equivalent(self):
+        def valid(home):
+            self._make_ssh_material(home)
+
+        def open_private_key(home):
+            self._make_ssh_material(home, key_mode=0o644)
+
+        def disguised_public_key(home):
+            ssh_dir = self._make_ssh_material(home)
+            (ssh_dir / "id_ed25519.pub").write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                "private-test-fixture\n"
+                "-----END OPENSSH PRIVATE KEY-----\n"
+            )
+
+        cases = (
+            ("valid", valid, True, ""),
+            ("open private key", open_private_key, False, "permissions"),
+            ("disguised public key", disguised_public_key, False, "private key"),
+        )
+        for name, make_material, accepted, error_fragment in cases:
+            with self.subTest(name=name):
+                local = self._run_sync(["ssh"], make_local=make_material)
+                remote = self._run_sync(
+                    ["ssh", "push"], make_remote=make_material,
+                )
+
+                self.assertEqual(local["result"].returncode == 0, accepted)
+                self.assertEqual(remote["result"].returncode == 0, accepted)
+                self.assertEqual(
+                    local["result"].returncode == 0,
+                    remote["result"].returncode == 0,
+                    (local["result"].stderr, remote["result"].stderr),
+                )
+                if error_fragment:
+                    self.assertIn(error_fragment, local["result"].stderr)
+                    self.assertIn(error_fragment, remote["result"].stderr)
+
+    def test_ssh_validators_are_defined_once_in_shared_prelude(self):
+        text = CLIHOST_SYNC.read_text()
+        validators = (
+            "path_mode",
+            "reject_control_chars",
+            "reject_group_or_other_permissions",
+            "is_private_key_file",
+            "validate_default_public_ssh_material",
+            "validate_private_key_permissions",
+            "private_key_include_rule",
+        )
+
+        self.assertIn("emit_ssh_validation_prelude() {", text)
+        for validator in validators:
+            with self.subTest(validator=validator):
+                self.assertEqual(
+                    text.count(f"{validator}() {{"),
+                    1,
+                    f"{validator} must be defined once in the shared prelude",
+                )
 
     def test_ssh_option_like_target_is_rejected_before_ssh_or_rsync(self):
         out = self._run_sync(
@@ -2378,10 +2605,11 @@ class TestEntrypointRelayUrlDelegation(unittest.TestCase):
 class TestDockerEntrypointSignals(unittest.TestCase):
     """B13: tini must forward signals to the whole process group (-g).
 
-    entrypoint.sh `exec`s sshd after backgrounding the ttyd proxy / hapi server
-    / droid daemon, which are reparented to tini (PID 1). Without -g, tini only
-    SIGTERMs its direct child (sshd); the reparented children are SIGKILLed
-    after the grace period. -g makes `docker stop` reach them gracefully.
+    entrypoint.sh `exec`s the configured Docker command after backgrounding the
+    ttyd proxy / hapi server / droid daemon, which are reparented to tini
+    (PID 1). Without -g, tini only SIGTERMs its direct child; the reparented
+    children are SIGKILLed after the grace period. -g makes `docker stop` reach
+    them gracefully.
 
     A full repro needs tini as PID 1 inside a container (out of unit scope), so
     this pins the fix statically.
@@ -2394,6 +2622,13 @@ class TestDockerEntrypointSignals(unittest.TestCase):
             dockerfile,
             "tini must run with -g so SIGTERM reaches reparented children (B13)",
         )
+
+    def test_entrypoint_executes_docker_command(self):
+        dockerfile = DOCKERFILE.read_text()
+        entrypoint = ENTRYPOINT.read_text()
+        self.assertIn('CMD ["/usr/sbin/sshd", "-D", "-e"]', dockerfile)
+        self.assertIn('exec "$@"', entrypoint)
+        self.assertNotIn("exec /usr/sbin/sshd -D -e", entrypoint)
 
 
 class TestBuildShGetVersion(unittest.TestCase):
@@ -2579,6 +2814,7 @@ class TestClihostBillingScript(unittest.TestCase):
             self.assertIn("collect", out.stdout)
             self.assertRegex(out.stdout, r"\*/\d+ \* \* \* \*")
             self.assertIn("crontab -e", out.stdout)
+            self.assertIn("gc-mounts --apply --yes", out.stdout)
 
     def test_report_on_synthetic_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2773,6 +3009,38 @@ printf '\n' >> "${CLIHOST_TEST_LOG}"
             self.assertNotEqual(out.returncode, 0)
             self.assertNotIn("restart", log.read_text())
 
+    def test_restart_accepts_app_after_option_terminator(self):
+        # `--` must stop option parsing without discarding the APP argument
+        # that follows it (a legitimate app name is not an option).
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            log = self._make_billing_control_fakes(tmp_path)
+            out = self._run(
+                ["restart", "--", "clihost-good"], tmp_path / "billing",
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_TEST_LOG": str(log)},
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn(
+                "would run: dokku ps:restart clihost-good", out.stdout
+            )
+
+    def test_restart_rejects_multiple_apps_after_option_terminator(self):
+        # A single `--` must still enforce "exactly one APP"; it is not a
+        # license to accept every remaining positional argument.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            log = self._make_billing_control_fakes(tmp_path)
+            out = self._run(
+                ["restart", "--", "clihost-good", "clihost-other"],
+                tmp_path / "billing",
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_TEST_LOG": str(log)},
+            )
+            self.assertNotEqual(out.returncode, 0)
+            self.assertIn("exactly one APP", out.stderr)
+            self.assertNotIn("restart", log.read_text())
+
     def test_restart_apply_requires_yes_in_non_tty(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
@@ -2792,6 +3060,139 @@ printf '\n' >> "${CLIHOST_TEST_LOG}"
             )
             self.assertEqual(applied.returncode, 0, applied.stderr)
             self.assertIn("dokku ps:restart clihost-good", log.read_text())
+
+    def _make_gc_fakes(self, tmp_path, *, apps="", mounts=""):
+        fake_dokku = tmp_path / "dokku"
+        fake_dokku.write_text(
+            "#!/bin/bash\n"
+            "if [ \"$1 $2\" = \"--quiet apps:list\" ]; then\n"
+            f"  printf '%s' {shlex.quote(apps)}\n"
+            "else\n"
+            "  exit 2\n"
+            "fi\n"
+        )
+        fake_dokku.chmod(0o755)
+        fake_docker = tmp_path / "docker"
+        fake_docker.write_text(
+            "#!/bin/bash\n"
+            "if [ \"$1\" = \"ps\" ]; then\n"
+            "  echo container-id\n"
+            "elif [ \"$1\" = \"inspect\" ]; then\n"
+            f"  printf '%s' {shlex.quote(mounts)}\n"
+            "else\n"
+            "  exit 2\n"
+            "fi\n"
+        )
+        fake_docker.chmod(0o755)
+
+    def test_gc_mounts_tracks_new_orphans_before_the_retention_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            storage = tmp_path / "storage"
+            orphan = storage / "clihost-orphan"
+            orphan.mkdir(parents=True)
+            (orphan / "credentials").write_text("keep")
+            self._make_gc_fakes(tmp_path)
+
+            out = self._run(
+                ["gc-mounts", "--apply", "--yes"], tmp_path / "billing",
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_STORAGE_ROOT": str(storage)},
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("tracking clihost-orphan", out.stdout)
+            self.assertTrue(orphan.is_dir())
+
+    def test_gc_mounts_deletes_only_eligible_unreferenced_orphans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            storage = tmp_path / "storage"
+            billing = tmp_path / "billing"
+            orphan = storage / "clihost-orphan"
+            live = storage / "clihost-live"
+            mounted = storage / "clihost-mounted"
+            for path in (orphan, live, mounted):
+                path.mkdir(parents=True)
+                (path / "credentials").write_text("keep")
+            self._make_gc_fakes(
+                tmp_path,
+                apps="clihost-live\n",
+                mounts=str(mounted) + "\n",
+            )
+            state_dir = billing / "state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "orphan-mounts.json").write_text(json.dumps({
+                "version": 1,
+                "orphans": {
+                    str(orphan): 0,
+                    str(live): 0,
+                    str(mounted): 0,
+                },
+            }))
+
+            out = self._run(
+                ["gc-mounts", "--apply", "--yes"], billing,
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_STORAGE_ROOT": str(storage)},
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("deleted clihost-orphan", out.stdout)
+            self.assertFalse(orphan.exists())
+            self.assertTrue(live.is_dir())
+            self.assertTrue(mounted.is_dir())
+
+    def test_gc_mounts_is_dry_run_and_requires_yes_for_non_tty_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            storage = tmp_path / "storage"
+            billing = tmp_path / "billing"
+            orphan = storage / "clihost-orphan"
+            orphan.mkdir(parents=True)
+            self._make_gc_fakes(tmp_path)
+            state_dir = billing / "state"
+            state_dir.mkdir(parents=True)
+            state = {"version": 1, "orphans": {str(orphan): 0}}
+            (state_dir / "orphan-mounts.json").write_text(json.dumps(state))
+
+            dry_run = self._run(
+                ["gc-mounts"], billing, extra_path=str(tmp_path),
+                env_extra={"CLIHOST_STORAGE_ROOT": str(storage)},
+            )
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            self.assertIn("would delete clihost-orphan", dry_run.stdout)
+            self.assertTrue(orphan.is_dir())
+
+            refused = self._run(
+                ["gc-mounts", "--apply"], billing, extra_path=str(tmp_path),
+                env_extra={"CLIHOST_STORAGE_ROOT": str(storage)},
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("non-TTY mode requires --yes", refused.stderr)
+            self.assertTrue(orphan.is_dir())
+
+    def test_gc_mounts_fails_closed_when_dokku_inventory_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            storage = tmp_path / "storage"
+            billing = tmp_path / "billing"
+            orphan = storage / "clihost-orphan"
+            orphan.mkdir(parents=True)
+            self._make_gc_fakes(tmp_path)
+            (tmp_path / "dokku").write_text("#!/bin/bash\nexit 3\n")
+            (tmp_path / "dokku").chmod(0o755)
+            state_dir = billing / "state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "orphan-mounts.json").write_text(json.dumps({
+                "version": 1, "orphans": {str(orphan): 0},
+            }))
+
+            out = self._run(
+                ["gc-mounts", "--apply", "--yes"], billing,
+                extra_path=str(tmp_path),
+                env_extra={"CLIHOST_STORAGE_ROOT": str(storage)},
+            )
+            self.assertNotEqual(out.returncode, 0)
+            self.assertTrue(orphan.is_dir())
 
     def test_collect_builds_samples_from_docker(self):
         with tempfile.TemporaryDirectory() as tmp:

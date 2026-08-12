@@ -11,11 +11,12 @@ set -euo pipefail
 #
 # Subcommands (PR1 + PR2 — accounting + report):
 #   collect     take one sample of every clihost-* container (cron-driven).
-#   cron-line   print a ready-to-paste crontab line (operator installs it).
+#   cron-line   print ready-to-paste collector and orphan-GC crontab lines.
 #   report      render an aggregated usage table (per app).
 #   raw         emit aggregated rows as JSON (machine-readable).
 #   diagnose    inspect the current container state and print a verdict.
 #   restart     safely restart one clihost app (dry-run by default).
+#   gc-mounts   remove app storage after 30 days continuously orphaned.
 #   help        usage.
 #
 # Storage is append-only JSONL under ${CLIHOST_BILLING_DIR:=/home/dokku/.clihost-billing}:
@@ -32,11 +33,14 @@ BILLING_LIB="${SCRIPT_DIR}/clihost_billing_lib.py"
 : "${CLIHOST_BILLING_DIR:=/home/dokku/.clihost-billing}"
 : "${CLIHOST_BILLING_INTERVAL:=300}"
 : "${CLIHOST_APP_PREFIX:=clihost-}"
+: "${CLIHOST_STORAGE_ROOT:=/var/lib/dokku/data/storage}"
+: "${CLIHOST_GC_RETENTION_DAYS:=30}"
 
 SAMPLES_DIR="${CLIHOST_BILLING_DIR}/samples"
 STATE_DIR="${CLIHOST_BILLING_DIR}/state"
 LOCK_FILE="${STATE_DIR}/collect.lock"
 LAST_COLLECT_FILE="${STATE_DIR}/last-collect.json"
+ORPHAN_MOUNTS_FILE="${STATE_DIR}/orphan-mounts.json"
 
 die() {
   echo "ERROR: $*" >&2
@@ -47,13 +51,16 @@ usage() {
   cat >&2 <<'EOF'
 Usage:
   clihost-billing.sh collect            take one sample of all clihost-* containers
-  clihost-billing.sh cron-line          print a crontab line to install the collector
+  clihost-billing.sh cron-line          print collector and orphan-GC crontab lines
   clihost-billing.sh report [--json]    aggregated usage table (per app)
   clihost-billing.sh raw                aggregated rows as JSON (alias for report --json)
   clihost-billing.sh diagnose [--app] APP
                                             inspect APP.web.1 (read-only)
   clihost-billing.sh restart APP [--apply] [--yes]
                                             restart APP (dry-run by default)
+  clihost-billing.sh gc-mounts [--apply] [--yes]
+                                            delete storage continuously orphaned
+                                            for the retention window (dry-run)
   clihost-billing.sh help               this message
 
 Environment:
@@ -61,6 +68,10 @@ Environment:
   CLIHOST_BILLING_INTERVAL  collector cadence in seconds (default: 300); used as
                             the gap-detection base (dt > 2.5x interval = server down)
   CLIHOST_APP_PREFIX        container/app name prefix to account (default: clihost-)
+  CLIHOST_STORAGE_ROOT      legacy Dokku storage root
+                            (default: /var/lib/dokku/data/storage)
+  CLIHOST_GC_RETENTION_DAYS days continuously orphaned before eligibility
+                            (default: 30)
 EOF
 }
 
@@ -262,8 +273,8 @@ PY
   echo "collected ${n} sample(s) at ${ts} -> ${sample_file}"
 }
 
-# cron-line: print a crontab line the operator installs manually (no sudo, we do
-# NOT auto-install into anyone's crontab).
+# cron-line: print collector + daily orphan-GC lines the operator installs
+# manually (no sudo; we do NOT auto-install into anyone's crontab).
 cmd_cron_line() {
   [ "$#" -eq 0 ] || die "cron-line accepts no arguments"
   local self minutes
@@ -274,6 +285,8 @@ cmd_cron_line() {
   cat <<EOF
 # clihost billing collector (issue #37) — paste into: crontab -e  (as the dokku user)
 */${minutes} * * * * ${self} collect >> ${CLIHOST_BILLING_DIR}/state/collect.log 2>&1
+# clihost orphan storage GC (tracks for 30 days before deleting; dry-run is not useful in cron)
+17 3 * * * ${self} gc-mounts --apply --yes >> ${CLIHOST_BILLING_DIR}/state/gc-mounts.log 2>&1
 EOF
 }
 
@@ -429,7 +442,16 @@ cmd_restart() {
     case "$1" in
       --apply) apply="true" ;;
       --yes) yes="true" ;;
-      --) shift; break ;;
+      --)
+        shift
+        [ -z "${app}" ] || die "restart accepts exactly one APP"
+        [ "$#" -le 1 ] || die "restart accepts exactly one APP"
+        if [ "$#" -eq 1 ]; then
+          app="$1"
+          shift
+        fi
+        break
+        ;;
       -*) die "unknown option: $1" ;;
       *)
         [ -z "${app}" ] || die "restart accepts exactly one APP"
@@ -450,10 +472,172 @@ cmd_restart() {
     die "restart --apply in non-TTY mode requires --yes"
   fi
 
-  if command -v dokku >/dev/null 2>&1 && dokku ps:restart "${app}"; then
-    return 0
+  if command -v dokku >/dev/null 2>&1; then
+    if dokku ps:restart "${app}"; then
+      return 0
+    fi
+    echo "dokku ps:restart ${app} failed; falling back to docker restart ${app}.web.1" >&2
+  else
+    echo "dokku not found; falling back to docker restart ${app}.web.1" >&2
   fi
   docker restart -- "${app}.web.1"
+}
+
+# Track legacy app-named Dokku storage directories and remove only directories
+# that have been continuously orphaned for the full retention window. An app is
+# not orphaned if it still exists in Dokku OR any Docker container references
+# its directory. Discovery failures abort before deletion; apply is opt-in.
+#
+# Eligibility is sampled once per invocation (daily, per the generated
+# cron-line), not observed continuously: a directory that is reused and
+# re-orphaned entirely within the gap between two consecutive scans is
+# invisible to this check, since only a scan that observes the directory
+# active resets its tracked first-seen time. Worst case this shifts a
+# deletion's *true* continuous-orphan age by up to one scan interval
+# (~24h with the shipped daily cron) short of CLIHOST_GC_RETENTION_DAYS —
+# closing that gap fully would require event-based hooks into Dokku
+# app create/destroy rather than periodic sampling, which is out of scope.
+cmd_gc_mounts() {
+  local apply="false"
+  local yes="false"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply) apply="true" ;;
+      --yes) yes="true" ;;
+      --) shift; break ;;
+      -*) die "unknown option: $1" ;;
+      *) die "gc-mounts takes no operands" ;;
+    esac
+    shift
+  done
+  [ "$#" -eq 0 ] || die "gc-mounts takes no operands"
+  if [ "${apply}" = "true" ] && [ ! -t 0 ] && [ "${yes}" != "true" ]; then
+    die "gc-mounts --apply in non-TTY mode requires --yes"
+  fi
+  [[ "${CLIHOST_GC_RETENTION_DAYS}" =~ ^[1-9][0-9]*$ ]] \
+    || die "CLIHOST_GC_RETENTION_DAYS must be a positive integer"
+  [[ "${CLIHOST_STORAGE_ROOT}" = /* ]] \
+    || die "CLIHOST_STORAGE_ROOT must be absolute"
+  [ -d "${CLIHOST_STORAGE_ROOT}" ] \
+    || die "storage root is not a directory: ${CLIHOST_STORAGE_ROOT}"
+  [ ! -L "${CLIHOST_STORAGE_ROOT}" ] \
+    || die "storage root must not be a symlink: ${CLIHOST_STORAGE_ROOT}"
+
+  require_python
+  require_docker
+  command -v dokku >/dev/null 2>&1 || die "dokku CLI not found"
+  ensure_dirs
+
+  # Both inventories are authoritative safety guards. Under `set -e`, a failed
+  # command substitution aborts rather than turning an unknown inventory into
+  # an apparently empty one.
+  local apps container_ids mount_sources
+  apps="$(dokku --quiet apps:list)"
+  container_ids="$(docker ps -aq)"
+  mount_sources=""
+  if [ -n "${container_ids}" ]; then
+    # shellcheck disable=SC2086 # IDs are Docker-generated whitespace tokens.
+    mount_sources="$(docker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' -- ${container_ids})"
+  fi
+
+  CLIHOST_GC_APPLY="${apply}" \
+  CLIHOST_GC_ROOT="${CLIHOST_STORAGE_ROOT}" \
+  CLIHOST_GC_DAYS="${CLIHOST_GC_RETENTION_DAYS}" \
+  CLIHOST_GC_STATE="${ORPHAN_MOUNTS_FILE}" \
+  CLIHOST_GC_APPS="${apps}" \
+  CLIHOST_GC_MOUNTS="${mount_sources}" \
+  python3 <<'PY'
+import json
+import os
+import re
+import shutil
+import stat
+import tempfile
+import time
+
+root = os.path.normpath(os.environ["CLIHOST_GC_ROOT"])
+state_path = os.environ["CLIHOST_GC_STATE"]
+retention_seconds = int(os.environ["CLIHOST_GC_DAYS"]) * 86400
+apply = os.environ["CLIHOST_GC_APPLY"] == "true"
+apps = {line.strip() for line in os.environ.get("CLIHOST_GC_APPS", "").splitlines()
+        if line.strip()}
+mounted = {os.path.realpath(line.strip())
+           for line in os.environ.get("CLIHOST_GC_MOUNTS", "").splitlines()
+           if line.strip()}
+name_re = re.compile(r"^clihost-[a-z0-9_-]+$")
+
+try:
+    with open(state_path, "r", encoding="utf-8") as handle:
+        saved = json.load(handle)
+except FileNotFoundError:
+    saved = {"version": 1, "orphans": {}}
+except (OSError, ValueError) as exc:
+    raise SystemExit("ERROR: cannot read valid gc state %s: %s" % (state_path, exc))
+if saved.get("version") != 1 or not isinstance(saved.get("orphans"), dict):
+    raise SystemExit("ERROR: unsupported gc state format: " + state_path)
+
+now = int(time.time())
+previous = saved["orphans"]
+current = {}
+found = 0
+for entry in sorted(os.scandir(root), key=lambda item: item.name):
+    if not name_re.fullmatch(entry.name):
+        continue
+    if not entry.is_dir(follow_symlinks=False):
+        continue
+    found += 1
+    path = os.path.join(root, entry.name)
+    real_path = os.path.realpath(path)
+    if entry.name in apps or real_path in mounted:
+        print("preserved %s (active)" % entry.name)
+        continue
+
+    first_seen = previous.get(path, now)
+    if not isinstance(first_seen, (int, float)) or first_seen < 0 or first_seen > now:
+        raise SystemExit("ERROR: invalid first-seen time for " + path)
+    age = now - int(first_seen)
+    if age < retention_seconds:
+        current[path] = int(first_seen)
+        print("tracking %s (orphaned %d/%d days)" %
+              (entry.name, age // 86400, retention_seconds // 86400))
+        continue
+
+    if not apply:
+        current[path] = int(first_seen)
+        print("would delete %s (orphaned %d days)" % (entry.name, age // 86400))
+        continue
+
+    # Re-check the directory identity immediately before deletion. Refuse a
+    # symlink swap and never operate outside a direct, strictly named child.
+    before = entry.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode):
+        raise SystemExit("ERROR: candidate changed type before deletion: " + path)
+    current_entry = os.stat(path, follow_symlinks=False)
+    if (current_entry.st_dev, current_entry.st_ino) != (before.st_dev, before.st_ino):
+        raise SystemExit("ERROR: candidate changed before deletion: " + path)
+    shutil.rmtree(path)
+    print("deleted %s (orphaned %d days)" % (entry.name, age // 86400))
+
+# Atomic state replacement: an interrupted scan never partially resets ages.
+state_dir = os.path.dirname(state_path)
+fd, tmp_path = tempfile.mkstemp(prefix=".orphan-mounts.", dir=state_dir, text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"version": 1, "orphans": current}, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, state_path)
+except BaseException:
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+    raise
+
+if not found:
+    print("no clihost storage directories under " + root)
+PY
 }
 
 main() {
@@ -483,6 +667,10 @@ main() {
     restart)
       shift
       cmd_restart "$@"
+      ;;
+    gc-mounts)
+      shift
+      cmd_gc_mounts "$@"
       ;;
     -h|--help|help)
       usage

@@ -114,7 +114,7 @@ SSH Client → sshd (22) → shell
 hapi Client → HTTP API (HAPI_PORT) → hapi runner
 ```
 
-**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → copy the default Claude Code settings from `/etc/skel/.claude/settings.json` to `/home/hapi/.claude/settings.json` only if missing → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → optionally start ao daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → drop any stale dashboard URL → if `hapi` is installed, start `hapi server --relay`, write a best-effort legacy connection URL file, and optionally start hapi runner (otherwise warn and skip) → `exec sshd`.
+**Entry point flow** (entrypoint.sh): fix volume permissions → ensure `.tmux.conf` / config dirs → copy the default Claude Code settings from `/etc/skel/.claude/settings.json` to `/home/hapi/.claude/settings.json` only if missing → configure sshd (root access if ROOT_PASSWORD) → clean stale hapi runner state → update Hermes Agent → optionally start Droid daemon → optionally start ao daemon → start ttyd proxy (as `TTYD_USER` via runuser; it auto-creates the first terminal) → drop any stale dashboard URL → if `hapi` is installed, start `hapi server --relay`, write a best-effort legacy connection URL file, and optionally start hapi runner (otherwise warn and skip) → `exec "$@"` (the Docker CMD defaults to sshd; `docker run IMAGE <command>` overrides it).
 
 **Volume mount:** `/home/hapi` — persistent runner state, logs, configs. The mount overwrites permissions, hence the permission fixes in entrypoint.sh. **Mount at exactly `/home/hapi`, never the parent `/home`** (issue #69): a Docker volume is seeded from the image only while empty, so a persistent `/home` that survives one deploy stops being re-seeded — the entrypoint then recreates `/home/hapi/.claude` empty on top of it and the saved Claude Code login (`CLAUDE_CONFIG_DIR=/home/hapi/.claude`, set in the Dockerfile) is lost on every redeploy ("auth keeps resetting"). Mounting `/home/hapi` keeps the home dir itself as the persisted unit. Verified in Docker: a non-empty `/home` volume drops the creds on container recreate, a non-empty `/home/hapi` volume keeps them. **Migration caveat:** an existing `/home` volume holds its data under a `hapi/` subdir, so naively retargeting the *same* volume to `/home/hapi` buries it at `/home/hapi/hapi/` (invisible to the app) — move the volume's `hapi/` contents to its root first, or copy them into a fresh `/home/hapi` volume. The entrypoint warning spells this out at startup.
 
@@ -306,9 +306,8 @@ over-engineering until the manual contract proves insufficient.
 unsafe (no `docker.sock`). They live on the Dokku host (e.g. `/home/dokku/bin/`)
 and run as the `dokku` user, who is in the `docker` group and can therefore call
 `docker stats/ps -s/inspect` **without sudo** (`sudo` needs a password and is
-unavailable). This is the accounting foundation for issue #37 (PR1 + PR2:
-collect + report); the operational subcommands (`diagnose`/`restart`,
-`gc-mounts`, `idle-sleep`) and stage 2 (tariffs/invoices) are follow-up PRs.
+unavailable). This is the accounting and operational foundation for issue #37;
+`idle-sleep` and stage 2 (tariffs/invoices) remain follow-up work.
 
 The bash file is a thin dispatcher (`set -euo pipefail`, `die`/`usage`/`main`
 +`case`, one docker/I-O owner); all pure logic (parsers + aggregation +
@@ -322,9 +321,12 @@ static+end-to-end checks in `tests/unit/test_shell_scripts.py`). No `jq`/`sqlite
 | Subcommand | Purpose |
 |---|---|
 | `collect` | Sample every `clihost-*` container once (cron-driven). Idempotent, `flock`-serialized, appends JSONL. |
-| `cron-line` | Print a ready-to-paste `crontab` line — the operator installs it manually (`crontab -e` as `dokku`; we never auto-install into a crontab, no sudo). |
+| `cron-line` | Print ready-to-paste collector and daily orphan-GC lines — the operator installs them manually (`crontab -e` as `dokku`; we never auto-install into a crontab, no sudo). |
 | `report [--json]` | Aggregated usage table per app (avg CPU cores / avg mem / disk / container-hours / uptime% / COST). |
 | `raw` | Alias for `report --json` (machine-readable). |
+| `diagnose [--app] APP` | Read-only container health evidence and a compact verdict. |
+| `restart APP [--apply] [--yes]` | Safe app restart; dry-run by default and non-TTY apply requires `--yes`. |
+| `gc-mounts [--apply] [--yes]` | Track legacy `clihost-*` storage directories and delete only after 30 days continuously orphaned; dry-run by default. |
 | `help` | Usage. |
 
 **Storage** — append-only JSONL under `${CLIHOST_BILLING_DIR:=/home/dokku/.clihost-billing}`
@@ -334,6 +336,8 @@ static+end-to-end checks in `tests/unit/test_shell_scripts.py`). No `jq`/`sqlite
 - `state/last-collect.json` — last-collect metadata (feeds the "collector likely
   not running" warning `report` prints when the newest sample is older than
   `2 × interval`).
+- `state/orphan-mounts.json` — first-seen times for directories continuously
+  absent from both the Dokku app inventory and every Docker container mount.
 - `rates.json` (stage 2) — not present yet; `report` calls `apply_rates(rows, None)`
   so COST renders as an em dash (`—`) until rates exist.
 
@@ -358,7 +362,29 @@ tracked. Disk is a point-in-time size (latest per container summed), not integra
 
 **Environment:** `CLIHOST_BILLING_DIR` (storage root), `CLIHOST_BILLING_INTERVAL`
 (collector cadence in seconds, default 300 — also the gap-detection base),
-`CLIHOST_APP_PREFIX` (container/app prefix to account, default `clihost-`).
+`CLIHOST_APP_PREFIX` (container/app prefix to account, default `clihost-`),
+`CLIHOST_STORAGE_ROOT` (legacy app-named Dokku storage directory root, default
+`/var/lib/dokku/data/storage`), and `CLIHOST_GC_RETENTION_DAYS` (continuous
+orphan retention, default 30).
+
+`gc-mounts` is deliberately fail-closed. It considers only direct directories
+whose names match `clihost-[a-z0-9_-]+`; existing Dokku apps and paths mounted
+by running or stopped Docker containers are always preserved. A new orphan is
+tracked, not deleted. It becomes eligible only after it remains absent from both
+inventories for the full retention window. Inventory/state errors abort, the
+storage root must be an absolute non-symlink directory, and deletion requires
+both `--apply` and (outside a TTY) `--yes`. The default invocation records the
+observation and prints what would be deleted without deleting it.
+`cron-line` includes a daily `gc-mounts --apply --yes` entry; installing that
+line is the explicit operator opt-in to automatic cleanup.
+
+Eligibility is sampled once per scan (daily, per the generated cron-line), not
+observed continuously: only a scan that catches a directory active resets its
+tracked first-seen time, so a reuse-and-reorphan cycle squeezed entirely inside
+one scan interval is invisible. Worst case, a deletion's true continuous-orphan
+age can be short of `CLIHOST_GC_RETENTION_DAYS` by up to one scan interval
+(~24h with the shipped daily cron) — closing that gap fully would need
+event-based hooks into Dokku app create/destroy rather than periodic sampling.
 
 **Verification:** `python -m pytest tests/unit/test_clihost_billing_agg.py
 tests/unit/test_shell_scripts.py`; on the server, copy both files to
@@ -474,7 +500,7 @@ Update `.env.example` when adding/changing variables.
 
 ## Coding Conventions
 
-> A shorter `AGENTS.md` exists at the repo root for non-Claude agents. It overlaps with this file but is less detailed and partially stale (e.g. it still lists a `volume/hapi/` dir and a `3006` port mapping). When the two disagree, **CLAUDE.md is authoritative**; keep `AGENTS.md` roughly in sync when you change conventions here.
+> A shorter `AGENTS.md` exists at the repo root for non-Claude agents. It overlaps with this file but is less detailed. When the two disagree, **CLAUDE.md is authoritative**; keep `AGENTS.md` in sync when you change conventions here.
 
 - Shell scripts use Bash with `set -euo pipefail`
 - Environment variables are UPPERCASE with defaults via `${VAR:=default}`

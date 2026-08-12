@@ -478,29 +478,22 @@ class TTYDProxyHandler(BaseHandler):
         username = self._check_auth()
         if not username:
             return
-        terminal = ttyd_manager.get_terminal(terminal_id)
-        if not terminal:
-            self.send_json(404, {"error": f"Terminal ttyd{terminal_id} not found"})
-            return
-        # NOTE (#101/#8, deferred): the lock is released inside get_terminal(),
-        # so this `port` is not revalidated at connect time. If terminal_id is
-        # deleted and its port reused (lowest-free, see _allocate_port) before
-        # the connect below, an in-flight request could reach a different
-        # terminal's ttyd. The window is narrow (usually ECONNREFUSED->502) and
-        # not a security boundary; a proper fix (a per-terminal lease/refcount
-        # holding the port until the request completes) is tracked separately.
-        port = terminal["port"]
-        parsed = urlparse(self.path)
-        prefix = f"/ttyd{terminal_id}"
-        if parsed.path.startswith(prefix + "/"):
-            upstream_path = parsed.path[len(prefix):] + ("?" + parsed.query if parsed.query else "")
-        else:
-            upstream_path = "/"
+        with ttyd_manager.lease_terminal(terminal_id) as terminal:
+            if not terminal:
+                self.send_json(404, {"error": f"Terminal ttyd{terminal_id} not found"})
+                return
+            port = terminal["port"]
+            parsed = urlparse(self.path)
+            prefix = f"/ttyd{terminal_id}"
+            if parsed.path.startswith(prefix + "/"):
+                upstream_path = parsed.path[len(prefix):] + ("?" + parsed.query if parsed.query else "")
+            else:
+                upstream_path = "/"
 
-        if is_websocket_request(self):
-            proxy_ttyd_websocket(self, upstream_path, port)
-        else:
-            proxy_ttyd_http(self, upstream_path, port)
+            if is_websocket_request(self):
+                proxy_ttyd_websocket(self, upstream_path, port)
+            else:
+                proxy_ttyd_http(self, upstream_path, port)
 
 
 def _warn_on_user_mismatch():

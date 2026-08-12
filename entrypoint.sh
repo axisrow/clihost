@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source /usr/local/lib/clihost/env-contract.sh
+
 # TTYD Configuration
 : "${PORT:=8080}"
 : "${TTYD_USER:=hapi}"
 : "${TTYD_PASSWORD:=}"
-
-# Generate secure random secret if not provided
-if [ -z "${PASSWORD_SECRET:-}" ]; then
-  PASSWORD_SECRET=$(openssl rand -hex 32)
-  echo "Generated random PASSWORD_SECRET (set PASSWORD_SECRET environment variable to persist across restarts)"
-fi
 
 : "${HAPI_HOST:=0.0.0.0}"
 : "${HAPI_PORT:=80}"
@@ -34,6 +30,62 @@ fi
 : "${CHISEL_SERVER:=}"
 : "${CHISEL_AUTH:=}"
 : "${CHISEL_REMOTE_PORT:=2222}"
+
+# Normalize every runtime boolean before any service starts. Unknown explicit
+# values fail startup instead of silently toggling a service in the opposite
+# direction. Runtime ports likewise accept decimal integers only and fail on
+# invalid/out-of-range input.
+env_bool HAPI_RUNNER_ENABLED false
+env_bool DROID_DAEMON_ENABLED false
+env_bool AO_DAEMON_ENABLED false
+env_bool TTYD_SANDBOX false
+env_bool SSH_TUNNEL_ENABLED false
+env_bool HERMES_AUTO_UPDATE true
+env_positive_int PORT 8080 1024 65535
+env_positive_int HAPI_PORT 80 1 65535
+env_positive_int AO_PORT 3001 1 65535
+env_positive_int CHISEL_REMOTE_PORT 2222 1 65535
+
+# PASSWORD_SECRET_FILE is authoritative when supplied, matching the Python
+# proxy's Docker-secret contract. An unreadable or empty file fails startup.
+env_secret PASSWORD_SECRET
+
+# Fail closed on a malformed Python-owned env var (e.g. MAX_TERMINALS,
+# SECURE_COOKIES) BEFORE any destructive/idempotent-breaking startup step runs
+# (cleanup_runner_state deletes persisted hapi state; Hermes/Droid/AO daemons
+# get registered and started). Importing ttydproxy.config here runs the same
+# strict parsing the backgrounded proxy process would hit later, but as a
+# side-effect-free preflight check in this shell — not after state has already
+# been torn down and daemons started, which would otherwise repeat those
+# destructive actions on every crash-loop restart before failing closed.
+# mktemp -u only *names* a unique path; opening it with the shell's O_CREAT|
+# O_EXCL redirection guard (noclobber) is what actually matters here — a fixed,
+# predictable /tmp path let an unprivileged user pre-plant a symlink before this
+# root-run redirection ever opens it, and a plain `2>path` follows an existing
+# symlink and truncates its target before python3 even runs. `mktemp` gives an
+# unpredictable name so nothing can be pre-planted, and `set -C` (noclobber)
+# makes the shell refuse to open the target at all if anything (symlink or
+# regular file) already exists there — belt and suspenders.
+clihost_preflight_err="$(mktemp -u /tmp/clihost-config-preflight.XXXXXXXX.err)"
+(
+  set -C
+  if ! PYTHONPATH=/app python3 -c 'import ttydproxy.config' 2>"${clihost_preflight_err}"; then
+    echo "ERROR: invalid TTYD proxy configuration (see below); aborting before any runner state is touched" >&2
+    cat -- "${clihost_preflight_err}" >&2
+    rm -f -- "${clihost_preflight_err}"
+    exit 1
+  fi
+)
+clihost_preflight_status=$?
+rm -f -- "${clihost_preflight_err}"
+[ "${clihost_preflight_status}" -eq 0 ] || exit "${clihost_preflight_status}"
+
+# Generate a random secret only when neither PASSWORD_SECRET nor its
+# authoritative *_FILE source supplied one.
+if [ -z "${PASSWORD_SECRET:-}" ]; then
+  PASSWORD_SECRET=$(openssl rand -hex 32)
+  echo "Generated random PASSWORD_SECRET (set PASSWORD_SECRET environment variable to persist across restarts)"
+fi
 
 HAPI_USER="${HAPI_USER:-hapi}"
 HAPI_USER_HOME="/home/${HAPI_USER}"
@@ -326,14 +378,6 @@ fi
 # default, this no-auth/no-TLS daemon could be exposed on a published port — re-check
 # that the hardcoded-loopback invariant still holds before bumping the pinned ao ref.
 if [ "${AO_DAEMON_ENABLED}" = "true" ]; then
-  # Validate AO_PORT numeric: it is interpolated into the `ao daemon` launch
-  # string, so a non-numeric value must fail loudly (mirrors PORT / CHISEL_REMOTE_PORT).
-  case "${AO_PORT}" in
-    ''|*[!0-9]*)
-      echo "ERROR: AO_PORT='${AO_PORT}' must be a positive integer" >&2
-      exit 1
-      ;;
-  esac
   if PATH="${HAPI_RUN_PATH}" command -v ao >/dev/null 2>&1; then
     AO_DAEMON_LOG="${HAPI_HOME}/ao-daemon.log"
     # `: >` (truncate-or-create), not `touch`: the launch appends via `>>`, so
@@ -363,15 +407,6 @@ SSH_URL_FILE="${HAPI_USER_HOME}/ssh-url"
 # from a previous run / provider); recreated below only when a tunnel starts.
 rm -f "${SSH_URL_FILE}" 2>/dev/null || true
 if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then
-  # Validate CHISEL_REMOTE_PORT is numeric up front: it is interpolated into the
-  # chisel R:<port>:localhost:22 spec, so a non-numeric value must fail loudly
-  # rather than silently produce a broken forward (mirrors the PORT check below).
-  case "${CHISEL_REMOTE_PORT}" in
-    ''|*[!0-9]*)
-      echo "ERROR: CHISEL_REMOTE_PORT='${CHISEL_REMOTE_PORT}' must be a positive integer" >&2
-      exit 1
-      ;;
-  esac
   SSH_TUNNEL_LOG="${HAPI_HOME}/ssh-tunnel.log"
   touch "${SSH_TUNNEL_LOG}"
   chown "${HAPI_USER}:${HAPI_USER}" "${SSH_TUNNEL_LOG}"
@@ -454,18 +489,6 @@ fi
 # Start TTYD HTTP proxy (manages TTYD processes dynamically; drops root and
 # runs as TTYD_USER). The secret goes through a TTYD_USER-only file (Docker
 # *_FILE convention) so it never appears in the proxy's /proc/<pid>/environ.
-# Validate PORT is numeric first: `[ "$PORT" -lt 1024 ]` on a non-numeric value
-# exits 2 (error, not false), which would let the range guard silently pass.
-case "${PORT}" in
-  ''|*[!0-9]*)
-    echo "ERROR: PORT=${PORT} must be a positive integer" >&2
-    exit 1
-    ;;
-esac
-if [ "${PORT}" -lt 1024 ]; then
-  echo "ERROR: PORT=${PORT} is a privileged port; the proxy runs as ${TTYD_USER} and needs PORT >= 1024" >&2
-  exit 1
-fi
 # The proxy runs as TTYD_USER and creates upload files itself; pre-create and
 # chown UPLOAD_DIR so a bind-mounted /home/hapi (often not writable by the hapi
 # UID) doesn't make pasted-image uploads fail with 500.
@@ -490,6 +513,19 @@ CLEANUP_ROOT="${CLEANUP_ROOT}" \
 HAPI_HOME="${HAPI_HOME}" \
 TTYD_SANDBOX="${TTYD_SANDBOX}" \
 runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &
+PROXY_PID=$!
+
+# Fail closed if the proxy dies immediately after launch. The strict env
+# contract (#113) makes ttydproxy.config raise on a malformed value for a
+# Python-owned var (e.g. MAX_TERMINALS, SECURE_COOKIES) that the shell-side
+# env-contract.sh does not itself validate. Without this check the container
+# would keep running (sshd stays up via the unconditional `exec` below) with
+# its only HTTP service dead and no supervision to catch it.
+sleep 1
+if ! kill -0 "${PROXY_PID}" 2>/dev/null; then
+  echo "ERROR: TTYD HTTP proxy exited immediately after startup; check the error above (e.g. an invalid env value)" >&2
+  exit 1
+fi
 
 # Drop any stale dashboard URL up front. On a persistent /home/hapi volume a URL
 # from a previous hapi-enabled image would otherwise make the dashboard render an
@@ -581,6 +617,6 @@ else
   fi
 fi
 
-# sshd is now the main process (via CMD in Dockerfile)
-# Container stays alive as long as sshd runs
-exec /usr/sbin/sshd -D -e
+# Run the Docker CMD (sshd by default) or an operator-supplied override as the
+# main process.
+exec "$@"

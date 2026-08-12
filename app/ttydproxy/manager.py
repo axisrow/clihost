@@ -1,4 +1,5 @@
 """Lifecycle management for ttyd child processes."""
+from contextlib import contextmanager
 import os
 import socket
 import subprocess
@@ -19,6 +20,7 @@ class TTYDManager:
         tmux_wrapper="/bin/tmux-wrapper.sh",
     ):
         self.terminals = {}
+        self._port_leases = {}
         self.next_id = 1
         self.lock = threading.Lock()
         self.base_port = base_port
@@ -34,17 +36,10 @@ class TTYDManager:
         self._reaper_stop = threading.Event()
 
     def _allocate_port(self):
-        """Find the next available port, reusing freed ports.
-
-        NOTE (#101/#8, deferred): lowest-free reuse means a just-freed port can
-        be handed to a new terminal immediately. Combined with the connect-time
-        gap in handle_ttyd_proxy (the lock is dropped before connect), an
-        in-flight request to a deleted terminal could reach the new terminal's
-        ttyd. The window is narrow and not a security boundary; the proper fix
-        (a per-terminal lease that holds the port for the request's lifetime) is
-        tracked separately.
-        """
-        used_ports = {terminal["port"] for terminal in self.terminals.values()}
+        """Find the next port not owned by a terminal or in-flight proxy."""
+        used_ports = {
+            terminal["port"] for terminal in self.terminals.values()
+        } | self._port_leases.keys()
         max_port = self.base_port + self.max_terminals
         port = self.base_port
         while port in used_ports:
@@ -235,6 +230,41 @@ class TTYDManager:
             self._cleanup_terminal(terminal_id, dead_info, f"Terminal ttyd{terminal_id} died, cleaned up")
         return None
 
+    @contextmanager
+    def lease_terminal(self, terminal_id):
+        """Hold a terminal's port against reuse for an in-flight proxy request."""
+        dead_info = None
+        port = None
+        terminal = None
+        with self.lock:
+            info = self.terminals.get(terminal_id)
+            if info:
+                process = info.get("process")
+                if process and process.poll() is not None:
+                    dead_info = self.terminals.pop(terminal_id)
+                else:
+                    port = info["port"]
+                    self._port_leases[port] = self._port_leases.get(port, 0) + 1
+                    terminal = {"id": info["id"], "port": port}
+
+        if dead_info:
+            self._cleanup_terminal(
+                terminal_id,
+                dead_info,
+                f"Terminal ttyd{terminal_id} died, cleaned up",
+            )
+
+        try:
+            yield terminal
+        finally:
+            if port is not None:
+                with self.lock:
+                    remaining = self._port_leases[port] - 1
+                    if remaining:
+                        self._port_leases[port] = remaining
+                    else:
+                        del self._port_leases[port]
+
     def _wait_for_ready(self, port, timeout=15):
         """Wait until ttyd is responding on the given port."""
         for _ in range(timeout):
@@ -246,4 +276,3 @@ class TTYDManager:
                 time.sleep(1)
         print(f"TTYD on port {port} failed to start within {timeout}s", file=sys.stderr, flush=True)
         return False
-

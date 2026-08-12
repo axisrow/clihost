@@ -284,6 +284,7 @@ RUN chmod +x /bin/tmux-wrapper.sh /bin/glm /bin/claude-auth-snapshot.sh /bin/cli
     chown hapi:hapi /home/hapi/.tmux.conf
 
 COPY entrypoint.sh /entrypoint.sh
+COPY bin/env-contract.sh /usr/local/lib/clihost/env-contract.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 8080
