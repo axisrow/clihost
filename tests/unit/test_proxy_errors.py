@@ -1,6 +1,7 @@
 """Regression tests for diagnostic handling in ttyd proxy failure paths."""
 import contextlib
 import gzip
+import http.client
 import io
 import socket
 import unittest
@@ -48,6 +49,21 @@ class FailingCloseConnection:
 
     def close(self):
         raise RuntimeError("Authorization: Bearer do-not-log")
+
+
+class MalformedResponseConnection:
+    """Simulates ttyd sending a response so malformed http.client raises
+    HTTPException while reading it. HTTPException does NOT subclass OSError,
+    so it needs its own handling alongside the existing OSError catch."""
+
+    def request(self, _method, _path, body=None, headers=None):
+        pass
+
+    def getresponse(self):
+        raise http.client.LineTooLong("Authorization: Bearer do-not-log")
+
+    def close(self):
+        pass
 
 
 class TestProxyUnexpectedErrors(unittest.TestCase):
@@ -135,6 +151,40 @@ class TestProxyUnexpectedErrors(unittest.TestCase):
 
         log = stderr.getvalue()
         self.assertIn("operation=http-close", log)
+        self.assertIn("route=/", log)
+        self.assertIn("port=7681", log)
+        self.assertNotIn("secret", log)
+        self.assertNotIn("do-not-log", log)
+
+    def test_http_malformed_upstream_response_returns_502_without_exception_text(self):
+        handler = type(
+            "Handler",
+            (),
+            {
+                "headers": {},
+                "command": "GET",
+                "client_address": ("127.0.0.1", 12345),
+                "rfile": io.BytesIO(),
+                "wfile": io.BytesIO(),
+                "json_response": None,
+                "send_json": lambda self, status, data: setattr(
+                    self, "json_response", (status, data)
+                ),
+            },
+        )()
+        stderr = io.StringIO()
+
+        with patch.object(
+            proxy.http.client,
+            "HTTPConnection",
+            return_value=MalformedResponseConnection(),
+        ), contextlib.redirect_stderr(stderr):
+            proxy.proxy_ttyd_http(handler, "/?token=secret", 7681)
+
+        self.assertEqual(handler.json_response, (502, {"error": "TTYD unavailable"}))
+
+        log = stderr.getvalue()
+        self.assertIn("operation=http-upstream", log)
         self.assertIn("route=/", log)
         self.assertIn("port=7681", log)
         self.assertNotIn("secret", log)

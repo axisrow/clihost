@@ -215,11 +215,6 @@ def tunnel_sockets(handler, upstream, *, upstream_path=None, port=None):
                     data = data[sent:]
                 if data:
                     buf.extend(data)
-    except (OSError, ConnectionError) as exc:
-        _log_proxy_error(
-            "websocket-tunnel", exc, upstream_path=upstream_path, port=port
-        )
-        return
     except Exception as exc:
         _log_proxy_error(
             "websocket-tunnel", exc, upstream_path=upstream_path, port=port
@@ -346,7 +341,7 @@ def proxy_ttyd_http(handler, upstream_path, port):
         handler.end_headers()
         if data:
             handler.wfile.write(data)
-    except OSError as exc:
+    except (OSError, http.client.HTTPException) as exc:
         _log_proxy_error(
             "http-upstream", exc, upstream_path=upstream_path, port=port
         )
