@@ -20,6 +20,7 @@ CLAUDE_AUTH_SNAPSHOT = REPO_ROOT / "bin/claude-auth-snapshot.sh"
 CLAUDE_AUTH_SNAPSHOT_HOST = REPO_ROOT / "bin/claude-auth-snapshot-host.sh"
 CLIHOST_SYNC = REPO_ROOT / "bin/clihost-sync.sh"
 CLIHOST_BILLING = REPO_ROOT / "bin/clihost-billing.sh"
+ENV_CONTRACT = REPO_ROOT / "bin/env-contract.sh"
 CLIHOST_BILLING_LIB = REPO_ROOT / "bin/clihost_billing_lib.py"
 README = REPO_ROOT / "README.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
@@ -53,6 +54,7 @@ class TestShellSyntax(unittest.TestCase):
             CLAUDE_AUTH_SNAPSHOT_HOST,
             CLIHOST_SYNC,
             CLIHOST_BILLING,
+            ENV_CONTRACT,
         ):
             with self.subTest(script=script.name):
                 result = subprocess.run(
@@ -108,13 +110,10 @@ class TestEntrypointRegressions(unittest.TestCase):
         self.assertIn('install -m 400 -o "${TTYD_USER}"', self.text)
 
     def test_port_validated_numeric_before_range_check(self):
-        # A non-numeric PORT must fail loudly: `[ "$PORT" -lt 1024 ]` returns
-        # exit 2 (error, not "false"), so the range guard silently passes and
-        # the proxy starts on the default 8080. A numeric pre-check prevents it.
-        case_pos = self.text.find("*[!0-9]*")
-        range_pos = self.text.find('[ "${PORT}" -lt 1024 ]')
-        self.assertGreater(case_pos, -1, "PORT is not validated as numeric")
-        self.assertLess(case_pos, range_pos)
+        validation_pos = self.text.find("env_positive_int PORT 8080 1024 65535")
+        proxy_pos = self.text.find('runuser -u "${TTYD_USER}" -- python3')
+        self.assertGreater(validation_pos, -1, "PORT is not validated")
+        self.assertLess(validation_pos, proxy_pos)
 
     def test_upload_dir_prepared_before_proxy(self):
         # The unprivileged proxy creates upload files itself; a bind-mounted
@@ -217,14 +216,11 @@ class TestEntrypointRegressions(unittest.TestCase):
     def test_ao_port_validated_numeric_in_daemon_gate(self):
         # AO_PORT is interpolated into the `ao daemon` launch string, so a
         # non-numeric value must fail loudly (mirrors PORT / CHISEL_REMOTE_PORT).
-        # The guard lives inside the AO_DAEMON_ENABLED gate so the default path
-        # (flag off) never validates a value it doesn't use.
         gate_pos = self.text.find('if [ "${AO_DAEMON_ENABLED}" = "true" ]; then')
         self.assertGreater(gate_pos, -1, "AO_DAEMON_ENABLED gate is missing")
-        check_pos = self.text.find(
-            "AO_PORT='${AO_PORT}' must be a positive integer", gate_pos
-        )
-        self.assertGreater(check_pos, gate_pos, "AO_PORT numeric check missing in gate")
+        check_pos = self.text.find("env_positive_int AO_PORT 3001 1 65535")
+        self.assertGreater(check_pos, -1, "AO_PORT numeric check missing")
+        self.assertLess(check_pos, gate_pos)
 
     def test_ssh_tunnel_env_defaults(self):
         # Pluggable SSH tunnel (issue #79): env defaults must be set so the gate
@@ -320,10 +316,12 @@ class TestEntrypointRegressions(unittest.TestCase):
         # CHISEL_REMOTE_PORT is interpolated into the R:<port>:... spec, so a
         # non-numeric value must fail loudly (like the PORT check), not silently
         # produce a broken forward.
-        self.assertIn(
-            "CHISEL_REMOTE_PORT='${CHISEL_REMOTE_PORT}' must be a positive integer",
-            self.text,
+        validation_pos = self.text.find(
+            "env_positive_int CHISEL_REMOTE_PORT 2222 1 65535"
         )
+        tunnel_pos = self.text.find('if [ "${SSH_TUNNEL_ENABLED}" = "true" ]; then')
+        self.assertGreater(validation_pos, -1)
+        self.assertLess(validation_pos, tunnel_pos)
 
     def test_ssh_tunnel_logs_via_redirect_not_tee(self):
         # Logging through a plain redirect (not `| tee`) keeps $! on the tunnel
