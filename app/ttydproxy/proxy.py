@@ -4,6 +4,7 @@ import http.client
 import select
 import socket
 import sys
+import zlib
 
 from ttydproxy.assets import TAB_FIX_SCRIPT
 
@@ -40,6 +41,27 @@ TUNNEL_SELECT_TIMEOUT = 60
 TTYD_MAX_BODY = 10485760  # 10 MiB
 
 
+def _log_proxy_error(operation, exc, *, upstream_path=None, port=None):
+    """Log proxy failures without including exception text or request secrets."""
+    context = [f"operation={operation}"]
+    if upstream_path is not None:
+        # Queries can carry credentials.  Keep only the route path, escaped so
+        # malformed input cannot inject a second log line.
+        route = (
+            upstream_path.split("?", 1)[0]
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+        )
+        context.append(f"route={route[:200]}")
+    if port is not None:
+        context.append(f"port={port}")
+    print(
+        f"TTYD proxy error ({', '.join(context)}): {type(exc).__name__}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def is_websocket_request(handler):
     """Check if the current request is a WebSocket upgrade request."""
     return handler.headers.get("Upgrade", "").lower() == "websocket"
@@ -65,16 +87,20 @@ def inject_tab_fix_script(data):
     decompressed payload can't be decoded (B3).
     """
     original = data
-    try:
-        is_gzipped = False
-        if len(data) >= 2 and data[0:2] == b"\x1f\x8b":
-            try:
-                data = gzip.decompress(data)
-                is_gzipped = True
-            except Exception:
-                return original
+    is_gzipped = False
+    if len(data) >= 2 and data[0:2] == b"\x1f\x8b":
+        try:
+            data = gzip.decompress(data)
+            is_gzipped = True
+        except (gzip.BadGzipFile, EOFError, zlib.error):
+            return original
 
+    try:
         html = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return original
+
+    try:
         script = TAB_FIX_SCRIPT
 
         if "<head>" in html:
@@ -93,11 +119,12 @@ def inject_tab_fix_script(data):
         if is_gzipped:
             result = gzip.compress(result)
         return result
-    except Exception:
+    except Exception as exc:
+        _log_proxy_error("html-injection", exc)
         return original
 
 
-def tunnel_sockets(handler, upstream):
+def tunnel_sockets(handler, upstream, *, upstream_path=None, port=None):
     """Bidirectional socket tunneling with write buffering and backpressure.
 
     Non-blocking sockets require partial-send accounting: sendall() would
@@ -188,7 +215,15 @@ def tunnel_sockets(handler, upstream):
                     data = data[sent:]
                 if data:
                     buf.extend(data)
-    except Exception:
+    except (OSError, ConnectionError) as exc:
+        _log_proxy_error(
+            "websocket-tunnel", exc, upstream_path=upstream_path, port=port
+        )
+        return
+    except Exception as exc:
+        _log_proxy_error(
+            "websocket-tunnel", exc, upstream_path=upstream_path, port=port
+        )
         return
 
 
@@ -198,7 +233,9 @@ def proxy_ttyd_websocket(handler, upstream_path, port):
     try:
         upstream = socket.create_connection(("127.0.0.1", port), timeout=10)
     except OSError as exc:
-        print(f"TTYD proxy error: {exc}", file=sys.stderr, flush=True)
+        _log_proxy_error(
+            "websocket-connect", exc, upstream_path=upstream_path, port=port
+        )
         handler.send_json(502, {"error": "TTYD unavailable"})
         return
 
@@ -215,16 +252,29 @@ def proxy_ttyd_websocket(handler, upstream_path, port):
         upstream.sendall("\r\n".join(request_lines).encode("utf-8"))
 
         handler.close_connection = True
-        tunnel_sockets(handler, upstream)
-    except Exception:
-        pass
+        tunnel_sockets(handler, upstream, upstream_path=upstream_path, port=port)
+    except (OSError, ConnectionError) as exc:
+        _log_proxy_error(
+            "websocket-upstream", exc, upstream_path=upstream_path, port=port
+        )
+    except Exception as exc:
+        _log_proxy_error(
+            "websocket-unexpected", exc, upstream_path=upstream_path, port=port
+        )
     finally:
         if upstream:
             try:
                 upstream.shutdown(socket.SHUT_RDWR)
             except (OSError, ConnectionError):
                 pass
-            upstream.close()
+            try:
+                upstream.close()
+            except (OSError, ConnectionError):
+                pass
+            except Exception as exc:
+                _log_proxy_error(
+                    "websocket-close", exc, upstream_path=upstream_path, port=port
+                )
 
 
 def proxy_ttyd_http(handler, upstream_path, port):
@@ -297,10 +347,14 @@ def proxy_ttyd_http(handler, upstream_path, port):
         if data:
             handler.wfile.write(data)
     except OSError as exc:
-        print(f"TTYD proxy error: {exc}", file=sys.stderr, flush=True)
+        _log_proxy_error(
+            "http-upstream", exc, upstream_path=upstream_path, port=port
+        )
         handler.send_json(502, {"error": "TTYD unavailable"})
     finally:
         try:
             conn.close()
-        except Exception:
+        except (OSError, ConnectionError):
             pass
+        except Exception as exc:
+            _log_proxy_error("http-close", exc, upstream_path=upstream_path, port=port)
