@@ -121,25 +121,27 @@ class TestEntrypointRegressions(unittest.TestCase):
         # ValueError at import time for a malformed Python-owned var (e.g.
         # MAX_TERMINALS, SECURE_COOKIES) that the shell-side contract does not
         # validate. Backgrounding the proxy with a bare `&` and never checking
-        # it before `exec sshd` would leave the container "healthy" (sshd up)
-        # with its only HTTP service dead. The entrypoint must capture the
-        # proxy's PID and fail closed if it does not survive a short grace
-        # window.
+        # it before the final `exec` would leave the container "healthy"
+        # (sshd/CMD up) with its only HTTP service dead. The entrypoint must
+        # capture the proxy's PID and fail closed if it does not survive a
+        # short grace window. Since #117 the final line is `exec "$@"` (honors
+        # an operator-supplied Docker CMD override) instead of a hardcoded
+        # `exec /usr/sbin/sshd -D -e`.
         proxy_launch_pos = self.text.find(
             'runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &'
         )
         pid_capture_pos = self.text.find("PROXY_PID=$!")
-        sshd_pos = self.text.find("exec /usr/sbin/sshd -D -e")
+        exec_pos = self.text.rfind('exec "$@"')
         self.assertGreater(proxy_launch_pos, -1, "proxy launch line not found")
         self.assertGreater(
             pid_capture_pos, -1,
             "entrypoint.sh must capture the proxy PID ($!) to verify startup",
         )
         self.assertGreater(pid_capture_pos, proxy_launch_pos)
-        self.assertGreater(sshd_pos, -1)
+        self.assertGreater(exec_pos, -1, "final exec \"$@\" line not found")
         self.assertLess(
-            pid_capture_pos, sshd_pos,
-            "PID capture must happen before exec sshd",
+            pid_capture_pos, exec_pos,
+            "PID capture must happen before the final exec",
         )
         # A liveness check (kill -0) must run between the PID capture and the
         # final exec, and abort (die/exit) on failure rather than continue
@@ -150,7 +152,7 @@ class TestEntrypointRegressions(unittest.TestCase):
             "entrypoint.sh must verify the proxy process is still alive",
         )
         self.assertGreater(liveness_pos, pid_capture_pos)
-        self.assertLess(liveness_pos, sshd_pos)
+        self.assertLess(liveness_pos, exec_pos)
         self.assertIn("TTYD HTTP proxy exited immediately after startup", self.text)
 
     def test_python_config_validated_before_destructive_actions(self):
