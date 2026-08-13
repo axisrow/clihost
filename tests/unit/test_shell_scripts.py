@@ -2868,7 +2868,16 @@ class TestClihostBillingScript(unittest.TestCase):
             # `raw` is `report --json`.
             out_raw = self._run(["raw"], billing_dir)
             self.assertEqual(out_raw.returncode, 0, out_raw.stderr)
-            self.assertEqual(json.loads(out_raw.stdout), payload)
+            payload_raw = json.loads(out_raw.stdout)
+            # The synthetic samples are far enough in the past that both
+            # invocations emit the "collector likely not running" warning,
+            # but its `%d s old` age is computed live from wall-clock time —
+            # comparing the two payloads verbatim is flaky whenever a second
+            # ticks over between the two subprocess calls (#122 CI flake).
+            # Compare rows exactly and only shape-check the warning text.
+            self.assertEqual(payload_raw["rows"], payload["rows"])
+            self.assertIn("collector likely not running", payload["warning"])
+            self.assertIn("collector likely not running", payload_raw["warning"])
 
     def test_report_warns_when_collector_stale(self):
         # Samples with an old timestamp (> 2x interval old) must trigger the
