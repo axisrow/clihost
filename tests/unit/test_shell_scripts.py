@@ -19,6 +19,7 @@ INSTALL_CLI = REPO_ROOT / "bin/install-cli.sh"
 TMUX_WRAPPER = REPO_ROOT / "bin/tmux-wrapper.sh"
 GLM = REPO_ROOT / "bin/glm"
 CLAUDE_AUTH_SNAPSHOT = REPO_ROOT / "bin/claude-auth-snapshot.sh"
+CLAUDE_AUTH_SNAPSHOT_LIB = REPO_ROOT / "bin/claude_auth_snapshot.py"
 CLAUDE_AUTH_SNAPSHOT_HOST = REPO_ROOT / "bin/claude-auth-snapshot-host.sh"
 CLIHOST_SYNC = REPO_ROOT / "bin/clihost-sync.sh"
 CLIHOST_BILLING = REPO_ROOT / "bin/clihost-billing.sh"
@@ -1771,8 +1772,19 @@ class TestClaudeAuthSnapshotScript(unittest.TestCase):
             "COPY bin/claude-auth-snapshot.sh /bin/claude-auth-snapshot.sh",
             dockerfile,
         )
+        self.assertIn(
+            "COPY bin/claude_auth_snapshot.py /bin/claude_auth_snapshot.py",
+            dockerfile,
+        )
         self.assertIn("/bin/claude-auth-snapshot.sh", dockerfile)
         self.assertNotIn("claude-auth-snapshot-host.sh /bin/", dockerfile)
+
+    def test_shell_wrapper_delegates_snapshot_python_to_importable_module(self):
+        text = CLAUDE_AUTH_SNAPSHOT.read_text()
+        self.assertNotIn("<<'PY'", text)
+        self.assertIn('SNAPSHOT_LIB="${SCRIPT_DIR}/claude_auth_snapshot.py"', text)
+        self.assertIn('python3 "${SNAPSHOT_LIB}"', text)
+        self.assertTrue(CLAUDE_AUTH_SNAPSHOT_LIB.is_file())
 
     def test_docs_and_env_document_snapshot_diagnostics(self):
         self.assertIn("CLAUDE_AUTH_SNAPSHOT_DIR", (REPO_ROOT / ".env.example").read_text())
