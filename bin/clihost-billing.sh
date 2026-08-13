@@ -17,6 +17,7 @@ set -euo pipefail
 #   diagnose    inspect the current container state and print a verdict.
 #   restart     safely restart one clihost app (dry-run by default).
 #   gc-mounts   remove app storage after 30 days continuously orphaned.
+#   idle-sleep  stop explicitly opted-in apps after continuous inactivity.
 #   help        usage.
 #
 # Storage is append-only JSONL under ${CLIHOST_BILLING_DIR:=/home/dokku/.clihost-billing}:
@@ -35,12 +36,17 @@ BILLING_LIB="${SCRIPT_DIR}/clihost_billing_lib.py"
 : "${CLIHOST_APP_PREFIX:=clihost-}"
 : "${CLIHOST_STORAGE_ROOT:=/var/lib/dokku/data/storage}"
 : "${CLIHOST_GC_RETENTION_DAYS:=30}"
+: "${CLIHOST_IDLE_APPS:=}"
+: "${CLIHOST_IDLE_MINUTES:=60}"
+: "${CLIHOST_IDLE_CPU_PCT:=1}"
+: "${CLIHOST_IDLE_NET_BYTES:=65536}"
 
 SAMPLES_DIR="${CLIHOST_BILLING_DIR}/samples"
 STATE_DIR="${CLIHOST_BILLING_DIR}/state"
 LOCK_FILE="${STATE_DIR}/collect.lock"
 LAST_COLLECT_FILE="${STATE_DIR}/last-collect.json"
 ORPHAN_MOUNTS_FILE="${STATE_DIR}/orphan-mounts.json"
+IDLE_SLEEP_FILE="${STATE_DIR}/idle-sleep.json"
 
 die() {
   echo "ERROR: $*" >&2
@@ -61,6 +67,9 @@ Usage:
   clihost-billing.sh gc-mounts [--apply] [--yes]
                                             delete storage continuously orphaned
                                             for the retention window (dry-run)
+  clihost-billing.sh idle-sleep [--apply] [--yes]
+                                            stop opted-in apps after continuous
+                                            CPU and network inactivity (dry-run)
   clihost-billing.sh help               this message
 
 Environment:
@@ -72,6 +81,12 @@ Environment:
                             (default: /var/lib/dokku/data/storage)
   CLIHOST_GC_RETENTION_DAYS days continuously orphaned before eligibility
                             (default: 30)
+  CLIHOST_IDLE_APPS         comma-separated app allowlist (default: empty/disabled)
+  CLIHOST_IDLE_MINUTES      continuous idle window (default: 60)
+  CLIHOST_IDLE_CPU_PCT      max aggregate CPU percentage considered idle
+                            (default: 1)
+  CLIHOST_IDLE_NET_BYTES    max network bytes per observation considered idle;
+                            permits small keepalives (default: 65536)
 EOF
 }
 
@@ -287,6 +302,8 @@ cmd_cron_line() {
 */${minutes} * * * * ${self} collect >> ${CLIHOST_BILLING_DIR}/state/collect.log 2>&1
 # clihost orphan storage GC (tracks for 30 days before deleting; dry-run is not useful in cron)
 17 3 * * * ${self} gc-mounts --apply --yes >> ${CLIHOST_BILLING_DIR}/state/gc-mounts.log 2>&1
+# idle sleep is opt-in: replace the example allowlist, then uncomment this line
+# */${minutes} * * * * CLIHOST_IDLE_APPS=clihost-example ${self} idle-sleep --apply --yes >> ${CLIHOST_BILLING_DIR}/state/idle-sleep.log 2>&1
 EOF
 }
 
@@ -640,6 +657,211 @@ if not found:
 PY
 }
 
+# Stop only explicitly allowlisted apps after a continuous low-CPU window with
+# no change in Docker's cumulative NetIO counters. This is host-side sleeping,
+# not request-triggered waking: an operator starts a sleeping app with
+# `dokku ps:start APP` (or provides a separate wake-aware proxy integration).
+cmd_idle_sleep() {
+  local apply="false"
+  local yes="false"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply) apply="true" ;;
+      --yes) yes="true" ;;
+      --) shift; break ;;
+      -*) die "unknown option: $1" ;;
+      *) die "idle-sleep takes no operands" ;;
+    esac
+    shift
+  done
+  [ "$#" -eq 0 ] || die "idle-sleep takes no operands"
+
+  if [ -z "${CLIHOST_IDLE_APPS//[[:space:],]/}" ]; then
+    echo "idle-sleep disabled: CLIHOST_IDLE_APPS is empty"
+    return 0
+  fi
+  if [ "${apply}" = "true" ] && [ ! -t 0 ] && [ "${yes}" != "true" ]; then
+    die "idle-sleep --apply in non-TTY mode requires --yes"
+  fi
+  [[ "${CLIHOST_IDLE_MINUTES}" =~ ^[1-9][0-9]*$ ]] \
+    || die "CLIHOST_IDLE_MINUTES must be a positive integer"
+  [[ "${CLIHOST_BILLING_INTERVAL}" =~ ^[1-9][0-9]*$ ]] \
+    || die "CLIHOST_BILLING_INTERVAL must be a positive integer"
+  [[ "${CLIHOST_IDLE_CPU_PCT}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] \
+    || die "CLIHOST_IDLE_CPU_PCT must be a non-negative number"
+  [[ "${CLIHOST_IDLE_NET_BYTES}" =~ ^[0-9]+$ ]] \
+    || die "CLIHOST_IDLE_NET_BYTES must be a non-negative integer"
+
+  require_python
+  require_docker
+  command -v dokku >/dev/null 2>&1 || die "dokku CLI not found"
+  ensure_dirs
+
+  # Failure to read live stats is indeterminate, never evidence of idleness.
+  local stats_json result actions line app
+  stats_json="$(docker stats --no-stream --format '{{json .}}')"
+  result="$(
+    CLIHOST_IDLE_ALLOWLIST="${CLIHOST_IDLE_APPS}" \
+    CLIHOST_IDLE_MINUTES_VALUE="${CLIHOST_IDLE_MINUTES}" \
+    CLIHOST_IDLE_CPU_VALUE="${CLIHOST_IDLE_CPU_PCT}" \
+    CLIHOST_IDLE_NET_VALUE="${CLIHOST_IDLE_NET_BYTES}" \
+    CLIHOST_IDLE_INTERVAL="${CLIHOST_BILLING_INTERVAL}" \
+    CLIHOST_IDLE_STATE="${IDLE_SLEEP_FILE}" \
+    CLIHOST_IDLE_STATS="${stats_json}" \
+    CLIHOST_BILLING_LIB="${BILLING_LIB}" \
+    python3 <<'PY'
+import json
+import os
+import re
+import tempfile
+import time
+import sys
+
+sys.path.insert(0, os.path.dirname(os.environ["CLIHOST_BILLING_LIB"]))
+import clihost_billing_lib as lib  # noqa: E402
+
+name_re = re.compile(r"^clihost-[a-z0-9_-]+$")
+allowlist = []
+for raw in os.environ["CLIHOST_IDLE_ALLOWLIST"].split(","):
+    app = raw.strip()
+    if not app:
+        continue
+    if not name_re.fullmatch(app):
+        raise SystemExit("ERROR: invalid app in CLIHOST_IDLE_APPS: " + app)
+    if app not in allowlist:
+        allowlist.append(app)
+
+idle_seconds = int(os.environ["CLIHOST_IDLE_MINUTES_VALUE"]) * 60
+cpu_limit = float(os.environ["CLIHOST_IDLE_CPU_VALUE"])
+net_limit = int(os.environ["CLIHOST_IDLE_NET_VALUE"])
+interval = int(os.environ["CLIHOST_IDLE_INTERVAL"])
+state_path = os.environ["CLIHOST_IDLE_STATE"]
+now = int(time.time())
+
+try:
+    with open(state_path, "r", encoding="utf-8") as handle:
+        saved = json.load(handle)
+except FileNotFoundError:
+    saved = {"version": 1, "apps": {}}
+except (OSError, ValueError) as exc:
+    raise SystemExit("ERROR: cannot read valid idle state %s: %s" % (state_path, exc))
+if saved.get("version") != 1 or not isinstance(saved.get("apps"), dict):
+    raise SystemExit("ERROR: unsupported idle state format: " + state_path)
+
+live = {}
+for text in os.environ.get("CLIHOST_IDLE_STATS", "").splitlines():
+    text = text.strip()
+    if not text:
+        continue
+    try:
+        row = json.loads(text)
+    except ValueError as exc:
+        raise SystemExit("ERROR: invalid docker stats JSON: %s" % exc)
+    name = row.get("Name") or row.get("Container") or ""
+    app = name.split(".", 1)[0]
+    if app not in allowlist or not name.startswith(app + ".web."):
+        continue
+    cpu = lib.parse_cpu_perc(row.get("CPUPerc"))
+    net_bytes = lib.parse_net_io(row.get("NetIO"))
+    if net_bytes is None:
+        raise SystemExit("ERROR: missing NetIO counters for " + name)
+    aggregate = live.setdefault(app, {"cpu_pct": 0.0, "net_bytes": 0})
+    aggregate["cpu_pct"] += cpu
+    aggregate["net_bytes"] += net_bytes
+
+current = {}
+actions = []
+previous_apps = saved["apps"]
+for app in allowlist:
+    metrics = live.get(app)
+    if metrics is None:
+        print("not running: " + app)
+        continue
+    previous = previous_apps.get(app)
+    net_bytes = metrics["net_bytes"]
+    cpu_pct = metrics["cpu_pct"]
+    activity_reason = None
+    if previous is None:
+        activity_reason = "first observation"
+    else:
+        try:
+            last_seen = int(previous["last_seen"])
+            old_net = int(previous["net_bytes"])
+            idle_since = int(previous["idle_since"])
+        except (KeyError, TypeError, ValueError):
+            raise SystemExit("ERROR: invalid idle state for " + app)
+        if last_seen < 0 or idle_since < 0 or last_seen > now or idle_since > now:
+            raise SystemExit("ERROR: invalid idle timestamps for " + app)
+        if now - last_seen > 2.5 * interval:
+            activity_reason = "observation gap"
+        elif net_bytes < old_net:
+            activity_reason = "network counter reset"
+        elif net_bytes - old_net > net_limit:
+            activity_reason = "network"
+        elif cpu_pct > cpu_limit:
+            activity_reason = "cpu"
+
+    if activity_reason is not None:
+        idle_since = now
+        if activity_reason == "first observation":
+            print("tracking %s (first observation)" % app)
+        else:
+            print("activity on %s (%s); idle window reset" % (app, activity_reason))
+    age = now - idle_since
+    current[app] = {
+        "idle_since": idle_since,
+        "last_seen": now,
+        "net_bytes": net_bytes,
+    }
+    if age >= idle_seconds:
+        actions.append(app)
+        print("eligible %s (idle %d/%d minutes)" %
+              (app, age // 60, idle_seconds // 60))
+    elif activity_reason is None:
+        print("tracking %s (idle %d/%d minutes)" %
+              (app, age // 60, idle_seconds // 60))
+
+state_dir = os.path.dirname(state_path)
+fd, tmp_path = tempfile.mkstemp(prefix=".idle-sleep.", dir=state_dir, text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"version": 1, "apps": current}, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, state_path)
+except BaseException:
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+    raise
+
+for app in actions:
+    print("ACTION\t" + app)
+PY
+  )"
+
+  actions=""
+  while IFS= read -r line; do
+    case "${line}" in
+      $'ACTION\t'*) actions+="${line#*$'\t'}"$'\n' ;;
+      *) printf '%s\n' "${line}" ;;
+    esac
+  done <<< "${result}"
+
+  while IFS= read -r app; do
+    [ -n "${app}" ] || continue
+    validate_app_name "${app}"
+    if [ "${apply}" != "true" ]; then
+      echo "would run: dokku ps:stop ${app}"
+    else
+      dokku ps:stop "${app}"
+      echo "slept ${app}; wake with: dokku ps:start ${app}"
+    fi
+  done <<< "${actions}"
+}
+
 main() {
   local command="${1:-}"
   case "${command}" in
@@ -671,6 +893,10 @@ main() {
     gc-mounts)
       shift
       cmd_gc_mounts "$@"
+      ;;
+    idle-sleep)
+      shift
+      cmd_idle_sleep "$@"
       ;;
     -h|--help|help)
       usage

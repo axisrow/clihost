@@ -58,6 +58,11 @@ class TestParsers(unittest.TestCase):
     def test_parse_mem_usage_edge(self):
         self.assertEqual(lib.parse_mem_usage("--"), (0, 0))
         self.assertEqual(lib.parse_mem_usage(None), (0, 0))
+
+    def test_parse_net_io(self):
+        self.assertEqual(lib.parse_net_io("1.2MB / 34kB"), 1_234_000)
+        self.assertEqual(lib.parse_net_io("50B / 50B"), 100)
+        self.assertIsNone(lib.parse_net_io("--"))
         used, limit = lib.parse_mem_usage("1.5GiB / 7.6GiB")
         self.assertEqual(used, int(round(1.5 * 1024 ** 3)))
 

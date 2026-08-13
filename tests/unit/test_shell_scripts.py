@@ -7,6 +7,7 @@ import shlex
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -121,25 +122,27 @@ class TestEntrypointRegressions(unittest.TestCase):
         # ValueError at import time for a malformed Python-owned var (e.g.
         # MAX_TERMINALS, SECURE_COOKIES) that the shell-side contract does not
         # validate. Backgrounding the proxy with a bare `&` and never checking
-        # it before `exec sshd` would leave the container "healthy" (sshd up)
-        # with its only HTTP service dead. The entrypoint must capture the
-        # proxy's PID and fail closed if it does not survive a short grace
-        # window.
+        # it before the final `exec` would leave the container "healthy"
+        # (sshd/CMD up) with its only HTTP service dead. The entrypoint must
+        # capture the proxy's PID and fail closed if it does not survive a
+        # short grace window. Since #117 the final line is `exec "$@"` (honors
+        # an operator-supplied Docker CMD override) instead of a hardcoded
+        # `exec /usr/sbin/sshd -D -e`.
         proxy_launch_pos = self.text.find(
             'runuser -u "${TTYD_USER}" -- python3 /app/ttyd_proxy.py &'
         )
         pid_capture_pos = self.text.find("PROXY_PID=$!")
-        sshd_pos = self.text.find("exec /usr/sbin/sshd -D -e")
+        exec_pos = self.text.rfind('exec "$@"')
         self.assertGreater(proxy_launch_pos, -1, "proxy launch line not found")
         self.assertGreater(
             pid_capture_pos, -1,
             "entrypoint.sh must capture the proxy PID ($!) to verify startup",
         )
         self.assertGreater(pid_capture_pos, proxy_launch_pos)
-        self.assertGreater(sshd_pos, -1)
+        self.assertGreater(exec_pos, -1, "final exec \"$@\" line not found")
         self.assertLess(
-            pid_capture_pos, sshd_pos,
-            "PID capture must happen before exec sshd",
+            pid_capture_pos, exec_pos,
+            "PID capture must happen before the final exec",
         )
         # A liveness check (kill -0) must run between the PID capture and the
         # final exec, and abort (die/exit) on failure rather than continue
@@ -150,7 +153,7 @@ class TestEntrypointRegressions(unittest.TestCase):
             "entrypoint.sh must verify the proxy process is still alive",
         )
         self.assertGreater(liveness_pos, pid_capture_pos)
-        self.assertLess(liveness_pos, sshd_pos)
+        self.assertLess(liveness_pos, exec_pos)
         self.assertIn("TTYD HTTP proxy exited immediately after startup", self.text)
 
     def test_python_config_validated_before_destructive_actions(self):
@@ -2815,6 +2818,8 @@ class TestClihostBillingScript(unittest.TestCase):
             self.assertRegex(out.stdout, r"\*/\d+ \* \* \* \*")
             self.assertIn("crontab -e", out.stdout)
             self.assertIn("gc-mounts --apply --yes", out.stdout)
+            self.assertIn("CLIHOST_IDLE_APPS=clihost-example", out.stdout)
+            self.assertIn("idle-sleep --apply --yes", out.stdout)
 
     def test_report_on_synthetic_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3193,6 +3198,137 @@ printf '\n' >> "${CLIHOST_TEST_LOG}"
             )
             self.assertNotEqual(out.returncode, 0)
             self.assertTrue(orphan.is_dir())
+
+    def _make_idle_sleep_fakes(self, tmp_path, stats_lines):
+        log = tmp_path / "idle-commands.log"
+        log.write_text("")
+        fake_docker = tmp_path / "docker"
+        fake_docker.write_text(
+            "#!/bin/bash\n"
+            "printf 'docker' >> \"${CLIHOST_TEST_LOG}\"\n"
+            "printf ' %q' \"$@\" >> \"${CLIHOST_TEST_LOG}\"\n"
+            "printf '\\n' >> \"${CLIHOST_TEST_LOG}\"\n"
+            "if [ \"${1:-}\" = stats ]; then\n"
+            f"cat <<'EOF'\n{stats_lines}EOF\n"
+            "else\n"
+            "  exit 2\n"
+            "fi\n"
+        )
+        fake_docker.chmod(0o755)
+        fake_dokku = tmp_path / "dokku"
+        fake_dokku.write_text(
+            "#!/bin/bash\n"
+            "printf 'dokku' >> \"${CLIHOST_TEST_LOG}\"\n"
+            "printf ' %q' \"$@\" >> \"${CLIHOST_TEST_LOG}\"\n"
+            "printf '\\n' >> \"${CLIHOST_TEST_LOG}\"\n"
+        )
+        fake_dokku.chmod(0o755)
+        return log
+
+    def test_idle_sleep_is_disabled_without_explicit_app_allowlist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            out = self._run(["idle-sleep"], tmp_path / "billing")
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("CLIHOST_IDLE_APPS is empty", out.stdout)
+
+    def test_idle_sleep_first_observation_only_starts_tracking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            log = self._make_idle_sleep_fakes(
+                tmp_path,
+                '{"Name":"clihost-good.web.1","CPUPerc":"0.10%","NetIO":"100B / 100B"}\n',
+            )
+            out = self._run(
+                ["idle-sleep", "--apply", "--yes"], tmp_path / "billing",
+                extra_path=str(tmp_path), env_extra={
+                    "CLIHOST_TEST_LOG": str(log),
+                    "CLIHOST_IDLE_APPS": "clihost-good",
+                    "CLIHOST_IDLE_MINUTES": "1",
+                },
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("tracking clihost-good", out.stdout)
+            self.assertNotIn("dokku", log.read_text())
+
+    def test_idle_sleep_stops_only_after_continuous_cpu_and_network_idle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            billing = tmp_path / "billing"
+            state_dir = billing / "state"
+            state_dir.mkdir(parents=True)
+            now = int(time.time())
+            (state_dir / "idle-sleep.json").write_text(json.dumps({
+                "version": 1,
+                "apps": {"clihost-good": {
+                    "idle_since": now - 3600,
+                    "last_seen": now - 300,
+                    "net_bytes": 100,
+                }},
+            }))
+            log = self._make_idle_sleep_fakes(
+                tmp_path,
+                # 100 bytes since the last observation is below the default
+                # keepalive allowance and must not reset the idle window.
+                '{"Name":"clihost-good.web.1","CPUPerc":"0.10%","NetIO":"100B / 100B"}\n',
+            )
+            env = {
+                "CLIHOST_TEST_LOG": str(log),
+                "CLIHOST_IDLE_APPS": "clihost-good",
+                "CLIHOST_IDLE_MINUTES": "30",
+            }
+
+            dry_run = self._run(
+                ["idle-sleep"], billing, extra_path=str(tmp_path), env_extra=env,
+            )
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            self.assertIn("would run: dokku ps:stop clihost-good", dry_run.stdout)
+            self.assertNotIn("dokku", log.read_text())
+
+            refused = self._run(
+                ["idle-sleep", "--apply"], billing,
+                extra_path=str(tmp_path), env_extra=env,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("non-TTY mode requires --yes", refused.stderr)
+
+            applied = self._run(
+                ["idle-sleep", "--apply", "--yes"], billing,
+                extra_path=str(tmp_path), env_extra=env,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            self.assertIn("dokku ps:stop clihost-good", log.read_text())
+
+    def test_idle_sleep_network_activity_resets_idle_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            billing = tmp_path / "billing"
+            state_dir = billing / "state"
+            state_dir.mkdir(parents=True)
+            now = int(time.time())
+            (state_dir / "idle-sleep.json").write_text(json.dumps({
+                "version": 1,
+                "apps": {"clihost-good": {
+                    "idle_since": now - 3600,
+                    "last_seen": now - 300,
+                    "net_bytes": 100,
+                }},
+            }))
+            log = self._make_idle_sleep_fakes(
+                tmp_path,
+                '{"Name":"clihost-good.web.1","CPUPerc":"0.10%","NetIO":"100kB / 50B"}\n',
+            )
+            out = self._run(
+                ["idle-sleep", "--apply", "--yes"], billing,
+                extra_path=str(tmp_path), env_extra={
+                    "CLIHOST_TEST_LOG": str(log),
+                    "CLIHOST_IDLE_APPS": "clihost-good",
+                    "CLIHOST_IDLE_MINUTES": "30",
+                },
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("activity on clihost-good", out.stdout)
+            self.assertNotIn("dokku", log.read_text())
 
     def test_collect_builds_samples_from_docker(self):
         with tempfile.TemporaryDirectory() as tmp:

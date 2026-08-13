@@ -124,6 +124,20 @@ def parse_mem_usage(value):
     return (used, limit)
 
 
+def parse_net_io(value):
+    """Parse Docker's cumulative ``NetIO`` field into total transferred bytes.
+
+    Return ``None`` unless both received and transmitted counters are present,
+    allowing safety-sensitive callers to treat missing data as indeterminate.
+    """
+    if value is None:
+        return None
+    parts = str(value).split("/")
+    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+        return None
+    return _parse_one_size(parts[0]) + _parse_one_size(parts[1])
+
+
 def parse_size_field(value):
     """Parse a ``docker ps -s`` Size field into (rootfs_bytes, virtual_bytes).
 
