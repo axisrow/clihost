@@ -56,8 +56,10 @@ class TestTTYDProxyPortLease(unittest.TestCase):
         handler = MagicMock()
         handler._check_auth.return_value = "alice"
         handler.path = "/ttyd1/"
+        handler.context = app.AppContext(app.AppSettings(), manager, MagicMock(), 0.0)
+        handler.manager = manager
 
-        with patch.object(app, "ttyd_manager", manager), patch.object(
+        with patch.object(
             app, "is_websocket_request", return_value=False
         ), patch.object(app, "proxy_ttyd_http", side_effect=blocked_proxy):
             request = threading.Thread(

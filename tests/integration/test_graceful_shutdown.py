@@ -32,8 +32,9 @@ class GracefulShutdownTest(unittest.TestCase):
         # HTTP server binds, overrunning this test's listen deadline.
         child_code = (
             "from ttydproxy import app\n"
-            "app.ttyd_manager.create_terminal = lambda wait=False: None\n"
-            "app.main()\n"
+            "manager = app.TTYDManager(base_port=7681, max_terminals=1, ttyd_user='hapi')\n"
+            "manager.create_terminal = lambda wait=False: None\n"
+            "app.main(manager=manager)\n"
         )
         proc = subprocess.Popen(
             [sys.executable, "-c", child_code],
