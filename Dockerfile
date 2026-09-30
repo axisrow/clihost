@@ -24,7 +24,7 @@ RUN NODE_VERSION="22.14.0" && \
       exit 1; \
     fi && \
     apt-get update && \
-    apt-get install -y --no-install-recommends bubblewrap ca-certificates curl gh git openssh-server python3-pip python3-venv rsync tini tmux util-linux xz-utils && \
+    apt-get install -y --no-install-recommends bubblewrap ca-certificates curl gh git libatomic1 openssh-server python3-pip python3-venv rsync tini tmux util-linux xz-utils && \
     { for i in 1 2 3 4 5; do curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" && break || sleep 10; done } && \
     tar -xJf "node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -C /usr/local --strip-components=1 --no-same-owner && \
     rm "node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" && \
