@@ -1,7 +1,7 @@
 {
   "cron": [
     {
-      "command": "bash /home/hapi/review-bot/run-review.sh >> /home/hapi/review-bot/cron.log 2>&1",
+      "command": "bash /home/hapi/review-bot/run-review.sh",
       "schedule": "43 * * * *"
     }
   ]
