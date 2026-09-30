@@ -81,9 +81,10 @@ fi
 
 # Прочие non-npm компоненты тоже управляются INSTALL_*-флагом, но не входят в
 # cli-packages.txt и cache-busting хеш: SSH-tunnel провайдеры (curl-пребилты,
-# issue #79) и ao (собирается из исходников в Go build-stage по AO_REF, #76/#77).
+# issue #79), ao (собирается из исходников в Go build-stage по AO_REF, #76/#77)
+# и codehelper (pip из PyPI; cache-bust через ADD PyPI JSON в самом Dockerfile).
 # Пробрасываем каждый флаг в сборку, если задан.
-for nonnpm_key in INSTALL_CLOUDFLARED INSTALL_CHISEL INSTALL_AO; do
+for nonnpm_key in INSTALL_CLOUDFLARED INSTALL_CHISEL INSTALL_AO INSTALL_CODEHELPER; do
   if [ -n "${!nonnpm_key:-}" ]; then
     validate_bool "${nonnpm_key}" "${!nonnpm_key}"
     BUILD_ARGS+=(--build-arg "${nonnpm_key}=${!nonnpm_key}")

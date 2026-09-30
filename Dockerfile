@@ -8,6 +8,7 @@ ARG INSTALL_HAPI=true
 ARG INSTALL_CLOUDFLARED=true
 ARG INSTALL_CHISEL=true
 ARG INSTALL_AO=true
+ARG INSTALL_CODEHELPER=true
 
 FROM debian:bookworm-slim AS runtime-base
 
@@ -206,6 +207,7 @@ ARG INSTALL_AO=true
 ARG INSTALL_HERMES=true
 ARG INSTALL_CLOUDFLARED=true
 ARG INSTALL_CHISEL=true
+ARG INSTALL_CODEHELPER=true
 
 COPY --from=npm-manifest-claude-code /manifest.json /tmp/npm-manifests/claude-code.json
 COPY --from=npm-manifest-codex /manifest.json /tmp/npm-manifests/codex.json
@@ -267,6 +269,27 @@ RUN case "${INSTALL_AO}" in \
         exit 1 ;; \
     esac && \
     rm -f /tmp/ao.bin
+
+# Install codehelper (axisrow, PyPI) — manages generated Claude Code wrapper
+# scripts in ~/.local/bin. Pure-Python, no runtime deps. Gated by
+# INSTALL_CODEHELPER with a strict true|false case (fail closed, like Hermes).
+# The PyPI JSON ADD is the cache-bust manifest (npm-manifest style): a newly
+# published version changes it and re-runs the unpinned pip install below.
+# Caveat vs the per-tool npm manifest stages: the ADD fetches even when the
+# tool is disabled — accepted, it is one small JSON and only invalidates the
+# cheap COPY layers below.
+ADD https://pypi.org/pypi/codehelper/json /tmp/codehelper-latest.json
+RUN case "${INSTALL_CODEHELPER}" in \
+      false) \
+        echo "Skipping codehelper (INSTALL_CODEHELPER=false)" ;; \
+      true) \
+        { for i in 1 2 3 4 5; do pip install --break-system-packages codehelper && break || sleep 10; done } && \
+        which codehelper ;; \
+      *) \
+        echo "ERROR: INSTALL_CODEHELPER='${INSTALL_CODEHELPER}' is invalid; must be 'true' or 'false'" >&2; \
+        exit 1 ;; \
+    esac && \
+    rm -f /tmp/codehelper-latest.json
 
 # Create app directory for TTYD proxy
 RUN mkdir -p /app /bin
