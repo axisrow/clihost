@@ -236,19 +236,22 @@ RUN chmod +x /tmp/install-cli.sh && \
     npm cache clean --force && \
     rm -rf /tmp/*
 
-# Install Hermes Agent (Nous Research) — git clone + pip, no venv/uv.
-# Gated by INSTALL_HERMES so it can be dropped from lighter images (issue #57).
-# Strict boolean: only true/false accepted; fail closed on anything else (e.g.
-# "False", "0") so a misconfigured build never silently ships Hermes.
+# Install Hermes Agent (Nous Research) — official shell installer. Upstream
+# hermes-agent no longer builds via pip ("distributed via the shell installer,
+# Docker image, or Nix" — their setup.py hard-fails), so the old git+pip path
+# is dead. Gated by INSTALL_HERMES so it can be dropped from lighter images
+# (issue #57). Strict boolean: only true/false accepted; fail closed on
+# anything else (e.g. "False", "0") so a misconfigured build never silently
+# ships Hermes.
 RUN case "${INSTALL_HERMES}" in \
       false) \
         echo "Skipping Hermes Agent (INSTALL_HERMES=false)" ;; \
       true) \
-        { for i in 1 2 3 4 5; do git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && break || { rm -rf /tmp/hermes-agent; sleep 10; }; done } && \
-        cd /tmp/hermes-agent && \
-        { for i in 1 2 3 4 5; do pip install --break-system-packages '.[all,messaging]' && break || sleep 10; done } && \
-        which hermes && \
-        rm -rf /tmp/hermes-agent ;; \
+        { for i in 1 2 3; do curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive && break || sleep 10; done } && \
+        BIN="$(command -v hermes || find /root/.local /usr/local /opt -maxdepth 4 -type f -name hermes 2>/dev/null | head -1)" && \
+        [ -n "$BIN" ] && \
+        install -m 0755 "$BIN" /usr/local/bin/hermes && \
+        rm -rf /root/.cache/hermes ;; \
       *) \
         echo "ERROR: INSTALL_HERMES='${INSTALL_HERMES}' is invalid; must be 'true' or 'false'" >&2; \
         exit 1 ;; \
