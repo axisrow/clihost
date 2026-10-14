@@ -28,6 +28,63 @@ class TestTTYDHandlerVKBD(unittest.TestCase):
         self.assertTrue(resolve_vkbd_enabled("/ttyd?vkbd=true&vkbd=false", False))
 
 
+class DeadTerminalPageTest(unittest.TestCase):
+    """A browser navigation to a dead /ttydN page must redirect to the
+    dashboard — like an expired session does — not serve a raw JSON blob."""
+
+    class _Probe(app.TTYDProxyHandler):
+        def __init__(self, terminal):
+            self._terminal = terminal
+            self.path = "/ttyd7"
+            self.json_response = None
+            self.status = None
+            self.headers_sent = {}
+            self.ended = False
+            self.rendered = None
+
+        def _check_auth(self, redirect=False):
+            del redirect
+            return "alice"
+
+        def send_json(self, status, data, extra_headers=None):
+            del extra_headers
+            self.json_response = (status, data)
+
+        def send_response(self, status, message=None):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.headers_sent[key] = value
+
+        def end_headers(self):
+            self.ended = True
+
+        def send_html(self, status, html, extra_headers=None, csp=None):
+            self.rendered = (status, html)
+
+    def _run(self, terminal):
+        handler = self._Probe(terminal)
+        handler.context = app.AppContext(
+            settings=app.AppSettings(), manager=MagicMock(),
+            limiters=MagicMock(), server_start_time=0.0,
+        )
+        handler.context.manager.get_terminal.return_value = terminal
+        handler.handle_ttyd(7)
+        return handler
+
+    def test_dead_terminal_redirects_to_dashboard(self):
+        handler = self._run(None)
+        self.assertEqual(handler.status, 302)
+        self.assertEqual(handler.headers_sent.get("Location"), "/")
+        self.assertTrue(handler.ended)
+        self.assertIsNone(handler.json_response, "must not emit JSON on a browser nav")
+
+    def test_live_terminal_renders_page(self):
+        handler = self._run({"id": 7, "port": 7687})
+        self.assertIsNone(handler.status)
+        self.assertIsNotNone(handler.rendered)
+
+
 class TestTTYDProxyPortLease(unittest.TestCase):
     @patch("ttydproxy.manager.subprocess.run")
     @patch("ttydproxy.manager.subprocess.Popen")
