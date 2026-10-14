@@ -2283,8 +2283,10 @@ class TestDockerNetworkRetries(unittest.TestCase):
     def test_ao_git_fetch_retried(self):
         self._assert_wrapped("git fetch --depth 1 origin")
 
-    def test_hermes_git_clone_retried(self):
-        self._assert_wrapped("git clone --depth 1 https://github.com/NousResearch")
+    def test_hermes_installer_curl_retried(self):
+        # eba6b3d switched hermes from pip/GitHub to the official shell
+        # installer; the old git-clone step no longer exists in the Dockerfile.
+        self._assert_wrapped("hermes-agent.nousresearch.com/install.sh")
 
     def test_hermes_pip_install_retried(self):
         self._assert_wrapped("pip install --break-system-packages")
