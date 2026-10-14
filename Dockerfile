@@ -247,7 +247,7 @@ RUN case "${INSTALL_HERMES}" in \
       false) \
         echo "Skipping Hermes Agent (INSTALL_HERMES=false)" ;; \
       true) \
-        { for i in 1 2 3; do curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive && break || sleep 10; done } && \
+        { for i in 1 2 3 4 5; do curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive && break || sleep 10; done } && \
         BIN="$(command -v hermes || find /root/.local /usr/local /opt -maxdepth 4 -type f -name hermes 2>/dev/null | head -1)" && \
         [ -n "$BIN" ] && \
         install -m 0755 "$BIN" /usr/local/bin/hermes && \
