@@ -522,7 +522,13 @@ class TTYDProxyHandler(BaseHandler):
             return
         terminal = self.manager.get_terminal(terminal_id)
         if not terminal:
-            self.send_json(404, {"error": f"Terminal ttyd{terminal_id} not found"})
+            # A browser navigation to a dead terminal (closed from another tab,
+            # or a stale id after a container restart) must land somewhere the
+            # user can act from — the dashboard — exactly like an expired
+            # session above; a raw JSON blob is not a page.
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.end_headers()
             return
         vkbd_enabled = resolve_vkbd_enabled(self.path, self.settings.virtual_keyboard)
         # Refresh the CSRF cookie: image uploads from a long-lived terminal
