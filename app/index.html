@@ -516,12 +516,16 @@
       updateCleanupSelectionState();
     }
 
-    function loadCleanupTargets() {
+    function loadCleanupTargets(keepStatus) {
       var list = document.getElementById('cleanup-list');
       var refreshBtn = document.getElementById('refresh-cleanup-btn');
       refreshBtn.disabled = true;
       list.innerHTML = '<div class="empty-state">Loading cleanup targets...</div>';
-      setCleanupStatus('', false);
+      // Skip the status wipe when the caller just posted a result message
+      // (delete flow): clearing here would erase it before it is ever painted.
+      if (!keepStatus) {
+        setCleanupStatus('', false);
+      }
       fetch('/cleanup')
         .then(function(r) {
           if (handleAuthError(r, {
@@ -594,7 +598,7 @@
             parts.push('Skipped: ' + data.skipped.map(function(item) { return item.id; }).join(', '));
           }
           setCleanupStatus(parts.join(' '), data.errors && data.errors.length > 0);
-          loadCleanupTargets();
+          loadCleanupTargets(true);
         })
         .catch(function(err) {
           log('[cleanup] Failed to delete cleanup targets:', err);
